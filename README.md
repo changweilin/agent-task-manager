@@ -65,6 +65,24 @@ npm.cmd run dev -- --host 0.0.0.0 --port 8787
 - LAN：管理台會顯示類似 `http://192.168.x.x:8787` 的網址
 - Tailscale：管理台會顯示類似 `http://100.x.y.z:8787` 的網址
 
+## GitHub Pages 展示部署
+
+本專案可透過 GitHub Actions 部署成 GitHub Pages 展示頁。展示頁只輸出靜態檔案，會強制啟用展示模式，使用去識別化樣本資料，不會連線到本機的 `/api`、WebSocket、LAN、Tailscale、PowerShell、ADB 或任何實際 dev server。
+
+部署流程：
+
+1. 到 GitHub repository 的 **Settings → Pages**，將 Source 設為 **GitHub Actions**。
+2. 推送到 `main`，或到 Actions 手動執行 **Deploy GitHub Pages Demo** workflow。
+3. Workflow 會執行 `npm ci --ignore-scripts` 與 `npm run build:pages`，再把 `dist/` 上傳到 GitHub Pages。
+
+展示模式的隔離設計：
+
+- 不打包 `dev-projects.json`、`.dev-manager/`、log、state 或任何本機設定。
+- 不輸出 `mobile-install.js`，避免展示頁帶入 APK/ADB 輔助流程。
+- `dist/demo-config.js` 會將 `window.AGENT_TASK_MANAGER_DEMO` 設為 `true`。
+- 前端在展示模式下只讀取內建 mock API；所有啟動、停止、重啟、終端、資料夾、防火牆、複製連線等操作都會停用或顯示展示提示。
+- 樣本資料會移除本機路徑、PID、stdout/stderr、LAN IP、Tailscale IP 與實際 URL，改用 `/demo/workspace/...` 與 `https://demo.invalid/...` 類型的展示值。
+
 ## 快速上手與使用範例
 
 ### 使用 Web UI
@@ -162,13 +180,18 @@ http://100.x.y.z:5173
 ```text
 agent-task-manager/
 ├─ .dev-manager/              # 執行時狀態、log 與偏好設定；由工具自動產生
+├─ .github/workflows/
+│  └─ deploy-pages.yml        # GitHub Pages 展示版部署 workflow
 ├─ public/
 │  ├─ app.js                  # Web UI 前端邏輯、狀態管理、API 呼叫與終端介面
+│  ├─ demo-config.js          # GitHub Pages 展示模式開關
 │  ├─ index.html              # 管理台 HTML 入口
 │  ├─ styles.css              # 管理台樣式
 │  ├─ mobile-install.js       # 行動裝置 / APK 安裝相關前端輔助邏輯
 │  ├─ logo.svg                # 管理台標誌
 │  └─ favicon.svg             # 瀏覽器圖示
+├─ scripts/
+│  └─ build-pages.js          # 產出 GitHub Pages 靜態展示版
 ├─ dev-manager.ps1            # Windows PowerShell CLI，提供掃描、啟停、狀態、log、防火牆等指令
 ├─ dev-projects.json          # 專案來源、base port、Profile、健康檢查與專案清單設定
 ├─ package.json               # Node.js 專案資訊、指令與相依套件
@@ -183,6 +206,7 @@ agent-task-manager/
 
 - `server.js`：提供靜態檔案服務、REST API、WebSocket 終端通道、專案掃描、port 分配、狀態管理、log 讀取、健康檢查、Tailscale/LAN URL 偵測、防火牆輔助與 Android APK 安裝流程。
 - `public/app.js`：管理 Web UI 狀態、專案表格、篩選排序、Profile、log 面板、終端 modal、xterm.js 互動與使用者偏好。
+- `scripts/build-pages.js`：複製靜態前端與 xterm 前端資產到 `dist/`，並把展示模式開關設為啟用，供 GitHub Pages 使用。
 - `dev-manager.ps1`：提供不依賴瀏覽器的 CLI 操作，適合批次掃描、啟停專案、查看狀態與設定 Windows 防火牆。
 - `dev-projects.json`：保存預設掃描根目錄、base port、Profile、健康檢查設定與每個被管理專案的路徑、框架、dev script、port。
 

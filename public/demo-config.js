@@ -1,0 +1,3 @@
+window.AGENT_TASK_MANAGER_DEMO = false;
+window.AGENT_TASK_MANAGER_DEMO_PAYLOAD = null;
+window.AGENT_TASK_MANAGER_DEMO_LOGS = null;

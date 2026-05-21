@@ -1,5 +1,285 @@
-import { Terminal } from '/vendor/xterm/xterm.mjs';
-import { FitAddon } from '/vendor/xterm/addon-fit.mjs';
+import { Terminal } from './vendor/xterm/xterm.mjs';
+import { FitAddon } from './vendor/xterm/addon-fit.mjs';
+
+const DEMO_MODE = window.AGENT_TASK_MANAGER_DEMO === true
+  || window.location.hostname.endsWith('.github.io')
+  || window.location.protocol === 'file:';
+const DEMO_NOTICE = '展示模式僅使用去識別化樣本資料，不會連線到本機、LAN、Tailscale，也不會執行任何指令。';
+const DEFAULT_DEMO_PAYLOAD = {
+  manager: {
+    name: 'Agent Task Manager (ATM)',
+    host: 'demo-static',
+    port: 8787,
+    localUrl: 'display-only://manager',
+    lanUrl: '',
+    tailscaleUrl: '',
+    tailscaleIp: 'demo',
+    terminalReadOnly: true,
+  },
+  config: {
+    defaultRoots: ['/demo/workspace'],
+    basePort: 5173,
+    autoRestoreOnStartup: true,
+    health: {
+      autoRestart: false,
+      failureThreshold: 3,
+    },
+    profiles: [
+      {
+        id: 'demo-core',
+        name: 'Demo Stack',
+        projectNames: ['frontend-shell', 'docs-portal'],
+      },
+    ],
+  },
+  projects: [
+    {
+      name: 'frontend-shell',
+      path: '/demo/workspace/frontend-shell',
+      framework: 'vite',
+      devScript: 'vite --host demo --port 5173',
+      port: 5173,
+      status: 'running',
+      running: true,
+      command: 'npm run dev -- --host demo --port 5173',
+      pages: [
+        { path: '/', title: 'Dashboard', source: 'demo-route', file: 'src/routes/dashboard.tsx' },
+        { path: '/projects', title: 'Project list', source: 'demo-route', file: 'src/routes/projects.tsx' },
+      ],
+      healthFailures: 0,
+      restartCount: 0,
+      mobileInstall: { supported: false, reason: '展示資料不包含 Android build 流程。' },
+    },
+    {
+      name: 'docs-portal',
+      path: '/demo/workspace/docs-portal',
+      framework: 'astro',
+      devScript: 'astro dev --host demo --port 5174',
+      port: 5174,
+      status: 'stopped',
+      running: false,
+      command: 'npm run dev -- --host demo --port 5174',
+      pages: [
+        { path: '/', title: 'Overview', source: 'demo-route', file: 'src/pages/index.astro' },
+        { path: '/guides/security', title: 'Security guide', source: 'demo-route', file: 'src/pages/guides/security.astro' },
+      ],
+      healthFailures: 0,
+      restartCount: 0,
+      mobileInstall: { supported: false, reason: '展示資料不包含 Android build 流程。' },
+    },
+    {
+      name: 'api-console',
+      path: '/demo/workspace/api-console',
+      framework: 'generic',
+      devScript: 'node server.js --host demo --port 5175',
+      port: 5175,
+      status: 'unhealthy',
+      running: true,
+      command: 'node server.js --host demo --port 5175',
+      pages: [
+        { path: '/', title: 'Console', source: 'demo-route', file: 'public/index.html' },
+      ],
+      healthFailures: 2,
+      restartCount: 1,
+      mobileInstall: { supported: false, reason: '展示資料不包含 Android build 流程。' },
+    },
+  ],
+};
+const DEFAULT_DEMO_LOGS = {
+  'frontend-shell': {
+    stdout: '[demo] Vite ready on a redacted preview endpoint.\n[demo] No local URL, LAN IP, Tailscale IP, PID, or filesystem path is included.',
+    stderr: '',
+  },
+  'docs-portal': {
+    stdout: '[demo] Service is stopped in the sample dataset.',
+    stderr: '',
+  },
+  'api-console': {
+    stdout: '[demo] Health probe returned a sample warning.',
+    stderr: '[demo] Warning: simulated health check failure for display only.',
+  },
+};
+
+function cloneDemoData(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function slugifyDemoName(value, fallback = 'demo-project') {
+  return String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64) || fallback;
+}
+
+function demoPreviewUrl(projectName, routePath = '') {
+  const slug = slugifyDemoName(projectName);
+  const route = String(routePath || '')
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '');
+  return `https://demo.invalid/${slug}${route ? `/${route}` : ''}`;
+}
+
+function sanitizeDemoCommand(command) {
+  const text = String(command || 'npm run dev')
+    .replace(/[A-Za-z]:\\[^\s"']+/g, '[local-path]')
+    .replace(/\/(?:Users|home)\/[^\s"']+/g, '[local-path]')
+    .replace(/--host\s+\S+/g, '--host demo')
+    .replace(/--hostname\s+\S+/g, '--hostname demo')
+    .slice(0, 180);
+  return text || 'npm run dev';
+}
+
+function sanitizeDemoPayload(rawPayload = DEFAULT_DEMO_PAYLOAD) {
+  const source = cloneDemoData(rawPayload || DEFAULT_DEMO_PAYLOAD);
+  const now = new Date().toISOString();
+  const projects = Array.isArray(source.projects) ? source.projects : [];
+  const safeProjects = projects.map((project, index) => {
+    const name = slugifyDemoName(project.name, `demo-project-${index + 1}`);
+    const localUrl = demoPreviewUrl(name);
+    const pages = Array.isArray(project.pages) ? project.pages : [];
+    return {
+      ...project,
+      name,
+      path: `/demo/workspace/${name}`,
+      devScript: sanitizeDemoCommand(project.devScript),
+      command: sanitizeDemoCommand(project.command || project.devScript),
+      pid: null,
+      stdout: '',
+      stderr: '',
+      localUrl,
+      lanUrl: '',
+      tailscaleUrl: '',
+      lanMode: false,
+      lanReady: false,
+      lanIpAtStart: null,
+      tailscaleMode: false,
+      tailscaleReady: false,
+      tailscaleIpAtStart: null,
+      probe: {
+        ok: project.status !== 'unhealthy',
+        checkedAt: now,
+        error: project.status === 'unhealthy' ? 'demo health warning' : '',
+      },
+      lastHealthAt: now,
+      lastHealthOk: project.status !== 'unhealthy',
+      lastHealthError: project.status === 'unhealthy' ? 'demo health warning' : '',
+      startedAt: project.running ? now : null,
+      lastRestartAt: project.restartCount ? now : null,
+      pages: pages.map((page) => ({
+        ...page,
+        localUrl: page.pattern ? '' : demoPreviewUrl(name, page.path),
+        lanUrl: '',
+        tailscaleUrl: '',
+      })),
+      mobileInstall: project.mobileInstall || { supported: false, reason: '展示資料不包含 Android build 流程。' },
+    };
+  });
+  const safeNames = new Set(safeProjects.map((project) => project.name));
+
+  return {
+    manager: {
+      name: 'Agent Task Manager (ATM)',
+      host: 'demo-static',
+      port: Number(source.manager?.port || 8787),
+      localUrl: 'display-only://manager',
+      lanUrl: '',
+      tailscaleUrl: '',
+      tailscaleIp: 'demo',
+      terminalReadOnly: true,
+    },
+    config: {
+      defaultRoots: ['/demo/workspace'],
+      basePort: Number(source.config?.basePort || 5173),
+      autoRestoreOnStartup: source.config?.autoRestoreOnStartup !== false,
+      health: {
+        autoRestart: source.config?.health?.autoRestart === true,
+        failureThreshold: Number(source.config?.health?.failureThreshold || 3),
+      },
+      profiles: (Array.isArray(source.config?.profiles) ? source.config.profiles : [])
+        .map((profile, index) => ({
+          id: slugifyDemoName(profile.id, `demo-profile-${index + 1}`),
+          name: String(profile.name || `Demo Profile ${index + 1}`).slice(0, 80),
+          projectNames: (Array.isArray(profile.projectNames) ? profile.projectNames : [])
+            .map((name) => slugifyDemoName(name))
+            .filter((name) => safeNames.has(name)),
+        }))
+        .filter((profile) => profile.projectNames.length),
+    },
+    projects: safeProjects,
+  };
+}
+
+function demoStatusPayload() {
+  return sanitizeDemoPayload(window.AGENT_TASK_MANAGER_DEMO_PAYLOAD || DEFAULT_DEMO_PAYLOAD);
+}
+
+function demoLogPayload(projectName) {
+  const logs = {
+    ...DEFAULT_DEMO_LOGS,
+    ...(window.AGENT_TASK_MANAGER_DEMO_LOGS || {}),
+  };
+  const safeName = slugifyDemoName(projectName);
+  return logs[safeName] || {
+    stdout: `[demo] ${safeName || 'project'} uses display-only logs with all local identifiers removed.`,
+    stderr: '',
+  };
+}
+
+async function demoApi(path, options = {}) {
+  const url = new URL(path, window.location.origin);
+  const method = String(options.method || 'GET').toUpperCase();
+
+  if (url.pathname === '/api/status') {
+    return demoStatusPayload();
+  }
+  if (url.pathname === '/api/logs') {
+    return demoLogPayload(url.searchParams.get('name'));
+  }
+  if (url.pathname === '/api/terminals') {
+    return { sessions: [] };
+  }
+  if (url.pathname === '/api/terminal-preferences') {
+    return method === 'GET' ? { saved: false } : { ok: true };
+  }
+  if (url.pathname === '/api/firewall/lan-command') {
+    return {
+      name: slugifyDemoName(url.searchParams.get('name')),
+      port: 'demo',
+      lanUrl: '',
+      command: '# Demo mode: no firewall command is generated.',
+    };
+  }
+  if (url.pathname.startsWith('/api/')) {
+    return demoStatusPayload();
+  }
+
+  throw new Error('Demo mode only serves local mock API responses.');
+}
+
+function showDemoNotice() {
+  showToast(DEMO_NOTICE);
+}
+
+function applyDemoModeUi() {
+  if (!DEMO_MODE) {
+    return;
+  }
+
+  document.body.classList.add('is-demo-mode');
+  if (document.querySelector('.demo-banner')) {
+    return;
+  }
+
+  const banner = document.createElement('div');
+  banner.className = 'demo-banner';
+  banner.innerHTML = `
+    <strong>GitHub Pages 展示模式</strong>
+    <span>${DEMO_NOTICE}</span>
+  `;
+  document.querySelector('.topbar')?.insertAdjacentElement('afterend', banner);
+}
 
 const TABLE_PREFERENCES_KEY = 'agentTaskManager.tablePreferences.v3';
 const THEME_PREFERENCE_KEY = 'agentTaskManager.theme.v1';
@@ -420,10 +700,10 @@ const tableColumns = [
       return `
         <div class="row-actions">
           ${renderProjectPowerAction(project, context)}
-          <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
-          <button class="row-action firewall" data-action="firewall" data-name="${escapeHtml(project.name)}" ${!project.lanUrl ? 'disabled' : ''} type="button" title="LAN 防火牆" aria-label="設定 ${escapeHtml(project.name)} 的 LAN 防火牆">${icons.firewall}</button>
+          <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
+          <button class="row-action firewall" data-action="firewall" data-name="${escapeHtml(project.name)}" ${!project.lanUrl || DEMO_MODE ? 'disabled' : ''} type="button" title="LAN 防火牆" aria-label="設定 ${escapeHtml(project.name)} 的 LAN 防火牆">${icons.firewall}</button>
           ${renderMobileInstallAction(project, context)}
-          <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
+          <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
         </div>
       `;
     },
@@ -460,7 +740,7 @@ function projectIsManagedRunning(project) {
 function renderProjectPowerAction(project, context = {}) {
   const action = projectIsManagedRunning(project) ? 'stop' : 'start';
   const label = action === 'stop' ? '停止' : '啟動';
-  const disabled = context.busy || (action === 'start' && project.status === 'external');
+  const disabled = DEMO_MODE || context.busy || (action === 'start' && project.status === 'external');
   const disabledAttr = disabled ? 'disabled' : '';
   const title = project.status === 'external' && action === 'start'
     ? '此 port 已有外部服務回應'
@@ -477,7 +757,7 @@ function mobileInstallInfo(project) {
 
 function renderMobileInstallAction(project, context = {}) {
   const mobile = mobileInstallInfo(project);
-  const disabled = context.busy || !mobile.supported;
+  const disabled = DEMO_MODE || context.busy || !mobile.supported;
   const reason = mobile.supported
     ? mobile.buildCommand || 'Build + APK'
     : mobile.reason || '此專案沒有可用的 Android APK build 流程。';
@@ -547,6 +827,10 @@ function renderUrlLink(value, label) {
     return '<span class="mono-muted">--</span>';
   }
 
+  if (DEMO_MODE) {
+    return `<span class="mono-muted" title="${escapeHtml(label)}">${escapeHtml(value)}</span>`;
+  }
+
   return `<a class="url-link" href="${escapeHtml(value)}" target="_blank" rel="noreferrer" title="開啟 ${escapeHtml(label)}">${escapeHtml(value)}</a>`;
 }
 
@@ -597,6 +881,7 @@ function renderProjectActionUrls(project) {
               type="button"
               title="${escapeHtml(targetTitle)}"
               aria-pressed="${active ? 'true' : 'false'}"
+              ${DEMO_MODE ? 'disabled' : ''}
             >
               ${escapeHtml(target.label)}
             </button>
@@ -618,9 +903,11 @@ function renderProjectActionUrls(project) {
         }
 
         return `
-          <a class="${escapeHtml(className)}" href="${escapeHtml(value)}" target="_blank" rel="noreferrer" title="${escapeHtml(targetTitle)}" aria-label="開啟 ${escapeHtml(target.label)} URL">
+          ${DEMO_MODE
+            ? `<span class="${escapeHtml(className)} is-disabled" aria-disabled="true" title="${escapeHtml(targetTitle)}">${escapeHtml(target.label)}</span>`
+            : `<a class="${escapeHtml(className)}" href="${escapeHtml(value)}" target="_blank" rel="noreferrer" title="${escapeHtml(targetTitle)}" aria-label="開啟 ${escapeHtml(target.label)} URL">
             ${escapeHtml(target.label)}
-          </a>
+          </a>`}
         `;
       }).join('')}
     </div>
@@ -732,7 +1019,7 @@ function renderProjectName(project, context = {}) {
             aria-expanded="${projectExpanded ? 'true' : 'false'}"
           >${icons.chevron}</button>
         </div>
-        <button class="project-path-button" data-open-folder data-name="${escapeHtml(project.name)}" type="button" title="開啟資料夾：${escapeHtml(project.path)}">${escapeHtml(compactPath(project.path))}</button>
+        <button class="project-path-button" data-open-folder data-name="${escapeHtml(project.name)}" type="button" title="開啟資料夾：${escapeHtml(project.path)}" ${DEMO_MODE ? 'disabled' : ''}>${escapeHtml(compactPath(project.path))}</button>
         <div class="project-name-links">
           ${pageCountControl}
           ${homeControl}
@@ -761,7 +1048,9 @@ function renderProjectPages(project, columnCount, expanded, selectedClass) {
         .filter(Boolean)
         .join(' / ');
       const routeContent = pageUrl && !page.pattern
-        ? `<a class="page-link" href="${escapeHtml(pageUrl)}" target="_blank" rel="noreferrer" title="${escapeHtml(pageUrl)}">${escapeHtml(routeLabel)}</a>`
+        ? DEMO_MODE
+          ? `<span class="page-link is-disabled" title="${escapeHtml(pageUrl)}">${escapeHtml(routeLabel)}</span>`
+          : `<a class="page-link" href="${escapeHtml(pageUrl)}" target="_blank" rel="noreferrer" title="${escapeHtml(pageUrl)}">${escapeHtml(routeLabel)}</a>`
         : `<span class="page-link ${page.pattern ? 'is-pattern' : 'is-disabled'}" title="${page.pattern ? 'Route pattern' : `${target.label} URL unavailable`}">${escapeHtml(routeLabel)}</span>`;
 
       return `
@@ -827,6 +1116,10 @@ function applyTheme(theme, { persist = false } = {}) {
 }
 
 async function api(path, options = {}) {
+  if (DEMO_MODE) {
+    return demoApi(path, options);
+  }
+
   const response = await fetch(path, {
     headers: {
       'content-type': 'application/json',
@@ -1450,7 +1743,9 @@ function render() {
   syncProjectPanelState(projects);
   const runningCount = payload.projects.filter((project) => ['running', 'restarting', 'unhealthy'].includes(project.status)).length;
 
-  elements.managerUrl.textContent = payload.manager.tailscaleUrl || payload.manager.lanUrl || payload.manager.localUrl || '管理介面尚未就緒';
+  elements.managerUrl.textContent = DEMO_MODE
+    ? 'GitHub Pages 展示模式'
+    : payload.manager.tailscaleUrl || payload.manager.lanUrl || payload.manager.localUrl || '管理介面尚未就緒';
   elements.tailscaleIp.textContent = payload.manager.tailscaleIp || '未連線';
   elements.runningCount.textContent = String(runningCount);
   elements.projectCount.textContent = `${payload.projects.length} 個`;
@@ -1470,6 +1765,16 @@ function render() {
   if (document.activeElement !== elements.healthThresholdInput) {
     elements.healthThresholdInput.value = payload.config.health?.failureThreshold || 3;
   }
+  elements.discoverButton.disabled = DEMO_MODE;
+  elements.rootsInput.disabled = DEMO_MODE;
+  elements.addRootButton.disabled = DEMO_MODE;
+  elements.basePortInput.disabled = DEMO_MODE;
+  elements.copyManagerLocal.disabled = DEMO_MODE;
+  elements.copyManagerLan.disabled = DEMO_MODE;
+  elements.copyManagerTail.disabled = DEMO_MODE;
+  elements.autoRestoreInput.disabled = DEMO_MODE;
+  elements.autoRestartInput.disabled = DEMO_MODE;
+  elements.healthThresholdInput.disabled = DEMO_MODE;
   elements.lastUpdated.textContent = `更新 ${new Intl.DateTimeFormat('zh-TW', {
     hour: '2-digit',
     minute: '2-digit',
@@ -1500,11 +1805,15 @@ function renderProfiles() {
   }
 
   const hasProfile = Boolean(profile);
-  elements.deleteProfileButton.disabled = !hasProfile || state.profileBusy;
-  elements.startProfileButton.disabled = !hasProfile || state.profileBusy;
-  elements.stopProfileButton.disabled = !hasProfile || state.profileBusy;
-  elements.restartProfileButton.disabled = !hasProfile || state.profileBusy;
-  elements.saveProfileButton.disabled = state.profileBusy;
+  elements.profileSelect.disabled = DEMO_MODE;
+  elements.profileNameInput.disabled = DEMO_MODE;
+  elements.profileProjectsInput.disabled = DEMO_MODE;
+  elements.useFilteredProjects.disabled = DEMO_MODE;
+  elements.deleteProfileButton.disabled = DEMO_MODE || !hasProfile || state.profileBusy;
+  elements.startProfileButton.disabled = DEMO_MODE || !hasProfile || state.profileBusy;
+  elements.stopProfileButton.disabled = DEMO_MODE || !hasProfile || state.profileBusy;
+  elements.restartProfileButton.disabled = DEMO_MODE || !hasProfile || state.profileBusy;
+  elements.saveProfileButton.disabled = DEMO_MODE || state.profileBusy;
 }
 
 function renderSortControls() {
@@ -1579,6 +1888,11 @@ function renderRows(projects) {
 }
 
 async function runAction(name, action) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return false;
+  }
+
   if (action === 'terminal') {
     openTerminalManager(name);
     return true;
@@ -1633,6 +1947,11 @@ function actionMessage(action) {
 }
 
 async function openProjectFolder(name) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   try {
     await api(`/api/projects/${encodeURIComponent(name)}/open-folder`, {
       method: 'POST',
@@ -1645,6 +1964,11 @@ async function openProjectFolder(name) {
 }
 
 async function discover() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   elements.discoverButton.disabled = true;
   try {
     commitRootInput();
@@ -1670,6 +1994,12 @@ async function discover() {
 }
 
 async function updateSettings() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    render();
+    return;
+  }
+
   try {
     state.payload = await api('/api/settings', {
       method: 'POST',
@@ -1703,6 +2033,11 @@ function parseProfileProjectNames() {
 }
 
 async function saveProfile() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   const name = elements.profileNameInput.value.trim();
   const projectNames = parseProfileProjectNames();
 
@@ -1741,6 +2076,11 @@ async function saveProfile() {
 }
 
 async function deleteProfile() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   const profile = selectedProfile();
   if (!profile) {
     return;
@@ -1766,6 +2106,11 @@ async function deleteProfile() {
 }
 
 async function runProfileAction(action) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   const profile = selectedProfile();
   if (!profile) {
     showToast('請先選擇 Profile');
@@ -1811,6 +2156,11 @@ function renderMobileInstallLog(payload) {
 }
 
 async function runMobileInstall(name) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   if (!name || state.mobileInstallBusyProject) {
     return;
   }
@@ -4805,6 +5155,11 @@ function stopTerminalPolling() {
 }
 
 async function copyText(value) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   if (!value || value === '--') {
     showToast('沒有可複製的內容');
     return;
@@ -4845,6 +5200,11 @@ function fallbackCopyText(value) {
 }
 
 async function showLanFirewallConsent() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   const project = selectedProject();
   if (!project) {
     showToast('請先選擇專案');
@@ -4872,6 +5232,11 @@ function hideLanFirewallConsent() {
 }
 
 async function runLanFirewallCommand() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
   if (!elements.firewallConsent.checked || !state.firewallProjectName) {
     showToast('請先勾選確認');
     return;
@@ -5608,6 +5973,7 @@ elements.autoRestartInput.addEventListener('change', updateSettings);
 elements.healthThresholdInput.addEventListener('change', updateSettings);
 elements.reloadLogsButton.addEventListener('click', loadLogs);
 
+applyDemoModeUi();
 state.terminalFavorites = readTerminalFavorites();
 state.terminalClaude = readTerminalClaudeSettings();
 restoreTerminalWorkspaceState();

@@ -4,7 +4,8 @@
   "private": true,
   "description": "Agent Task Manager (ATM), a local npm dev server manager with a Tailscale-friendly web UI.",
   "scripts": {
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "build:pages": "node scripts/build-pages.js"
   },
   "engines": {
     "node": ">=18"

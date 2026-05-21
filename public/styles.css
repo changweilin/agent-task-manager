@@ -150,6 +150,34 @@ button {
   border-bottom: 1px solid var(--border);
 }
 
+.demo-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 22px;
+  color: var(--connection-help-text);
+  background: var(--connection-help-bg);
+  border-bottom: 1px solid var(--connection-help-border);
+  font-size: 12px;
+}
+
+.demo-banner strong {
+  flex: 0 0 auto;
+  color: var(--graphite);
+  font-weight: 800;
+}
+
+.demo-banner span {
+  min-width: 0;
+}
+
+.is-demo-mode .row-action,
+.is-demo-mode .project-action-url,
+.is-demo-mode .project-path-button,
+.is-demo-mode .link-button {
+  cursor: default;
+}
+
 .brand-block {
   display: flex;
   align-items: center;
@@ -2994,6 +3022,13 @@ button:disabled {
     min-height: 0;
     gap: 12px;
     padding: 12px;
+  }
+
+  .demo-banner {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+    padding: 9px 12px;
   }
 
   .brand-block {

@@ -2,6 +2,7 @@
 .qa/
 dev-projects.json
 node_modules/
+dist/
 
 # Local environment and secrets
 .env
