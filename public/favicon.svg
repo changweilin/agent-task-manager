@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="serverFace" x1="26" x2="104" y1="20" y2="94" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#29343a"/>
+      <stop offset="1" stop-color="#141c20"/>
+    </linearGradient>
+    <linearGradient id="statusGlow" x1="88" x2="116" y1="22" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8ee24a"/>
+      <stop offset="1" stop-color="#28b64b"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="#f8fbfa"/>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <g fill="url(#serverFace)" stroke="#263137" stroke-width="2">
+      <rect x="18" y="15" width="92" height="22" rx="4"/>
+      <rect x="18" y="45" width="92" height="22" rx="4"/>
+      <rect x="18" y="75" width="92" height="22" rx="4"/>
+    </g>
+    <g fill="#eef5f2">
+      <rect x="31" y="23" width="9" height="9" rx="1"/>
+      <rect x="47" y="23" width="9" height="9" rx="1"/>
+      <rect x="63" y="23" width="9" height="9" rx="1"/>
+      <rect x="31" y="53" width="9" height="9" rx="1"/>
+      <rect x="47" y="53" width="9" height="9" rx="1"/>
+      <rect x="63" y="53" width="9" height="9" rx="1"/>
+      <rect x="31" y="83" width="9" height="9" rx="1"/>
+      <rect x="47" y="83" width="9" height="9" rx="1"/>
+      <rect x="63" y="83" width="9" height="9" rx="1"/>
+    </g>
+    <g fill="url(#statusGlow)" stroke="#1e933d" stroke-width="2">
+      <circle cx="96" cy="26" r="6"/>
+      <circle cx="96" cy="56" r="6"/>
+      <circle cx="80" cy="101" r="9"/>
+    </g>
+    <path d="M80 97v-12" fill="none" stroke="#1d282d" stroke-width="5"/>
+    <path d="M18 104h38" fill="none" stroke="#1d282d" stroke-width="5"/>
+    <path d="M99 104h11" fill="none" stroke="#1d282d" stroke-width="5"/>
+  </g>
+</svg>

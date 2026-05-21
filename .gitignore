@@ -1,0 +1,36 @@
+.dev-manager/
+.qa/
+dev-projects.json
+node_modules/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+*.secrets
+*.token
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.csr
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+google-services.json
+service-account*.json
+
+# Local logs and generated diagnostics
+*.log
+*.err
+*.out
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh-Hant" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dev Dock</title>
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem('devDock.theme.v1');
+          document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+        } catch (error) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">
+            <img src="/logo.svg" alt="" />
+          </div>
+          <div>
+            <h1>Dev Dock</h1>
+            <p id="managerUrl">正在讀取管理介面...</p>
+          </div>
+        </div>
+
+        <div class="topbar-status">
+          <div class="metric">
+            <span class="metric-label">Tailscale IP</span>
+            <strong id="tailscaleIp">--</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">執行中</span>
+            <strong id="runningCount">0</strong>
+          </div>
+          <button class="icon-button theme-toggle" id="themeToggleButton" type="button" title="切換主題" aria-label="切換主題" aria-pressed="false">
+            <svg class="theme-icon-moon" viewBox="0 0 24 24" focusable="false">
+              <path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a7.2 7.2 0 1 0 11 11Z" />
+            </svg>
+            <svg class="theme-icon-sun" viewBox="0 0 24 24" focusable="false">
+              <path d="M12 4V2" />
+              <path d="M12 22v-2" />
+              <path d="m4.93 4.93 1.41 1.41" />
+              <path d="m17.66 17.66 1.41 1.41" />
+              <path d="M4 12H2" />
+              <path d="M22 12h-2" />
+              <path d="m4.93 19.07 1.41-1.41" />
+              <path d="m17.66 6.34 1.41-1.41" />
+              <path d="M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
+            </svg>
+          </button>
+          <button class="icon-button" id="refreshButton" type="button" title="重新整理" aria-label="重新整理">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M20 6v5h-5" />
+              <path d="M4 18v-5h5" />
+              <path d="M19 11a7 7 0 0 0-12.1-4.8L4 9" />
+              <path d="M5 13a7 7 0 0 0 12.1 4.8L20 15" />
+            </svg>
+          </button>
+          <button class="primary-button" id="discoverButton" type="button">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M10.5 18a7.5 7.5 0 1 1 5.3-12.8A7.5 7.5 0 0 1 10.5 18Z" />
+              <path d="m16 16 4 4" />
+            </svg>
+            掃描
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="left-rail">
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>專案來源</h2>
+              <span id="projectCount">0 個</span>
+            </div>
+            <div class="root-entry-row">
+              <input id="rootsInput" type="text" spellcheck="false" aria-label="專案來源路徑" placeholder="輸入專案位置後按 Enter" />
+              <button class="copy-url primary-action root-add-button" id="addRootButton" type="button">加入</button>
+            </div>
+            <div class="root-list" id="rootList" aria-label="已加入的專案來源"></div>
+            <label class="field-row">
+              <span>Base port</span>
+              <input id="basePortInput" type="number" min="1000" max="65535" step="1" placeholder="5173" title="掃描時自動分配 port 的起點" />
+            </label>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>篩選</h2>
+            </div>
+            <div class="filter-stack" id="filterButtons" aria-label="狀態篩選">
+              <button class="filter-button is-active" data-filter="all" type="button">全部</button>
+              <button class="filter-button" data-filter="running" type="button">執行中</button>
+              <button class="filter-button" data-filter="unhealthy" type="button">需注意</button>
+              <button class="filter-button" data-filter="stopped" type="button">已停止</button>
+              <button class="filter-button" data-filter="stale" type="button">外部/殘留</button>
+            </div>
+          </section>
+
+          <section class="panel about-panel" aria-labelledby="aboutTitle">
+            <div class="panel-heading">
+              <h2 id="aboutTitle">About Me</h2>
+            </div>
+            <div class="about-identity">
+              <span class="about-avatar" aria-hidden="true">CW</span>
+              <strong>Chang Wei Lin</strong>
+            </div>
+            <p class="about-line">我愛星空至深，無懼黑夜。</p>
+            <figure class="about-quote">
+              <blockquote>We have loved the stars too fondly to fear the dark.</blockquote>
+              <figcaption>— &lt;The Old Astronomer&gt; Sarah Williams</figcaption>
+            </figure>
+            <div class="about-links" aria-label="Chang Wei Lin links">
+              <a href="https://github.com/changweilin" target="_blank" rel="noreferrer" title="GitHub">
+                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fgithub.com%2Fchangweilin&sz=64" alt="" />
+                <span>GitHub</span>
+              </a>
+              <a href="https://www.linkedin.com/in/wei-lin-chang-ba38049a/" target="_blank" rel="noreferrer" title="LinkedIn">
+                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fwww.linkedin.com%2Fin%2Fwei-lin-chang-ba38049a%2F&sz=64" alt="" />
+                <span>LinkedIn</span>
+              </a>
+              <a href="https://changweilin.github.io/demo_link/" target="_blank" rel="noreferrer" title="Demo Link">
+                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fchangweilin.github.io%2Fdemo_link%2F&sz=64" alt="" />
+                <span>Demo</span>
+              </a>
+            </div>
+          </section>
+
+          <section class="panel profile-panel">
+            <div class="panel-heading">
+              <h2>Profile</h2>
+              <button class="text-button" id="useFilteredProjects" type="button">套用目前列表</button>
+            </div>
+            <select id="profileSelect" aria-label="選擇 Profile"></select>
+            <input id="profileNameInput" type="text" placeholder="Profile 名稱" />
+            <textarea id="profileProjectsInput" spellcheck="false" rows="5" aria-label="Profile 專案清單" placeholder="每行一個專案名稱"></textarea>
+            <div class="profile-actions profile-edit-actions">
+              <button class="copy-url primary-action" id="saveProfileButton" type="button">儲存</button>
+              <button class="copy-url danger-action" id="deleteProfileButton" type="button">刪除</button>
+            </div>
+            <div class="profile-actions">
+              <button class="copy-url" id="startProfileButton" type="button">啟動</button>
+              <button class="copy-url" id="stopProfileButton" type="button">停止</button>
+              <button class="copy-url" id="restartProfileButton" type="button">重啟</button>
+            </div>
+          </section>
+
+          <section class="panel connection-panel">
+            <div class="panel-heading">
+              <h2>連線與復原</h2>
+            </div>
+            <div class="settings-stack">
+              <label class="toggle-row">
+                <input id="autoRestoreInput" type="checkbox" />
+                <span>啟動 Dev Dock 時復原分享中的專案</span>
+              </label>
+              <label class="toggle-row">
+                <input id="autoRestartInput" type="checkbox" />
+                <span>健康檢查失敗時自動重啟</span>
+              </label>
+              <label class="field-row health-threshold-row">
+                <span>失敗門檻</span>
+                <input id="healthThresholdInput" type="number" min="1" max="10" step="1" />
+              </label>
+            </div>
+            <dl class="detail-list compact">
+              <div>
+                <dt>本機</dt>
+                <dd><button class="link-button" id="copyManagerLocal" type="button">--</button></dd>
+              </div>
+              <div>
+                <dt>LAN</dt>
+                <dd><button class="link-button" id="copyManagerLan" type="button">--</button></dd>
+              </div>
+              <div>
+                <dt>Tailscale</dt>
+                <dd><button class="link-button" id="copyManagerTail" type="button">--</button></dd>
+              </div>
+            </dl>
+          </section>
+        </aside>
+
+        <section class="main-panel">
+          <div class="table-toolbar">
+            <div class="table-primary-controls">
+              <div class="search-wrap">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" />
+                  <path d="m16 16 4 4" />
+                </svg>
+                <input id="searchInput" type="search" placeholder="搜尋專案、路徑、框架或 port" />
+              </div>
+              <label class="sort-control">
+                <span>排序</span>
+                <select id="sortSelect"></select>
+              </label>
+              <button class="icon-button sort-direction-button" id="sortDirectionButton" type="button" title="切換排序方向" aria-label="切換排序方向">↑</button>
+            </div>
+            <span id="lastUpdated">--</span>
+          </div>
+
+          <div class="table-wrap">
+            <table id="projectTable">
+              <colgroup id="projectColGroup"></colgroup>
+              <thead>
+                <tr id="projectHeaderRow"></tr>
+              </thead>
+              <tbody id="projectRows"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="emptyState" hidden>
+            <strong>沒有符合條件的專案</strong>
+            <span>調整篩選或重新掃描包含 package.json 與 scripts.dev 的資料夾。</span>
+          </div>
+        </section>
+
+        <aside class="inspector">
+          <section class="panel logs-panel">
+            <div class="panel-heading logs-heading">
+              <h2>Log</h2>
+              <div class="log-controls">
+                <label class="mini-toggle">
+                  <input id="autoLogInput" type="checkbox" checked />
+                  <span>自動更新</span>
+                </label>
+                <button class="text-button" id="reloadLogsButton" type="button">重新讀取</button>
+              </div>
+            </div>
+            <pre id="logOutput">選擇專案後會顯示最近的 stdout/stderr。</pre>
+          </section>
+        </aside>
+      </main>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+      <div class="modal-backdrop" id="firewallModal" hidden>
+        <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="firewallTitle">
+          <div class="modal-heading">
+            <h2 id="firewallTitle">設定 LAN 防火牆</h2>
+            <button class="icon-button" id="closeFirewallModal" type="button" title="關閉" aria-label="關閉">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M6 6l12 12" />
+                <path d="M18 6 6 18" />
+              </svg>
+            </button>
+          </div>
+
+          <dl class="firewall-summary">
+            <div>
+              <dt>專案</dt>
+              <dd id="firewallProject">--</dd>
+            </div>
+            <div>
+              <dt>範圍</dt>
+              <dd>TCP、LocalSubnet、Private profile、單一 port</dd>
+            </div>
+            <div>
+              <dt>URL</dt>
+              <dd id="firewallUrl">--</dd>
+            </div>
+          </dl>
+
+          <label class="consent-row">
+            <input id="firewallConsent" type="checkbox" />
+            <span>我了解這會新增一條 Windows inbound firewall 規則，只允許目前專案使用的單一 port。</span>
+          </label>
+
+          <textarea id="firewallCommand" readonly spellcheck="false" rows="4" aria-label="PowerShell 指令"></textarea>
+
+          <div class="modal-actions">
+            <button class="copy-url" id="copyFirewallCommand" type="button" disabled>複製指令</button>
+            <button class="copy-url danger-action" id="runFirewallCommand" type="button" disabled>開啟 PowerShell</button>
+            <button class="primary-button" id="closeFirewallDone" type="button">完成</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="modal-backdrop" id="terminalModal" hidden>
+        <section class="modal-panel terminal-modal-panel" role="dialog" aria-modal="true" aria-labelledby="terminalTitle">
+          <div class="modal-heading terminal-heading">
+            <h2 id="terminalTitle">終端管理</h2>
+            <div class="terminal-heading-actions">
+              <button class="copy-url terminal-home-button" id="backToHomeFromTerminal" type="button">
+                <span>主頁</span>
+              </button>
+              <button class="copy-url terminal-add-button" id="addTerminalSession" type="button">
+                <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                  <path d="M12 5v14" />
+                  <path d="M5 12h14" />
+                </svg>
+                <span>新增</span>
+              </button>
+              <button class="icon-button" id="closeTerminalModal" type="button" title="關閉" aria-label="關閉">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="terminal-project-bar" id="terminalProjectBar" aria-label="終端專案視窗"></div>
+          <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="終端對話"></div>
+          <div class="terminal-empty" id="terminalEmpty" hidden>尚未開啟終端對話</div>
+          <div class="terminal-workspace" id="terminalWorkspace"></div>
+        </section>
+      </div>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
