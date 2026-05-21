@@ -1,13 +1,21 @@
 import { Terminal } from '/vendor/xterm/xterm.mjs';
 import { FitAddon } from '/vendor/xterm/addon-fit.mjs';
 
-const TABLE_PREFERENCES_KEY = 'devDock.tablePreferences.v3';
-const THEME_PREFERENCE_KEY = 'devDock.theme.v1';
-const TERMINAL_FAVORITES_KEY = 'devDock.terminalFavorites.v1';
-const TERMINAL_FAVORITES_VERSION_KEY = 'devDock.terminalFavoritesVersion.v1';
+const TABLE_PREFERENCES_KEY = 'agentTaskManager.tablePreferences.v3';
+const THEME_PREFERENCE_KEY = 'agentTaskManager.theme.v1';
+const TERMINAL_FAVORITES_KEY = 'agentTaskManager.terminalFavorites.v1';
+const TERMINAL_FAVORITES_VERSION_KEY = 'agentTaskManager.terminalFavoritesVersion.v1';
 const TERMINAL_FAVORITES_VERSION = 5;
-const TERMINAL_CLAUDE_SETTINGS_KEY = 'devDock.terminalClaudeSettings.v1';
-const TERMINAL_WORKSPACE_KEY = 'devDock.terminalWorkspace.v1';
+const TERMINAL_CLAUDE_SETTINGS_KEY = 'agentTaskManager.terminalClaudeSettings.v1';
+const TERMINAL_WORKSPACE_KEY = 'agentTaskManager.terminalWorkspace.v1';
+const LEGACY_STORAGE_KEYS = new Map([
+  [TABLE_PREFERENCES_KEY, 'devDock.tablePreferences.v3'],
+  [THEME_PREFERENCE_KEY, 'devDock.theme.v1'],
+  [TERMINAL_FAVORITES_KEY, 'devDock.terminalFavorites.v1'],
+  [TERMINAL_FAVORITES_VERSION_KEY, 'devDock.terminalFavoritesVersion.v1'],
+  [TERMINAL_CLAUDE_SETTINGS_KEY, 'devDock.terminalClaudeSettings.v1'],
+  [TERMINAL_WORKSPACE_KEY, 'devDock.terminalWorkspace.v1'],
+]);
 const TERMINAL_PREFERENCE_TEXT_LIMIT = 4096;
 const TERMINAL_FAVORITE_COLLAPSED_ROWS = 2;
 const TERMINAL_LEGACY_CLAUDE_FAVORITES = ['claude', 'claude -r', 'claude -c'];
@@ -47,6 +55,41 @@ const TERMINAL_FAVORITE_MIGRATIONS = [
 const DEFAULT_TERMINAL_FAVORITES = [
   ...TERMINAL_SLASH_FAVORITES,
 ];
+
+function readLocalPreference(key) {
+  const current = localStorage.getItem(key);
+  if (current !== null) {
+    return current;
+  }
+
+  const legacyKey = LEGACY_STORAGE_KEYS.get(key);
+  if (!legacyKey) {
+    return null;
+  }
+
+  const legacy = localStorage.getItem(legacyKey);
+  if (legacy !== null) {
+    try {
+      localStorage.setItem(key, legacy);
+    } catch {
+      // Existing preferences can still be read even when migration cannot persist.
+    }
+  }
+  return legacy;
+}
+
+function writeLocalPreference(key, value) {
+  localStorage.setItem(key, value);
+}
+
+function removeLocalPreference(key) {
+  localStorage.removeItem(key);
+  const legacyKey = LEGACY_STORAGE_KEYS.get(key);
+  if (legacyKey) {
+    localStorage.removeItem(legacyKey);
+  }
+}
+
 const TERMINAL_CLAUDE_COMMANDS = ['claude', 'claude -r', 'claude -c'];
 const TERMINAL_CLAUDE_DEFAULT_FLAG_FAVORITES = [
   { id: 'claude-flag-remote-control', flag: '--remote-control' },
@@ -757,7 +800,7 @@ function showToast(message) {
 
 function readThemePreference() {
   try {
-    return localStorage.getItem(THEME_PREFERENCE_KEY) === 'light' ? 'light' : 'dark';
+    return readLocalPreference(THEME_PREFERENCE_KEY) === 'light' ? 'light' : 'dark';
   } catch (error) {
     return 'dark';
   }
@@ -777,7 +820,7 @@ function applyTheme(theme, { persist = false } = {}) {
   }
 
   try {
-    localStorage.setItem(THEME_PREFERENCE_KEY, state.theme);
+    writeLocalPreference(THEME_PREFERENCE_KEY, state.theme);
   } catch (error) {
     // Theme switching should still work for the current session.
   }
@@ -1023,7 +1066,7 @@ function sortedProjects(projects) {
 
 function saveTablePreferences() {
   try {
-    localStorage.setItem(
+    writeLocalPreference(
       TABLE_PREFERENCES_KEY,
       JSON.stringify({
         sortKey: state.sortKey,
@@ -1040,7 +1083,7 @@ function saveTablePreferences() {
 
 function loadTablePreferences() {
   try {
-    const preferences = JSON.parse(localStorage.getItem(TABLE_PREFERENCES_KEY) || '{}');
+    const preferences = JSON.parse(readLocalPreference(TABLE_PREFERENCES_KEY) || '{}');
     const sortableKeys = new Set(tableColumns
       .filter((column) => column.sortable && DEFAULT_COLUMN_ORDER.includes(column.id))
       .map((column) => column.id));
@@ -1858,7 +1901,7 @@ function logLineTone(line) {
 
 function readTerminalWorkspaceState() {
   try {
-    const raw = localStorage.getItem(TERMINAL_WORKSPACE_KEY);
+    const raw = readLocalPreference(TERMINAL_WORKSPACE_KEY);
     if (!raw) {
       return {};
     }
@@ -1872,8 +1915,8 @@ function readTerminalWorkspaceState() {
 
 function hasTerminalPreferenceLocalState() {
   try {
-    return localStorage.getItem(TERMINAL_FAVORITES_KEY) !== null
-      || localStorage.getItem(TERMINAL_WORKSPACE_KEY) !== null;
+    return readLocalPreference(TERMINAL_FAVORITES_KEY) !== null
+      || readLocalPreference(TERMINAL_WORKSPACE_KEY) !== null;
   } catch {
     return false;
   }
@@ -2045,9 +2088,9 @@ function saveTerminalWorkspaceState({ sync = true } = {}) {
   const workspace = buildTerminalWorkspaceState();
   try {
     if (!workspace.sessions.length) {
-      localStorage.removeItem(TERMINAL_WORKSPACE_KEY);
+      removeLocalPreference(TERMINAL_WORKSPACE_KEY);
     } else {
-      localStorage.setItem(TERMINAL_WORKSPACE_KEY, JSON.stringify(workspace));
+      writeLocalPreference(TERMINAL_WORKSPACE_KEY, JSON.stringify(workspace));
     }
   } catch {
     // Terminal workspace state is best-effort; running shells remain server-side.
@@ -2404,7 +2447,7 @@ function normalizeTerminalClaudeSettings(settings) {
 
 function readTerminalClaudeSettings() {
   try {
-    return normalizeTerminalClaudeSettings(JSON.parse(localStorage.getItem(TERMINAL_CLAUDE_SETTINGS_KEY) || 'null'));
+    return normalizeTerminalClaudeSettings(JSON.parse(readLocalPreference(TERMINAL_CLAUDE_SETTINGS_KEY) || 'null'));
   } catch {
     return normalizeTerminalClaudeSettings(DEFAULT_TERMINAL_CLAUDE_SETTINGS);
   }
@@ -2412,7 +2455,7 @@ function readTerminalClaudeSettings() {
 
 function saveTerminalClaudeSettings() {
   try {
-    localStorage.setItem(TERMINAL_CLAUDE_SETTINGS_KEY, JSON.stringify(normalizeTerminalClaudeSettings(state.terminalClaude)));
+    writeLocalPreference(TERMINAL_CLAUDE_SETTINGS_KEY, JSON.stringify(normalizeTerminalClaudeSettings(state.terminalClaude)));
   } catch {
     // Claude launcher settings remain usable for this session if localStorage is blocked.
   }
@@ -2520,8 +2563,8 @@ function migrateTerminalFavorites(favorites, fromVersion = 0) {
 
 function readTerminalFavorites() {
   try {
-    const raw = localStorage.getItem(TERMINAL_FAVORITES_KEY);
-    const version = Number(localStorage.getItem(TERMINAL_FAVORITES_VERSION_KEY) || 0) || 0;
+    const raw = readLocalPreference(TERMINAL_FAVORITES_KEY);
+    const version = Number(readLocalPreference(TERMINAL_FAVORITES_VERSION_KEY) || 0) || 0;
     if (raw === null) {
       return normalizeTerminalFavorites(DEFAULT_TERMINAL_FAVORITES);
     }
@@ -2534,8 +2577,8 @@ function readTerminalFavorites() {
 
 function saveTerminalFavorites({ sync = true } = {}) {
   try {
-    localStorage.setItem(TERMINAL_FAVORITES_KEY, JSON.stringify(state.terminalFavorites));
-    localStorage.setItem(TERMINAL_FAVORITES_VERSION_KEY, String(TERMINAL_FAVORITES_VERSION));
+    writeLocalPreference(TERMINAL_FAVORITES_KEY, JSON.stringify(state.terminalFavorites));
+    writeLocalPreference(TERMINAL_FAVORITES_VERSION_KEY, String(TERMINAL_FAVORITES_VERSION));
   } catch {
     // Favorites remain usable for this session if localStorage is blocked.
   }
@@ -4727,7 +4770,7 @@ async function pollTerminalSessions() {
           updateTerminalSessionView(session);
         }
       } catch (error) {
-        session.output += `\n[Dev Dock] ${error.message}\n`;
+        session.output += `\n[Agent Task Manager (ATM)] ${error.message}\n`;
         session.exitedAt = new Date().toISOString();
         session.running = false;
         needsRender = true;

@@ -1,8 +1,8 @@
 {
-  "name": "dev-dock",
+  "name": "agent-task-manager",
   "version": "1.0.0",
   "private": true,
-  "description": "A local npm dev server manager with a Tailscale-friendly web UI.",
+  "description": "Agent Task Manager (ATM), a local npm dev server manager with a Tailscale-friendly web UI.",
   "scripts": {
     "dev": "node server.js"
   },

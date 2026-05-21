@@ -881,7 +881,7 @@ function Invoke-FirewallLan {
 
 function Invoke-Ui {
     $npm = Get-NpmCommand
-    Write-Host "Starting Dev Dock UI with npm run dev..."
+    Write-Host "Starting Agent Task Manager (ATM) UI with npm run dev..."
     Write-Host "Local URL: http://127.0.0.1:$UiPort"
 
     $lanIp = Get-LocalIp
@@ -897,7 +897,7 @@ function Invoke-Ui {
         Write-Host "Tailscale URL: http://$tailscaleIp`:$UiPort"
     }
     else {
-        Write-Warning "Tailscale IP not found yet. Dev Dock tried to start Tailscale; connect or sign in, then refresh the UI."
+        Write-Warning "Tailscale IP not found yet. Agent Task Manager (ATM) tried to start Tailscale; connect or sign in, then refresh the UI."
     }
 
     Push-Location $ScriptRoot

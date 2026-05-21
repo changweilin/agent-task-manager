@@ -1359,7 +1359,7 @@ async function startProject(project, options = {}) {
   const stderrPath = path.join(LOG_DIR, `${prefix}.err.log`);
   const stdout = fs.createWriteStream(stdoutPath, { flags: 'a' });
   const stderr = fs.createWriteStream(stderrPath, { flags: 'a' });
-  const heading = `\n\n[Dev Dock] ${new Date().toISOString()} starting ${project.name} on port ${project.port}\n`;
+  const heading = `\n\n[Agent Task Manager (ATM)] ${new Date().toISOString()} starting ${project.name} on port ${project.port}\n`;
 
   stdout.write(heading);
   stderr.write(heading);
@@ -1771,7 +1771,7 @@ function markTerminalClosed(session, code = null, signal = null) {
   session.exitedAt = new Date().toISOString();
   session.exitCode = code;
   session.exitSignal = signal;
-  const message = `\n[Dev Dock] terminal closed${code === null || code === undefined ? '' : ` with code ${code}`}${signal ? ` (${signal})` : ''}.\n`;
+  const message = `\n[Agent Task Manager (ATM)] terminal closed${code === null || code === undefined ? '' : ` with code ${code}`}${signal ? ` (${signal})` : ''}.\n`;
   emitTerminalOutput(session, message);
   sendTerminalSocket(session, {
     type: 'exit',
@@ -1861,10 +1861,10 @@ function createTerminalSession(project, options = {}) {
     exitSignal: null,
   };
 
-  appendTerminalOutput(session, `[Dev Dock] ${createdAt} opened terminal for ${project.name}\n`);
-  appendTerminalOutput(session, `[Dev Dock] port: ${project.port}\n`);
-  appendTerminalOutput(session, `[Dev Dock] shell: ${shell.label}\n`);
-  appendTerminalOutput(session, `[Dev Dock] cwd: ${cwd}\n`);
+  appendTerminalOutput(session, `[Agent Task Manager (ATM)] ${createdAt} opened terminal for ${project.name}\n`);
+  appendTerminalOutput(session, `[Agent Task Manager (ATM)] port: ${project.port}\n`);
+  appendTerminalOutput(session, `[Agent Task Manager (ATM)] shell: ${shell.label}\n`);
+  appendTerminalOutput(session, `[Agent Task Manager (ATM)] cwd: ${cwd}\n`);
 
   if (session.pty) {
     session.pty.onData((chunk) => emitTerminalOutput(session, chunk));
@@ -1875,7 +1875,7 @@ function createTerminalSession(project, options = {}) {
     session.child.stdout.on('data', (chunk) => emitTerminalOutput(session, chunk));
     session.child.stderr.on('data', (chunk) => emitTerminalOutput(session, chunk));
     session.child.on('error', (error) => {
-      emitTerminalOutput(session, `\n[Dev Dock] terminal error: ${error.message}\n`);
+      emitTerminalOutput(session, `\n[Agent Task Manager (ATM)] terminal error: ${error.message}\n`);
     });
     session.child.on('close', (code, signal) => {
       markTerminalClosed(session, code, signal);
@@ -2320,7 +2320,7 @@ async function getStatusPayload(request = null) {
 
   return {
     manager: {
-      name: 'Dev Dock',
+      name: 'Agent Task Manager (ATM)',
       host,
       port,
       localUrl: buildUrl('127.0.0.1', port),
@@ -3370,7 +3370,7 @@ async function runMobileBuildInstall(project, request, body = {}) {
     let devices = getAdbDevices(adbPath);
     let device = chooseAdbDevice(devices, body.deviceSerial, targetHost);
     if (!device) {
-      throw createMobileInstallError('No ready ADB device was found. Connect USB ADB, or open this Dev Dock from the phone over LAN/Tailscale after enabling wireless debugging on port 5555.', 409, {
+      throw createMobileInstallError('No ready ADB device was found. Connect USB ADB, or open this Agent Task Manager (ATM) from the phone over LAN/Tailscale after enabling wireless debugging on port 5555.', 409, {
         devices,
         targetHost,
         log: logBlocks.join('\n\n'),
@@ -3568,7 +3568,7 @@ server.on('upgrade', (request, socket, head) => {
 server.listen(port, host, () => {
   const lanIp = getLanIp();
   const tailscale = startTailscaleIfNeeded();
-  console.log(`Dev Dock running at http://127.0.0.1:${port}`);
+  console.log(`Agent Task Manager (ATM) running at http://127.0.0.1:${port}`);
   if (lanIp) {
     console.log(`LAN URL: http://${lanIp}:${port}`);
   } else {
@@ -3577,7 +3577,7 @@ server.listen(port, host, () => {
   if (tailscale.ip) {
     console.log(`Tailscale URL: http://${tailscale.ip}:${port}`);
   } else {
-    console.log('Tailscale IP not found yet. Dev Dock tried to start Tailscale; connect or sign in, then refresh the UI.');
+    console.log('Tailscale IP not found yet. Agent Task Manager (ATM) tried to start Tailscale; connect or sign in, then refresh the UI.');
     if (tailscale.error) {
       console.log(`Tailscale startup detail: ${tailscale.error}`);
     }

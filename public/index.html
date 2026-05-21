@@ -3,11 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Dev Dock</title>
+    <title>Agent Task Manager (ATM)</title>
     <script>
       (() => {
         try {
-          const theme = localStorage.getItem('devDock.theme.v1');
+          const theme = localStorage.getItem('agentTaskManager.theme.v1') || localStorage.getItem('devDock.theme.v1');
+          if (theme && localStorage.getItem('agentTaskManager.theme.v1') === null) {
+            localStorage.setItem('agentTaskManager.theme.v1', theme);
+          }
           document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
         } catch (error) {
           document.documentElement.dataset.theme = 'dark';
@@ -26,7 +29,7 @@
             <img src="/logo.svg" alt="" />
           </div>
           <div>
-            <h1>Dev Dock</h1>
+            <h1>Agent Task Manager (ATM)</h1>
             <p id="managerUrl">正在讀取管理介面...</p>
           </div>
         </div>
@@ -160,7 +163,7 @@
             <div class="settings-stack">
               <label class="toggle-row">
                 <input id="autoRestoreInput" type="checkbox" />
-                <span>啟動 Dev Dock 時復原分享中的專案</span>
+                <span>啟動 Agent Task Manager (ATM) 時復原分享中的專案</span>
               </label>
               <label class="toggle-row">
                 <input id="autoRestartInput" type="checkbox" />
