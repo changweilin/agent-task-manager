@@ -442,6 +442,8 @@ const PAGE_LINK_TARGETS = [
   { id: 'lan', label: 'LAN', urlKey: 'lanUrl' },
   { id: 'tailscale', label: 'Tailscale', urlKey: 'tailscaleUrl' },
 ];
+const DEFAULT_PAGE_LINK_TARGET_ID = 'local';
+const MOBILE_DEFAULT_PAGE_LINK_TARGET_ID = 'tailscale';
 const pageLinkTargetIds = new Set(PAGE_LINK_TARGETS.map((target) => target.id));
 const actionUrlColumnIds = new Set(ACTION_URL_COLUMN_IDS);
 const mobileLayoutMedia = window.matchMedia('(max-width: 820px)');
@@ -960,14 +962,22 @@ function getPageTargetDefinition(targetId) {
   return PAGE_LINK_TARGETS.find((target) => target.id === targetId) || PAGE_LINK_TARGETS[0];
 }
 
+function getDefaultProjectPageTargetId(project) {
+  if (isMobileLayout() && project?.tailscaleUrl) {
+    return MOBILE_DEFAULT_PAGE_LINK_TARGET_ID;
+  }
+
+  return DEFAULT_PAGE_LINK_TARGET_ID;
+}
+
 function getProjectPageTarget(project) {
-  const selectedTarget = state.pageTargetByProject.get(project.name) || PAGE_LINK_TARGETS[0].id;
+  const selectedTarget = state.pageTargetByProject.get(project.name) || getDefaultProjectPageTargetId(project);
   const target = getPageTargetDefinition(selectedTarget);
   if (pageLinkTargetIds.has(selectedTarget) && project[target.urlKey]) {
     return selectedTarget;
   }
 
-  return PAGE_LINK_TARGETS.find((item) => project[item.urlKey])?.id || PAGE_LINK_TARGETS[0].id;
+  return PAGE_LINK_TARGETS.find((item) => project[item.urlKey])?.id || DEFAULT_PAGE_LINK_TARGET_ID;
 }
 
 function getProjectHomeLink(project) {
