@@ -70,6 +70,7 @@ const MIME_TYPES = {
 
 const childProcesses = new Map();
 const terminalSessions = new Map();
+let aiQuotaProbeInFlight = null;
 const mobileInstallLocks = new Set();
 const restartLocks = new Set();
 const pageScanCache = new Map();
@@ -260,6 +261,49 @@ const TERMINAL_REMOTE_CODEX_FLAGS = new Set([
 ]);
 const TERMINAL_ANTIGRAVITY_COMMANDS = new Set(['agy']);
 const TERMINAL_REMOTE_ANTIGRAVITY_FLAGS = new Set(['--sandbox', '--dangerously-skip-permissions']);
+const AI_QUOTA_PROBE_TIMEOUT_MS = 14000;
+const AI_QUOTA_PTY_PROBE_TIMEOUT_MS = 32000;
+const AI_QUOTA_AUTH_TIMEOUT_MS = 3500;
+const AI_QUOTA_OUTPUT_LIMIT = 96 * 1024;
+const AI_QUOTA_AGENTS = [
+  {
+    id: 'claude',
+    label: 'Claude Code',
+    provider: 'Anthropic',
+    command: 'claude',
+    authCommand: { args: ['auth', 'status', '--text'], label: 'claude auth status --text' },
+    interactiveCommands: ['/usage'],
+    exitCommand: '/exit',
+    ptyStartupDelayMs: 9000,
+    ptySettleDelayMs: 14000,
+    probe: 'claude auth status + /usage',
+  },
+  {
+    id: 'codex',
+    label: 'Codex CLI',
+    provider: 'OpenAI',
+    command: 'codex',
+    authCommand: { args: ['login', 'status'], label: 'codex login status' },
+    authCommands: [{ args: ['auth', 'status'], label: 'codex auth status' }],
+    interactiveCommands: ['/status'],
+    exitCommand: '/quit',
+    confirmInteractiveCommand: true,
+    ptyStartupDelayMs: 9000,
+    ptySettleDelayMs: 12000,
+    probe: 'codex login status + /status',
+  },
+  {
+    id: 'antigravity',
+    label: 'Antigravity CLI',
+    provider: 'Google',
+    command: 'agy',
+    interactiveCommands: ['/usage'],
+    exitCommand: '/quit',
+    ptyStartupDelayMs: 10000,
+    ptySettleDelayMs: 20000,
+    probe: 'agy + /usage',
+  },
+];
 const VENDOR_ASSETS = new Map([
   ['/vendor/xterm/xterm.css', path.join(ROOT_DIR, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css')],
   ['/vendor/xterm/xterm.mjs', path.join(ROOT_DIR, 'node_modules', '@xterm', 'xterm', 'lib', 'xterm.mjs')],
@@ -1962,6 +2006,757 @@ function findExecutable(command) {
   return null;
 }
 
+function buildAiQuotaProbeEnv() {
+  const env = { ...process.env };
+  if (process.platform === 'win32' && env.Path && env.PATH) {
+    delete env.PATH;
+  }
+
+  env.NO_COLOR = '1';
+  env.FORCE_COLOR = '0';
+  env.NO_BROWSER = '1';
+  env.ATM_AI_QUOTA_PROBE = '1';
+
+  return env;
+}
+
+function quoteWindowsCommandArg(value) {
+  const text = String(value || '');
+  if (!text) {
+    return '""';
+  }
+  if (!/[\s"&|<>^]/.test(text)) {
+    return text;
+  }
+  return `"${text.replace(/"/g, '\\"')}"`;
+}
+
+function buildSpawnCommand(executable, args = []) {
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable)) {
+    return {
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', [quoteWindowsCommandArg(executable), ...args.map(quoteWindowsCommandArg)].join(' ')],
+    };
+  }
+
+  return { command: executable, args };
+}
+
+function localAppDataPath(...segments) {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  return path.join(base, ...segments);
+}
+
+function safeReadDir(dirPath) {
+  try {
+    return fs.readdirSync(dirPath);
+  } catch {
+    return [];
+  }
+}
+
+function aiQuotaExecutableCandidates(agent) {
+  if (agent.id === 'codex') {
+    return [
+      localAppDataPath('OpenAI', 'Codex', 'bin', 'codex.exe'),
+      ...safeReadDir(localAppDataPath('OpenAI', 'Codex', 'bin'))
+        .filter((name) => /^[a-f0-9]{16}$/i.test(name))
+        .map((name) => localAppDataPath('OpenAI', 'Codex', 'bin', name, 'codex.exe')),
+    ];
+  }
+
+  if (agent.id === 'antigravity') {
+    return [
+      localAppDataPath('agy', 'bin', 'agy.exe'),
+      localAppDataPath('Programs', 'Antigravity', 'bin', 'agy.exe'),
+      localAppDataPath('Programs', 'Antigravity', 'resources', 'app', 'bin', 'agy.exe'),
+    ];
+  }
+
+  return [];
+}
+
+function resolveAiQuotaExecutable(agent) {
+  const candidates = [
+    ...aiQuotaExecutableCandidates(agent),
+    findExecutable(agent.command),
+  ].filter(Boolean);
+
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+function killAiQuotaProcess(proc) {
+  const pid = Number(proc?.pid);
+  try {
+    proc?.kill?.();
+  } catch {
+    // The process may already be gone.
+  }
+  if (process.platform === 'win32' && pid) {
+    try {
+      spawn('taskkill.exe', ['/pid', String(pid), '/t', '/f'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      }).once('error', () => {});
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+}
+
+function appendAiQuotaOutput(current, chunk) {
+  const next = `${current || ''}${String(chunk || '')}`;
+  if (next.length <= AI_QUOTA_OUTPUT_LIMIT) {
+    return next;
+  }
+  return next.slice(next.length - AI_QUOTA_OUTPUT_LIMIT);
+}
+
+function stripAnsi(text) {
+  return String(text || '')
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b[PX^_].*?\u001b\\/g, '')
+    .replace(/\u001b[@-Z\\-_]/g, '')
+    .replace(/\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\r/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+}
+
+function cleanAiQuotaText(text) {
+  return stripAnsi(text)
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function quotaLineRelevant(line) {
+  return /(usage|quota|limit|used|remaining|left|available|token|context|window|weekly|daily|5\s*-?\s*h|rate|credit|plan|用量|配額|限制|剩餘|可用|每週|週|重置|百分)/i.test(line);
+}
+
+function clampQuotaPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round(number * 10) / 10));
+}
+
+function extractQuotaSignals(text) {
+  const lines = cleanAiQuotaText(text).split('\n').filter(Boolean);
+  const signals = [];
+  const seen = new Set();
+
+  for (const line of lines) {
+    if (/(nothing over|nothing above|less than|under \d{1,3}(?:\.\d+)?\s*%|try the other window)/i.test(line)) {
+      continue;
+    }
+
+    const relevant = quotaLineRelevant(line);
+    const percentMatches = [...line.matchAll(/(\d{1,3}(?:\.\d+)?)\s*%/g)];
+    if (percentMatches.length) {
+      for (const match of percentMatches) {
+        const rawPercent = clampQuotaPercent(match[1]);
+        if (rawPercent === null) {
+          continue;
+        }
+        const remaining = /(remaining|left|available|剩餘|可用)/i.test(line);
+        const percent = remaining ? clampQuotaPercent(100 - rawPercent) : rawPercent;
+        const label = line.slice(0, 180);
+        const key = `${label}:${percent}`;
+        if ((relevant || signals.length < 3) && !seen.has(key)) {
+          seen.add(key);
+          signals.push({
+            label,
+            percent,
+            rawPercent,
+            direction: remaining ? 'remaining' : 'used',
+          });
+        }
+      }
+    }
+
+    if (!relevant) {
+      continue;
+    }
+
+    const ratioMatches = [...line.matchAll(/(\d[\d,]*(?:\.\d+)?)\s*(?:\/|of)\s*(\d[\d,]*(?:\.\d+)?)/gi)];
+    for (const match of ratioMatches) {
+      const used = Number(String(match[1]).replace(/,/g, ''));
+      const total = Number(String(match[2]).replace(/,/g, ''));
+      if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) {
+        continue;
+      }
+      const percent = clampQuotaPercent((used / total) * 100);
+      const label = line.slice(0, 180);
+      const key = `${label}:${percent}`;
+      if (percent !== null && !seen.has(key)) {
+        seen.add(key);
+        signals.push({ label, percent, rawPercent: percent, direction: 'used' });
+      }
+    }
+  }
+
+  return signals;
+}
+
+function quotaSignalScore(signal, index) {
+  const label = String(signal?.label || '');
+  let score = 100;
+  if (/(quota|limit|rate|credit|plan|usage|used|remaining|5\s*-?\s*h|weekly|daily|配額|限制|用量|剩餘|每週|週)/i.test(label)) {
+    score += 80;
+  }
+  if (/(model quota|weekly|week|5\s*h|5\s*-?\s*hour|resets|left|available|可用)/i.test(label)) {
+    score += 70;
+  }
+  if (/(current session|session|total cost|total duration|code changes|stats)/i.test(label)) {
+    score -= 90;
+  }
+  if (/(token|context)/i.test(label)) {
+    score += 20;
+  }
+  if (/(debug|version|update)/i.test(label)) {
+    score -= 30;
+  }
+  return score;
+}
+
+function chooseQuotaSignal(signals) {
+  return signals
+    .map((signal, index) => ({ signal, index, score: quotaSignalScore(signal, index) }))
+    .sort((a, b) => (b.score - a.score) || (b.index - a.index))[0]?.signal || null;
+}
+
+function summarizeQuotaOutput(text, signals) {
+  if (signals.length) {
+    return chooseQuotaSignal(signals)?.label || signals[0].label;
+  }
+
+  const lines = cleanAiQuotaText(text)
+    .split('\n')
+    .filter((line) => quotaLineRelevant(line) || /(login|auth|sign in|error|failed|not found|not recognized|未登入|登入)/i.test(line));
+
+  return lines.slice(0, 2).join(' / ') || 'No usage percentage was found in the CLI output.';
+}
+
+function isQuotaAuthFailure(text) {
+  return /(not logged in|not authenticated|unauthenticated|sign in|login required|no saved session|please log in|please login|未登入|需要登入)/i.test(text);
+}
+
+function isQuotaCommandUnsupported(text) {
+  return /(unknown command|unrecognized command|invalid command|unknown subcommand|not a recognized|unexpected argument|not found)/i.test(text);
+}
+
+function isQuotaTtyRequired(text) {
+  return /(stdin is not a terminal|not a terminal|requires a tty|requires an interactive terminal|input device is not a tty|The handle is invalid|timed out)/i.test(text);
+}
+
+function runAiQuotaFileCommand(executable, args, timeoutMs = AI_QUOTA_AUTH_TIMEOUT_MS, signal = null) {
+  return new Promise((resolve) => {
+    const spawnTarget = buildSpawnCommand(executable, args);
+    let output = '';
+    let settled = false;
+    let timedOut = false;
+    const startedAt = Date.now();
+    let child = null;
+    let timer = null;
+    const abortHandler = () => {
+      killAiQuotaProcess(child);
+      finish({ ok: false, exitCode: null, canceled: true, error: 'Canceled.' });
+    };
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', abortHandler);
+      resolve({
+        output: cleanAiQuotaText(output),
+        elapsedMs: Date.now() - startedAt,
+        timedOut,
+        pty: false,
+        ...result,
+      });
+    };
+    if (signal?.aborted) {
+      finish({ ok: false, exitCode: null, canceled: true, error: 'Canceled.' });
+      return;
+    }
+    signal?.addEventListener?.('abort', abortHandler, { once: true });
+    timer = setTimeout(() => {
+      timedOut = true;
+      killAiQuotaProcess(child);
+      finish({ ok: false, exitCode: null, error: 'Timed out.' });
+    }, timeoutMs);
+
+    try {
+      child = spawn(spawnTarget.command, spawnTarget.args, {
+        cwd: ROOT_DIR,
+        env: buildAiQuotaProbeEnv(),
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({ ok: false, exitCode: null, error: error.message });
+      return;
+    }
+    if (settled) {
+      killAiQuotaProcess(child);
+      return;
+    }
+
+    child.stdout?.on('data', (chunk) => {
+      output = appendAiQuotaOutput(output, chunk);
+    });
+    child.stderr?.on('data', (chunk) => {
+      output = appendAiQuotaOutput(output, chunk);
+    });
+    child.once('error', (error) => {
+      finish({ ok: false, exitCode: null, error: error.message });
+    });
+    child.once('close', (code, signal) => {
+      finish({ ok: code === 0, exitCode: code, signal });
+    });
+  });
+}
+
+function runAiQuotaPipeProbe(agent, executable, signal = null) {
+  return new Promise((resolve) => {
+    const spawnTarget = buildSpawnCommand(executable, []);
+    let output = '';
+    let settled = false;
+    let timedOut = false;
+    const startedAt = Date.now();
+    const timers = [];
+    let proc = null;
+    let timeoutTimer = null;
+    const abortHandler = () => {
+      killAiQuotaProcess(proc);
+      finish({ ok: false, exitCode: null, canceled: true, error: 'Canceled.' });
+    };
+    const finish = (result = {}) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      timers.forEach((timer) => clearTimeout(timer));
+      clearTimeout(timeoutTimer);
+      signal?.removeEventListener?.('abort', abortHandler);
+      if (!result.closed) {
+        killAiQuotaProcess(proc);
+      }
+      resolve({
+        output: cleanAiQuotaText(output),
+        elapsedMs: Date.now() - startedAt,
+        timedOut,
+        pty: false,
+        ...result,
+      });
+    };
+    const writeInput = (text) => {
+      try {
+        if (proc?.write) {
+          proc.write(text);
+        } else if (proc?.stdin?.writable) {
+          proc.stdin.write(text);
+        }
+      } catch {
+        // Probe output will report the failure or timeout.
+      }
+    };
+    if (signal?.aborted) {
+      finish({ ok: false, exitCode: null, canceled: true, error: 'Canceled.' });
+      return;
+    }
+    signal?.addEventListener?.('abort', abortHandler, { once: true });
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      killAiQuotaProcess(proc);
+      finish({ ok: false, exitCode: null, error: 'Timed out.' });
+    }, AI_QUOTA_PROBE_TIMEOUT_MS);
+
+    try {
+      proc = spawn(spawnTarget.command, spawnTarget.args, {
+        cwd: ROOT_DIR,
+        env: buildAiQuotaProbeEnv(),
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      proc.stdout?.on('data', (chunk) => {
+        output = appendAiQuotaOutput(output, chunk);
+      });
+      proc.stderr?.on('data', (chunk) => {
+        output = appendAiQuotaOutput(output, chunk);
+      });
+      proc.once('error', (error) => {
+        finish({ ok: false, exitCode: null, error: error.message });
+      });
+      proc.once('close', (code, signal) => {
+        finish({ ok: code === 0 || !timedOut, exitCode: code, signal, closed: true });
+      });
+    } catch (error) {
+      finish({ ok: false, exitCode: null, error: error.message });
+      return;
+    }
+    if (settled) {
+      killAiQuotaProcess(proc);
+      return;
+    }
+
+    (agent.interactiveCommands || []).forEach((command, index) => {
+      timers.push(setTimeout(() => writeInput(`${command}\r`), 1400 + index * 2500));
+    });
+    timers.push(setTimeout(() => writeInput(`${agent.exitCommand || '/exit'}\r`), 7200));
+    timers.push(setTimeout(() => finish({ ok: true, exitCode: null }), 9200));
+  });
+}
+
+function quotePosixShellArgument(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function getAiQuotaPtyShell() {
+  if (process.platform !== 'win32') {
+    return {
+      command: process.env.SHELL || '/bin/sh',
+      args: ['-i'],
+      kind: 'posix',
+      lineEnding: '\n',
+    };
+  }
+
+  const powershell = findExecutable('powershell.exe');
+  if (powershell) {
+    return {
+      command: powershell,
+      args: ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command', 'try { Set-PSReadLineOption -HistorySaveStyle SaveNothing } catch {}'],
+      kind: 'powershell',
+      lineEnding: '\r',
+    };
+  }
+
+  const pwsh = findExecutable('pwsh.exe');
+  if (pwsh) {
+    return {
+      command: pwsh,
+      args: ['-NoLogo', '-NoProfile', '-NoExit', '-Command', 'try { Set-PSReadLineOption -HistorySaveStyle SaveNothing } catch {}'],
+      kind: 'powershell',
+      lineEnding: '\r',
+    };
+  }
+
+  return {
+    command: findExecutable('cmd.exe') || 'cmd.exe',
+    args: ['/Q'],
+    kind: 'cmd',
+    lineEnding: '\r',
+  };
+}
+
+function buildAiQuotaPtyLaunchCommand(executable, shell) {
+  if (shell.kind === 'powershell') {
+    return `& ${quotePowerShellArgument(executable)}`;
+  }
+  if (shell.kind === 'cmd') {
+    return quoteWindowsCommandArg(executable);
+  }
+  return quotePosixShellArgument(executable);
+}
+
+function killAiQuotaPty(terminalProcess) {
+  if (process.platform === 'win32') {
+    const pid = Number(terminalProcess?.pid);
+    if (pid) {
+      try {
+        spawn('taskkill.exe', ['/pid', String(pid), '/t', '/f'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        }).once('error', () => {});
+      } catch {
+        // Best-effort cleanup only.
+      }
+    }
+    return;
+  }
+
+  try {
+    terminalProcess?.kill?.();
+  } catch {
+    // The PTY may already be closed.
+  }
+}
+
+function runAiQuotaInteractiveProbe(agent, executable, signal = null) {
+  if (!pty) {
+    return runAiQuotaPipeProbe(agent, executable, signal);
+  }
+
+  return new Promise((resolve) => {
+    const shell = getAiQuotaPtyShell();
+    const launchCommand = buildAiQuotaPtyLaunchCommand(executable, shell);
+    let output = '';
+    let settled = false;
+    let timedOut = false;
+    let slashSentAt = 0;
+    const startedAt = Date.now();
+    const timers = [];
+    let watchTimer = null;
+    let timeoutTimer = null;
+    let terminalProcess = null;
+
+    const abortHandler = () => {
+      finish({ ok: false, exitCode: null, canceled: true, error: 'Canceled.' });
+    };
+    const finish = (result = {}) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      timers.forEach((timer) => clearTimeout(timer));
+      clearInterval(watchTimer);
+      clearTimeout(timeoutTimer);
+      signal?.removeEventListener?.('abort', abortHandler);
+      if (!result.closed) {
+        killAiQuotaPty(terminalProcess);
+      }
+      resolve({
+        output: cleanAiQuotaText(output),
+        elapsedMs: Date.now() - startedAt,
+        timedOut,
+        pty: true,
+        ...result,
+      });
+    };
+    const writeRaw = (text) => {
+      try {
+        terminalProcess?.write?.(text);
+      } catch {
+        // Probe output or timeout will report the failure.
+      }
+    };
+    const writeLine = (text) => writeRaw(`${text}${shell.lineEnding}`);
+    const maybeFinishWithSignal = () => {
+      if (!slashSentAt || Date.now() - slashSentAt < 1800) {
+        return;
+      }
+      const primary = chooseQuotaSignal(extractQuotaSignals(output));
+      if (primary) {
+        finish({ ok: true, exitCode: null });
+      }
+    };
+
+    if (signal?.aborted) {
+      finish({ ok: false, exitCode: null, canceled: true, error: 'Canceled.' });
+      return;
+    }
+    signal?.addEventListener?.('abort', abortHandler, { once: true });
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      finish({ ok: false, exitCode: null, error: 'Timed out.' });
+    }, AI_QUOTA_PTY_PROBE_TIMEOUT_MS);
+
+    try {
+      terminalProcess = pty.spawn(shell.command, shell.args, {
+        name: 'xterm-256color',
+        cols: 100,
+        rows: 28,
+        cwd: ROOT_DIR,
+        env: buildAiQuotaProbeEnv(),
+        useConpty: process.platform === 'win32',
+      });
+      terminalProcess.onData((chunk) => {
+        output = appendAiQuotaOutput(output, chunk);
+        maybeFinishWithSignal();
+      });
+      terminalProcess.onExit((event) => {
+        finish({ ok: !timedOut, exitCode: event?.exitCode ?? null, signal: event?.signal, closed: true });
+      });
+    } catch (error) {
+      finish({ ok: false, exitCode: null, error: error.message });
+      return;
+    }
+
+    timers.push(setTimeout(() => writeLine(launchCommand), 700));
+    const startupDelay = Math.max(1000, Number(agent.ptyStartupDelayMs) || 7000);
+    const settleDelay = Math.max(3000, Number(agent.ptySettleDelayMs) || 9000);
+    const commandStartDelay = 700 + startupDelay;
+
+    (agent.interactiveCommands || []).forEach((command, index) => {
+      const commandDelay = commandStartDelay + index * 1800;
+      timers.push(setTimeout(() => {
+        slashSentAt = Date.now();
+        writeLine(command);
+        if (agent.confirmInteractiveCommand) {
+          timers.push(setTimeout(() => writeRaw(shell.lineEnding), 900));
+        }
+      }, commandDelay));
+    });
+
+    watchTimer = setInterval(maybeFinishWithSignal, 700);
+    timers.push(setTimeout(() => finish({ ok: true, exitCode: null }), commandStartDelay + settleDelay));
+  });
+}
+
+function canceledAiQuotaAgent(agent) {
+  return {
+    id: agent.id,
+    label: agent.label,
+    provider: agent.provider,
+    status: 'canceled',
+    percent: null,
+    percentLabel: '--%',
+    probe: agent.probe,
+    summary: 'Quota monitor was stopped.',
+    signals: [],
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+async function probeAiQuotaAgent(agent, signal = null) {
+  const checkedAt = new Date().toISOString();
+  if (signal?.aborted) {
+    return canceledAiQuotaAgent(agent);
+  }
+
+  const executable = resolveAiQuotaExecutable(agent);
+  if (!executable) {
+    return {
+      id: agent.id,
+      label: agent.label,
+      provider: agent.provider,
+      status: 'missing',
+      percent: null,
+      percentLabel: '--%',
+      probe: agent.probe,
+      summary: `${agent.command} was not found on PATH.`,
+      signals: [],
+      checkedAt,
+    };
+  }
+
+  const attempts = [];
+  const authCommands = [
+    agent.authCommand,
+    ...(Array.isArray(agent.authCommands) ? agent.authCommands : []),
+  ].filter(Boolean);
+
+  for (const authCommand of authCommands) {
+    const result = await runAiQuotaFileCommand(executable, authCommand.args, AI_QUOTA_AUTH_TIMEOUT_MS, signal);
+    if (result.canceled || signal?.aborted) {
+      return canceledAiQuotaAgent(agent);
+    }
+    attempts.push({ label: authCommand.label, ...result });
+    if (isQuotaAuthFailure(result.output)) {
+      return {
+        id: agent.id,
+        label: agent.label,
+        provider: agent.provider,
+        status: 'auth',
+        percent: null,
+        percentLabel: '--%',
+        probe: agent.probe,
+        summary: summarizeQuotaOutput(result.output, []),
+        signals: [],
+        checkedAt,
+      };
+    }
+    if (result.ok || !isQuotaCommandUnsupported(result.output)) {
+      break;
+    }
+  }
+
+  const interactiveResult = await runAiQuotaInteractiveProbe(agent, executable, signal);
+  if (interactiveResult.canceled || signal?.aborted) {
+    return canceledAiQuotaAgent(agent);
+  }
+  attempts.push({ label: (agent.interactiveCommands || []).join(', '), ...interactiveResult });
+  const combinedOutput = attempts.map((attempt) => attempt.output).filter(Boolean).join('\n');
+  const signals = extractQuotaSignals(combinedOutput);
+  const primary = chooseQuotaSignal(signals);
+  const hasAuthFailure = isQuotaAuthFailure(combinedOutput);
+  const slashProbeAttempted = (agent.interactiveCommands || []).length > 0;
+  const usedPty = Boolean(interactiveResult.pty);
+  const needsTty = isQuotaTtyRequired(combinedOutput)
+    || (!primary && !hasAuthFailure && !usedPty && slashProbeAttempted);
+  const status = primary
+    ? 'ok'
+    : hasAuthFailure
+      ? 'auth'
+      : interactiveResult.timedOut
+        ? 'timeout'
+        : needsTty
+          ? 'tty'
+          : attempts.some((attempt) => attempt.ok)
+            ? 'unknown'
+            : 'error';
+
+  return {
+    id: agent.id,
+    label: agent.label,
+    provider: agent.provider,
+    status,
+    percent: primary?.percent ?? null,
+    percentLabel: primary ? `${Math.round(primary.percent)}%` : '--%',
+    probe: agent.probe,
+    summary: status === 'timeout'
+      ? '配額 slash 指令逾時，已中斷監控終端。'
+      : needsTty
+        ? '此 CLI 的配額 slash 指令需要互動式終端才會輸出百分比；安全非 prompt 查詢未取得百分比。'
+        : summarizeQuotaOutput(combinedOutput, signals),
+    signals: signals.slice(0, 4).map((signal) => ({
+      label: signal.label,
+      percent: signal.percent,
+      direction: signal.direction,
+    })),
+    checkedAt,
+    elapsedMs: attempts.reduce((total, attempt) => total + Number(attempt.elapsedMs || 0), 0),
+  };
+}
+
+async function collectAiQuotaPayload(signal = null) {
+  const agents = await Promise.all(AI_QUOTA_AGENTS.map((agent) => probeAiQuotaAgent(agent, signal)));
+  return {
+    checkedAt: new Date().toISOString(),
+    safeMode: {
+      tokenSafe: true,
+      summary: '安全模式：只執行登入/狀態查詢與 CLI slash 指令，沒有送出自然語言 prompt。',
+    },
+    agents,
+  };
+}
+
+async function getAiQuotaPayload() {
+  if (!aiQuotaProbeInFlight) {
+    const controller = new AbortController();
+    const probe = { controller, promise: null };
+    probe.promise = collectAiQuotaPayload(controller.signal).finally(() => {
+      if (aiQuotaProbeInFlight === probe) {
+        aiQuotaProbeInFlight = null;
+      }
+    });
+    aiQuotaProbeInFlight = probe;
+  }
+  return aiQuotaProbeInFlight.promise;
+}
+
+function cancelAiQuotaPayload() {
+  if (!aiQuotaProbeInFlight) {
+    return false;
+  }
+
+  try {
+    aiQuotaProbeInFlight.controller?.abort();
+  } catch {
+    // Already stopped.
+  }
+
+  return true;
+}
+
 function findGitBashExecutable() {
   const candidates = [
     'C:\\Program Files\\Git\\bin\\bash.exe',
@@ -2931,6 +3726,29 @@ async function runProfileAction(profile, projects, action) {
 async function handleApi(request, response, url) {
   if (request.method === 'GET' && url.pathname === '/api/status') {
     sendJson(response, 200, await getStatusPayload(request));
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/ai-quotas') {
+    if (!isLocalRequest(request)) {
+      sendError(response, 403, 'For safety, AI quota probes are only available from http://127.0.0.1 on this computer.');
+      return;
+    }
+
+    sendJson(response, 200, await getAiQuotaPayload());
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/ai-quotas/cancel') {
+    if (!isLocalRequest(request)) {
+      sendError(response, 403, 'For safety, AI quota probes are only available from http://127.0.0.1 on this computer.');
+      return;
+    }
+
+    sendJson(response, 200, {
+      canceled: cancelAiQuotaPayload(),
+      checkedAt: new Date().toISOString(),
+    });
     return;
   }
 

@@ -67,6 +67,16 @@
               <path d="M5 13a7 7 0 0 0 12.1 4.8L20 15" />
             </svg>
           </button>
+          <button class="primary-button quota-nav-button" id="quotaMonitorButton" type="button">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+              <path d="M4 19V5" />
+              <path d="M4 19h16" />
+              <path d="M8 16v-5" />
+              <path d="M12 16V8" />
+              <path d="M16 16v-3" />
+            </svg>
+            <span>AI 配額</span>
+          </button>
           <button class="primary-button" id="discoverButton" type="button">
             <svg viewBox="0 0 24 24" focusable="false">
               <path d="M10.5 18a7.5 7.5 0 1 1 5.3-12.8A7.5 7.5 0 0 1 10.5 18Z" />
@@ -314,6 +324,32 @@
           <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="終端對話"></div>
           <div class="terminal-empty" id="terminalEmpty" hidden>尚未開啟終端對話</div>
           <div class="terminal-workspace" id="terminalWorkspace"></div>
+        </section>
+      </div>
+
+      <div class="modal-backdrop" id="quotaModal" hidden>
+        <section class="modal-panel quota-modal-panel" role="dialog" aria-modal="true" aria-labelledby="quotaTitle">
+          <div class="modal-heading quota-modal-heading">
+            <div>
+              <h2 id="quotaTitle">AI 配額監控</h2>
+              <p>Claude Code / Codex CLI / Antigravity CLI</p>
+            </div>
+            <div class="quota-modal-actions">
+              <button class="copy-url" id="refreshQuotaButton" type="button">重新檢查</button>
+              <button class="copy-url" id="backToHomeFromQuota" type="button">回首頁</button>
+              <button class="icon-button" id="closeQuotaModal" type="button" title="關閉" aria-label="關閉">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="quota-safety-note" id="quotaSafetyNote">
+            安全模式：只執行登入/狀態查詢與 CLI slash 指令，沒有送出自然語言 prompt。
+          </div>
+          <div class="quota-summary" id="quotaSummary"></div>
+          <div class="quota-card-grid" id="quotaCards" aria-live="polite"></div>
         </section>
       </div>
     </div>

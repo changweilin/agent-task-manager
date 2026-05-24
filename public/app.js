@@ -243,6 +243,27 @@ async function demoApi(path, options = {}) {
   if (url.pathname === '/api/terminal-preferences') {
     return method === 'GET' ? { saved: false } : { ok: true };
   }
+  if (url.pathname === '/api/ai-quotas') {
+    return {
+      checkedAt: new Date().toISOString(),
+      safeMode: {
+        tokenSafe: true,
+        summary: 'Demo mode uses mocked quota data.',
+      },
+      agents: AI_QUOTA_MONITOR_AGENTS.map((agent, index) => ({
+        id: agent.id,
+        label: agent.label,
+        provider: agent.provider,
+        status: 'ok',
+        percent: [42, 27, 64][index],
+        percentLabel: `${[42, 27, 64][index]}%`,
+        probe: agent.probe,
+        summary: 'Mocked demo usage signal.',
+        signals: [{ label: 'Demo usage', percent: [42, 27, 64][index] }],
+        checkedAt: new Date().toISOString(),
+      })),
+    };
+  }
   if (url.pathname === '/api/firewall/lan-command') {
     return {
       name: slugifyDemoName(url.searchParams.get('name')),
@@ -309,6 +330,26 @@ const TERMINAL_AGENT_TABS = [
 ];
 const DEFAULT_TERMINAL_AGENT_ID = 'claude';
 const terminalAgentIds = new Set(TERMINAL_AGENT_TABS.map((agent) => agent.id));
+const AI_QUOTA_MONITOR_AGENTS = [
+  {
+    id: 'claude',
+    label: 'Claude Code',
+    provider: 'Anthropic',
+    probe: 'claude auth status + /usage',
+  },
+  {
+    id: 'codex',
+    label: 'Codex CLI',
+    provider: 'OpenAI',
+    probe: 'codex login status + /status',
+  },
+  {
+    id: 'antigravity',
+    label: 'Antigravity CLI',
+    provider: 'Google',
+    probe: 'agy + /usage',
+  },
+];
 const TERMINAL_LEGACY_CLAUDE_FAVORITES = ['claude', 'claude -r', 'claude -c'];
 const TERMINAL_CLAUDE_SLASH_FAVORITES = [
   { id: 'favorite-claude-init', command: '/init', note: '' },
@@ -674,6 +715,11 @@ const state = {
   terminalAntigravityFlagDraft: '',
   terminalTabDrag: null,
   suppressTerminalTabClick: false,
+  quotaModalOpen: false,
+  quotaPayload: null,
+  quotaLoading: false,
+  quotaError: '',
+  quotaRequestId: 0,
 };
 
 let terminalPollTimer = null;
@@ -722,6 +768,7 @@ const elements = {
   runningCount: document.querySelector('#runningCount'),
   themeToggleButton: document.querySelector('#themeToggleButton'),
   refreshButton: document.querySelector('#refreshButton'),
+  quotaMonitorButton: document.querySelector('#quotaMonitorButton'),
   discoverButton: document.querySelector('#discoverButton'),
   rootsInput: document.querySelector('#rootsInput'),
   addRootButton: document.querySelector('#addRootButton'),
@@ -777,6 +824,13 @@ const elements = {
   terminalTabs: document.querySelector('#terminalTabs'),
   terminalWorkspace: document.querySelector('#terminalWorkspace'),
   terminalEmpty: document.querySelector('#terminalEmpty'),
+  quotaModal: document.querySelector('#quotaModal'),
+  closeQuotaModal: document.querySelector('#closeQuotaModal'),
+  backToHomeFromQuota: document.querySelector('#backToHomeFromQuota'),
+  refreshQuotaButton: document.querySelector('#refreshQuotaButton'),
+  quotaSafetyNote: document.querySelector('#quotaSafetyNote'),
+  quotaSummary: document.querySelector('#quotaSummary'),
+  quotaCards: document.querySelector('#quotaCards'),
 };
 
 const tableColumns = [
@@ -6257,6 +6311,180 @@ async function runLanFirewallCommand() {
   }
 }
 
+function quotaStatusLabel(status) {
+  const labels = {
+    ok: '已讀取',
+    loading: '檢查中',
+    pending: '等待檢查',
+    missing: '未安裝',
+    auth: '需要登入',
+    timeout: '逾時',
+    tty: '需互動終端',
+    unknown: '未找到百分比',
+    error: '讀取失敗',
+    canceled: '已中斷',
+  };
+  return labels[status] || status || '未知';
+}
+
+function quotaAgentFromPayload(agentId) {
+  return state.quotaPayload?.agents?.find((agent) => agent.id === agentId) || null;
+}
+
+function quotaPercentLabel(percent) {
+  const value = Number(percent);
+  if (!Number.isFinite(value)) {
+    return '--%';
+  }
+  return `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+}
+
+function renderQuotaMonitor() {
+  if (!state.quotaModalOpen) {
+    return;
+  }
+
+  elements.refreshQuotaButton.disabled = state.quotaLoading;
+  const checkedAt = state.quotaPayload?.checkedAt
+    ? new Intl.DateTimeFormat('zh-TW', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }).format(new Date(state.quotaPayload.checkedAt))
+    : '--';
+  const safety = state.quotaPayload?.safeMode?.summary
+    || '安全模式：只執行登入/狀態查詢與 CLI slash 指令，沒有送出自然語言 prompt。';
+  elements.quotaSafetyNote.textContent = safety;
+  elements.quotaSummary.innerHTML = `
+    <span>更新時間 ${escapeHtml(checkedAt)}</span>
+    ${state.quotaError ? `<strong>${escapeHtml(state.quotaError)}</strong>` : ''}
+  `;
+
+  elements.quotaCards.innerHTML = AI_QUOTA_MONITOR_AGENTS.map((agent) => {
+    const payloadAgent = quotaAgentFromPayload(agent.id);
+    const status = state.quotaLoading && !payloadAgent ? 'loading' : (payloadAgent?.status || 'pending');
+    const percent = payloadAgent?.percent;
+    const percentText = payloadAgent?.percentLabel || quotaPercentLabel(percent);
+    const progressValue = Number.isFinite(Number(percent)) ? Math.max(0, Math.min(100, Number(percent))) : 0;
+    const signals = Array.isArray(payloadAgent?.signals) && payloadAgent.signals.length
+      ? payloadAgent.signals.slice(0, 3)
+      : [];
+    const signalRows = signals.length
+      ? signals.map((signal) => `
+          <li>
+            <span>${escapeHtml(signal.label || 'usage')}</span>
+            <strong>${quotaPercentLabel(signal.percent)}</strong>
+          </li>
+        `).join('')
+      : '<li><span>usage</span><strong>--%</strong></li>';
+    const summary = payloadAgent?.summary || (state.quotaLoading ? '正在啟動 CLI 查詢用量。' : '開啟後會自動檢查。');
+
+    return `
+      <article class="quota-card quota-card-${escapeHtml(agent.id)}">
+        <div class="quota-card-header">
+          <div>
+            <strong>${escapeHtml(agent.label)}</strong>
+            <span>${escapeHtml(agent.provider)}</span>
+          </div>
+          <span class="quota-status ${escapeHtml(status)}">${escapeHtml(quotaStatusLabel(status))}</span>
+        </div>
+        <div class="quota-meter" style="--quota-percent: ${progressValue}%">
+          <div class="quota-meter-ring" aria-label="${escapeHtml(agent.label)} usage ${escapeHtml(percentText)}">
+            <span>${escapeHtml(percentText)}</span>
+          </div>
+          <div class="quota-meter-body">
+            <span>${escapeHtml(agent.probe)}</span>
+            <p>${escapeHtml(summary)}</p>
+          </div>
+        </div>
+        <ul class="quota-signal-list">
+          ${signalRows}
+        </ul>
+      </article>
+    `;
+  }).join('');
+}
+
+async function loadAiQuotas() {
+  if (state.quotaLoading) {
+    return;
+  }
+
+  const requestId = state.quotaRequestId + 1;
+  state.quotaRequestId = requestId;
+  state.quotaLoading = true;
+  state.quotaError = '';
+  renderQuotaMonitor();
+
+  try {
+    const payload = await api('/api/ai-quotas');
+    if (state.quotaRequestId === requestId) {
+      state.quotaPayload = payload;
+    }
+  } catch (error) {
+    if (state.quotaRequestId === requestId) {
+      state.quotaError = error.message;
+    }
+  } finally {
+    if (state.quotaRequestId === requestId) {
+      state.quotaLoading = false;
+      renderQuotaMonitor();
+    }
+  }
+}
+
+function cancelAiQuotaProbe() {
+  if (!state.quotaLoading) {
+    return;
+  }
+
+  state.quotaRequestId += 1;
+  state.quotaLoading = false;
+  if (DEMO_MODE) {
+    return;
+  }
+
+  fetch('/api/ai-quotas/cancel', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+    keepalive: true,
+  }).catch(() => {
+    // Closing the monitor should stay fast even if the cancel request is interrupted.
+  });
+}
+
+function openQuotaMonitor({ syncHash = true, refresh = true } = {}) {
+  if (syncHash && window.location.hash !== '#ai-quota') {
+    window.location.hash = 'ai-quota';
+    return;
+  }
+
+  state.quotaModalOpen = true;
+  elements.quotaModal.hidden = false;
+  renderQuotaMonitor();
+  if (refresh || !state.quotaPayload) {
+    loadAiQuotas();
+  }
+}
+
+function hideQuotaMonitor({ syncHash = true } = {}) {
+  cancelAiQuotaProbe();
+  state.quotaModalOpen = false;
+  elements.quotaModal.hidden = true;
+  if (syncHash && window.location.hash === '#ai-quota') {
+    history.pushState('', document.title, `${window.location.pathname}${window.location.search}`);
+  }
+}
+
+function syncQuotaRouteFromHash() {
+  if (window.location.hash === '#ai-quota') {
+    openQuotaMonitor({ syncHash: false, refresh: !state.quotaPayload });
+  } else if (state.quotaModalOpen) {
+    hideQuotaMonitor({ syncHash: false });
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -6267,6 +6495,7 @@ function escapeHtml(value) {
 }
 
 elements.refreshButton.addEventListener('click', () => loadStatus());
+elements.quotaMonitorButton.addEventListener('click', () => openQuotaMonitor());
 elements.themeToggleButton.addEventListener('click', () => {
   const nextTheme = state.theme === 'dark' ? 'light' : 'dark';
   applyTheme(nextTheme, { persist: true });
@@ -6366,6 +6595,8 @@ window.addEventListener('blur', () => {
 });
 window.addEventListener('resize', renderColumnGroup);
 window.addEventListener('resize', () => window.requestAnimationFrame(updateRootPathMarquees));
+window.addEventListener('hashchange', syncQuotaRouteFromHash);
+window.addEventListener('beforeunload', cancelAiQuotaProbe);
 const handleMobileLayoutChange = () => {
   if (isMobileLayout()) {
     state.expandedProjectNames.clear();
@@ -6506,6 +6737,14 @@ elements.runFirewallCommand.addEventListener('click', runLanFirewallCommand);
 elements.firewallModal.addEventListener('click', (event) => {
   if (event.target === elements.firewallModal) {
     hideLanFirewallConsent();
+  }
+});
+elements.closeQuotaModal.addEventListener('click', () => hideQuotaMonitor());
+elements.backToHomeFromQuota.addEventListener('click', () => hideQuotaMonitor());
+elements.refreshQuotaButton.addEventListener('click', () => loadAiQuotas());
+elements.quotaModal.addEventListener('click', (event) => {
+  if (event.target === elements.quotaModal) {
+    hideQuotaMonitor();
   }
 });
 elements.closeTerminalModal.addEventListener('click', hideTerminalManager);
@@ -7120,6 +7359,7 @@ restoreTerminalWorkspaceState();
 const terminalPreferencesReady = loadTerminalPreferences({ silent: true });
 applyTheme(readThemePreference());
 loadTablePreferences();
+syncQuotaRouteFromHash();
 loadStatus().then(() => {
   loadLogs();
   terminalPreferencesReady.finally(() => loadTerminalSessions({ silent: true }));
