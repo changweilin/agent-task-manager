@@ -285,7 +285,7 @@ const TABLE_PREFERENCES_KEY = 'agentTaskManager.tablePreferences.v3';
 const THEME_PREFERENCE_KEY = 'agentTaskManager.theme.v1';
 const TERMINAL_FAVORITES_KEY = 'agentTaskManager.terminalFavorites.v1';
 const TERMINAL_FAVORITES_VERSION_KEY = 'agentTaskManager.terminalFavoritesVersion.v1';
-const TERMINAL_FAVORITES_VERSION = 6;
+const TERMINAL_FAVORITES_VERSION = 7;
 const TERMINAL_CLAUDE_SETTINGS_KEY = 'agentTaskManager.terminalClaudeSettings.v1';
 const TERMINAL_CODEX_SETTINGS_KEY = 'agentTaskManager.terminalCodexSettings.v1';
 const TERMINAL_ANTIGRAVITY_SETTINGS_KEY = 'agentTaskManager.terminalAntigravitySettings.v1';
@@ -338,32 +338,58 @@ const TERMINAL_CLAUDE_SLASH_FAVORITES = [
 ];
 const TERMINAL_CODEX_SLASH_FAVORITES = [
   { id: 'favorite-codex-permissions', command: '/permissions', note: '' },
+  { id: 'favorite-codex-approve', command: '/approve', note: '' },
   { id: 'favorite-codex-model', command: '/model', note: '' },
+  { id: 'favorite-codex-fast', command: '/fast', note: '' },
   { id: 'favorite-codex-plan', command: '/plan', note: '' },
+  { id: 'favorite-codex-personality', command: '/personality', note: '' },
   { id: 'favorite-codex-compact', command: '/compact', note: '' },
   { id: 'favorite-codex-diff', command: '/diff', note: '' },
   { id: 'favorite-codex-review', command: '/review', note: '' },
   { id: 'favorite-codex-init', command: '/init', note: '' },
   { id: 'favorite-codex-mcp', command: '/mcp', note: '' },
+  { id: 'favorite-codex-plugins', command: '/plugins', note: '' },
+  { id: 'favorite-codex-apps', command: '/apps', note: '' },
+  { id: 'favorite-codex-hooks', command: '/hooks', note: '' },
   { id: 'favorite-codex-skills', command: '/skills', note: '' },
   { id: 'favorite-codex-agent', command: '/agent', note: '' },
   { id: 'favorite-codex-goal', command: '/goal', note: '' },
   { id: 'favorite-codex-fork', command: '/fork', note: '' },
   { id: 'favorite-codex-side', command: '/side', note: '' },
+  { id: 'favorite-codex-ide', command: '/ide', note: '' },
+  { id: 'favorite-codex-mention', command: '/mention', note: '' },
+  { id: 'favorite-codex-copy', command: '/copy', note: '' },
+  { id: 'favorite-codex-sandbox-add-read-dir', command: '/sandbox-add-read-dir', note: '' },
   { id: 'favorite-codex-resume', command: '/resume', note: '' },
   { id: 'favorite-codex-status', command: '/status', note: '' },
+  { id: 'favorite-codex-statusline', command: '/statusline', note: '' },
+  { id: 'favorite-codex-title', command: '/title', note: '' },
+  { id: 'favorite-codex-keymap', command: '/keymap', note: '' },
+  { id: 'favorite-codex-theme', command: '/theme', note: '' },
+  { id: 'favorite-codex-memories', command: '/memories', note: '' },
+  { id: 'favorite-codex-experimental', command: '/experimental', note: '' },
   { id: 'favorite-codex-ps', command: '/ps', note: '' },
   { id: 'favorite-codex-stop', command: '/stop', note: '' },
+  { id: 'favorite-codex-raw', command: '/raw', note: '' },
+  { id: 'favorite-codex-vim', command: '/vim', note: '' },
+  { id: 'favorite-codex-debug-config', command: '/debug-config', note: '' },
   { id: 'favorite-codex-clear', command: '/clear', note: '' },
+  { id: 'favorite-codex-new', command: '/new', note: '' },
+  { id: 'favorite-codex-logout', command: '/logout', note: '' },
+  { id: 'favorite-codex-feedback', command: '/feedback', note: '' },
   { id: 'favorite-codex-exit', command: '/exit', note: '' },
+  { id: 'favorite-codex-quit', command: '/quit', note: '' },
 ];
 const TERMINAL_ANTIGRAVITY_SLASH_FAVORITES = [
   { id: 'favorite-antigravity-resume', command: '/resume', note: '' },
+  { id: 'favorite-antigravity-switch', command: '/switch', note: '' },
   { id: 'favorite-antigravity-rewind', command: '/rewind', note: '' },
+  { id: 'favorite-antigravity-undo', command: '/undo', note: '' },
   { id: 'favorite-antigravity-rename', command: '/rename', note: '' },
   { id: 'favorite-antigravity-permissions', command: '/permissions', note: '' },
   { id: 'favorite-antigravity-model', command: '/model', note: '' },
   { id: 'favorite-antigravity-config', command: '/config', note: '' },
+  { id: 'favorite-antigravity-settings', command: '/settings', note: '' },
   { id: 'favorite-antigravity-keybindings', command: '/keybindings', note: '' },
   { id: 'favorite-antigravity-statusline', command: '/statusline', note: '' },
   { id: 'favorite-antigravity-tasks', command: '/tasks', note: '' },
@@ -381,6 +407,37 @@ const DEFAULT_TERMINAL_FAVORITES_BY_AGENT = {
   codex: TERMINAL_CODEX_SLASH_FAVORITES,
   antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES,
 };
+const TERMINAL_CODEX_FAVORITE_MIGRATION_7_COMMANDS = [
+  '/approve',
+  '/fast',
+  '/personality',
+  '/plugins',
+  '/apps',
+  '/hooks',
+  '/ide',
+  '/mention',
+  '/copy',
+  '/sandbox-add-read-dir',
+  '/statusline',
+  '/title',
+  '/keymap',
+  '/theme',
+  '/memories',
+  '/experimental',
+  '/raw',
+  '/vim',
+  '/debug-config',
+  '/new',
+  '/logout',
+  '/feedback',
+  '/quit',
+];
+const TERMINAL_ANTIGRAVITY_FAVORITE_MIGRATION_7_COMMANDS = [
+  '/switch',
+  '/undo',
+  '/settings',
+  '/agents',
+];
 const TERMINAL_SLASH_FAVORITES = TERMINAL_CLAUDE_SLASH_FAVORITES;
 const TERMINAL_FAVORITE_MIGRATIONS = [
   { version: 2, favorites: TERMINAL_CLAUDE_SLASH_FAVORITES.slice(0, 4) },
@@ -395,6 +452,17 @@ const TERMINAL_FAVORITE_MIGRATIONS = [
     version: 6,
     favorites: TERMINAL_CLAUDE_SLASH_FAVORITES,
     reorderCommands: TERMINAL_CLAUDE_SLASH_FAVORITES.map((favorite) => favorite.command),
+  },
+  {
+    version: 7,
+    favoritesByAgent: {
+      codex: TERMINAL_CODEX_SLASH_FAVORITES.filter((favorite) => TERMINAL_CODEX_FAVORITE_MIGRATION_7_COMMANDS.includes(favorite.command)),
+      antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.filter((favorite) => TERMINAL_ANTIGRAVITY_FAVORITE_MIGRATION_7_COMMANDS.includes(favorite.command)),
+    },
+    reorderCommandsByAgent: {
+      codex: TERMINAL_CODEX_SLASH_FAVORITES.map((favorite) => favorite.command),
+      antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.map((favorite) => favorite.command),
+    },
   },
 ];
 const DEFAULT_TERMINAL_FAVORITES = [
@@ -482,6 +550,7 @@ const TERMINAL_CODEX_SANDBOX_OPTIONS = [
   { value: '', label: 'Configured default' },
   { value: 'read-only', label: 'read-only' },
   { value: 'workspace-write', label: 'workspace-write' },
+  { value: 'danger-full-access', label: 'danger-full-access' },
 ];
 const TERMINAL_CODEX_APPROVAL_OPTIONS = [
   { value: '', label: 'Configured default' },
@@ -489,20 +558,28 @@ const TERMINAL_CODEX_APPROVAL_OPTIONS = [
   { value: 'on-request', label: 'on-request' },
   { value: 'never', label: 'never' },
 ];
+const TERMINAL_CODEX_DEFAULT_FLAG_FAVORITES = [
+  { id: 'codex-flag-search', flag: '--search' },
+  { id: 'codex-flag-no-alt-screen', flag: '--no-alt-screen' },
+  { id: 'codex-flag-oss', flag: '--oss' },
+  { id: 'codex-flag-yolo', flag: '--yolo' },
+];
 const DEFAULT_TERMINAL_CODEX_SETTINGS = {
   command: 'codex',
   model: '',
   sandbox: '',
   approval: '',
-  search: false,
+  favoriteFlags: TERMINAL_CODEX_DEFAULT_FLAG_FAVORITES,
+  activeFlags: [],
 };
 const TERMINAL_ANTIGRAVITY_COMMANDS = ['agy'];
-const TERMINAL_ANTIGRAVITY_FLAG_OPTIONS = [
+const TERMINAL_ANTIGRAVITY_DEFAULT_FLAG_FAVORITES = [
   { id: 'antigravity-flag-sandbox', flag: '--sandbox' },
   { id: 'antigravity-flag-dangerously-skip-permissions', flag: '--dangerously-skip-permissions' },
 ];
 const DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS = {
   command: 'agy',
+  favoriteFlags: TERMINAL_ANTIGRAVITY_DEFAULT_FLAG_FAVORITES,
   activeFlags: [],
 };
 const DEFAULT_COLUMN_ORDER = ['name', 'status', 'framework', 'port', 'health', 'command', 'started', 'restarted', 'pid'];
@@ -592,7 +669,9 @@ const state = {
   terminalClaude: { ...DEFAULT_TERMINAL_CLAUDE_SETTINGS },
   terminalClaudeFlagDraft: '',
   terminalCodex: { ...DEFAULT_TERMINAL_CODEX_SETTINGS },
+  terminalCodexFlagDraft: '',
   terminalAntigravity: { ...DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS },
+  terminalAntigravityFlagDraft: '',
   terminalTabDrag: null,
   suppressTerminalTabClick: false,
 };
@@ -2901,6 +2980,70 @@ function normalizeTerminalClaudeActiveFlags(flags, favoriteFlags = []) {
     .filter(Boolean);
 }
 
+function createTerminalAgentFlagId(agentId, flag, existingIds = new Set()) {
+  const slug = normalizeTerminalClaudeFlagText(flag)
+    .toLowerCase()
+    .replace(/^-+/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 36)
+    || 'flag';
+  let id = `${normalizeTerminalAgentId(agentId)}-flag-${slug}`;
+  let duplicate = 2;
+  while (existingIds.has(id)) {
+    id = `${normalizeTerminalAgentId(agentId)}-flag-${slug}-${duplicate}`;
+    duplicate += 1;
+  }
+  return id;
+}
+
+function normalizeTerminalAgentFavoriteFlags(flags, defaultFlags, agentId) {
+  const source = Array.isArray(flags) && flags.length ? flags : defaultFlags;
+  const ids = new Set();
+  const keys = new Set();
+  return source
+    .map((item) => {
+      const flag = normalizeTerminalClaudeFlagText(typeof item === 'string' ? item : item?.flag);
+      const key = terminalClaudeFlagKey(flag);
+      if (!flag || keys.has(key)) {
+        return null;
+      }
+      keys.add(key);
+
+      const rawId = String(typeof item === 'string' ? '' : item?.id || '').trim();
+      const id = rawId
+        .replace(/[^a-zA-Z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        || createTerminalAgentFlagId(agentId, flag, ids);
+      let nextId = id;
+      let duplicate = 2;
+      while (ids.has(nextId)) {
+        nextId = `${id}-${duplicate}`;
+        duplicate += 1;
+      }
+      ids.add(nextId);
+      return { id: nextId, flag };
+    })
+    .filter(Boolean);
+}
+
+function normalizeTerminalAgentActiveFlags(flags, favoriteFlags = []) {
+  const source = Array.isArray(flags) ? flags : [];
+  const favoriteByKey = new Map(favoriteFlags.map((item) => [terminalClaudeFlagKey(item.flag), item.flag]));
+  const keys = new Set();
+  return source
+    .map((flag) => {
+      const text = normalizeTerminalClaudeFlagText(flag);
+      const key = terminalClaudeFlagKey(text);
+      if (!text || keys.has(key)) {
+        return null;
+      }
+      keys.add(key);
+      return favoriteByKey.get(key) || text;
+    })
+    .filter(Boolean);
+}
+
 function normalizeTerminalClaudeSettings(settings) {
   if (!settings || typeof settings !== 'object') {
     return {
@@ -2970,6 +3113,19 @@ function normalizeTerminalCodexSettings(settings) {
   const approval = TERMINAL_CODEX_APPROVAL_OPTIONS.some((option) => option.value === source.approval)
     ? source.approval
     : DEFAULT_TERMINAL_CODEX_SETTINGS.approval;
+  const legacyFlags = source.search === true ? ['--search'] : [];
+  const favoriteSource = Array.isArray(source.favoriteFlags)
+    ? [
+        ...source.favoriteFlags,
+        ...(Array.isArray(source.activeFlags) ? source.activeFlags : []),
+        ...legacyFlags,
+      ]
+    : TERMINAL_CODEX_DEFAULT_FLAG_FAVORITES;
+  const favoriteFlags = normalizeTerminalAgentFavoriteFlags(favoriteSource, TERMINAL_CODEX_DEFAULT_FLAG_FAVORITES, 'codex');
+  const activeFlags = normalizeTerminalAgentActiveFlags([
+    ...(Array.isArray(source.activeFlags) ? source.activeFlags : []),
+    ...legacyFlags,
+  ], favoriteFlags);
 
   return {
     ...DEFAULT_TERMINAL_CODEX_SETTINGS,
@@ -2977,7 +3133,8 @@ function normalizeTerminalCodexSettings(settings) {
     model,
     sandbox,
     approval,
-    search: source.search === true,
+    favoriteFlags,
+    activeFlags,
   };
 }
 
@@ -2997,31 +3154,24 @@ function saveTerminalCodexSettings() {
   }
 }
 
-function terminalAntigravityFlagKey(flag) {
-  return String(flag || '').replace(/\0/g, '').trim().toLowerCase();
-}
-
 function normalizeTerminalAntigravitySettings(settings) {
   const source = settings && typeof settings === 'object' ? settings : {};
   const command = TERMINAL_ANTIGRAVITY_COMMANDS.includes(source.command)
     ? source.command
     : DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS.command;
-  const allowedFlags = new Map(TERMINAL_ANTIGRAVITY_FLAG_OPTIONS.map((item) => [terminalAntigravityFlagKey(item.flag), item.flag]));
-  const activeFlagKeys = new Set();
-  const activeFlags = (Array.isArray(source.activeFlags) ? source.activeFlags : [])
-    .map((flag) => allowedFlags.get(terminalAntigravityFlagKey(flag)))
-    .filter((flag) => {
-      const key = terminalAntigravityFlagKey(flag);
-      if (!flag || activeFlagKeys.has(key)) {
-        return false;
-      }
-      activeFlagKeys.add(key);
-      return true;
-    });
+  const favoriteSource = Array.isArray(source.favoriteFlags)
+    ? [
+        ...source.favoriteFlags,
+        ...(Array.isArray(source.activeFlags) ? source.activeFlags : []),
+      ]
+    : TERMINAL_ANTIGRAVITY_DEFAULT_FLAG_FAVORITES;
+  const favoriteFlags = normalizeTerminalAgentFavoriteFlags(favoriteSource, TERMINAL_ANTIGRAVITY_DEFAULT_FLAG_FAVORITES, 'antigravity');
+  const activeFlags = normalizeTerminalAgentActiveFlags(Array.isArray(source.activeFlags) ? source.activeFlags : [], favoriteFlags);
 
   return {
     ...DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS,
     command,
+    favoriteFlags,
     activeFlags,
   };
 }
@@ -3100,9 +3250,9 @@ function buildTerminalCodexCommand() {
   if (settings.approval) {
     parts.push('--ask-for-approval', settings.approval);
   }
-  if (settings.search) {
-    parts.push('--search');
-  }
+  settings.activeFlags.forEach((flag) => {
+    parts.push(flag);
+  });
 
   return parts.join(' ');
 }
@@ -3114,7 +3264,7 @@ function terminalCodexLaunchPayload() {
     model: settings.model,
     sandbox: settings.sandbox,
     approval: settings.approval,
-    search: settings.search,
+    activeFlags: settings.activeFlags,
   };
 }
 
@@ -3165,8 +3315,9 @@ function reorderTerminalFavorites(favorites, commandOrder) {
   return normalizeTerminalFavorites([...ordered.filter(Boolean), ...others]);
 }
 
-function migrateTerminalFavorites(favorites, fromVersion = 0) {
+function migrateTerminalFavorites(favorites, fromVersion = 0, agentId = DEFAULT_TERMINAL_AGENT_ID) {
   const version = Number(fromVersion) || 0;
+  const normalizedAgentId = normalizeTerminalAgentId(agentId);
   let next = normalizeTerminalFavorites(favorites);
 
   TERMINAL_FAVORITE_MIGRATIONS.forEach((migration) => {
@@ -3179,12 +3330,15 @@ function migrateTerminalFavorites(favorites, fromVersion = 0) {
       next = normalizeTerminalFavorites(next.filter((favorite) => !removeCommands.has(terminalFavoriteCommandKey(favorite.command))));
     }
 
-    if (!Array.isArray(migration.favorites) || !migration.favorites.length) {
+    const migrationFavorites = Array.isArray(migration.favoritesByAgent?.[normalizedAgentId])
+      ? migration.favoritesByAgent[normalizedAgentId]
+      : migration.favorites;
+    if (!Array.isArray(migrationFavorites) || !migrationFavorites.length) {
       return;
     }
 
     const existingCommands = new Set(next.map((favorite) => terminalFavoriteCommandKey(favorite.command)));
-    const additions = migration.favorites.filter((favorite) => {
+    const additions = migrationFavorites.filter((favorite) => {
       const key = terminalFavoriteCommandKey(favorite.command);
       if (!key || existingCommands.has(key)) {
         return false;
@@ -3197,8 +3351,11 @@ function migrateTerminalFavorites(favorites, fromVersion = 0) {
       next = normalizeTerminalFavorites([...next, ...additions]);
     }
 
-    if (Array.isArray(migration.reorderCommands) && migration.reorderCommands.length) {
-      next = reorderTerminalFavorites(next, migration.reorderCommands);
+    const reorderCommands = Array.isArray(migration.reorderCommandsByAgent?.[normalizedAgentId])
+      ? migration.reorderCommandsByAgent[normalizedAgentId]
+      : migration.reorderCommands;
+    if (Array.isArray(reorderCommands) && reorderCommands.length) {
+      next = reorderTerminalFavorites(next, reorderCommands);
     }
   });
 
@@ -3222,7 +3379,7 @@ function readTerminalFavorites() {
         activeAgent: DEFAULT_TERMINAL_AGENT_ID,
         favoritesByAgent: {
           ...defaultTerminalFavoritesByAgent(),
-          claude: migrateTerminalFavorites(parsed, version),
+      claude: migrateTerminalFavorites(parsed, version, 'claude'),
         },
       };
     }
@@ -3238,9 +3395,7 @@ function readTerminalFavorites() {
       if (!Array.isArray(sourceAgents[agent.id])) {
         return;
       }
-      favoritesByAgent[agent.id] = agent.id === 'claude'
-        ? migrateTerminalFavorites(sourceAgents[agent.id], version)
-        : normalizeTerminalFavorites(sourceAgents[agent.id]);
+      favoritesByAgent[agent.id] = migrateTerminalFavorites(sourceAgents[agent.id], version, agent.id);
     });
 
     return {
@@ -3359,9 +3514,7 @@ function applyTerminalPreferences(payload) {
       if (!Array.isArray(payload.favoritesByAgent[agent.id])) {
         return;
       }
-      nextFavoritesByAgent[agent.id] = agent.id === 'claude'
-        ? migrateTerminalFavorites(payload.favoritesByAgent[agent.id], favoritesVersion)
-        : normalizeTerminalFavorites(payload.favoritesByAgent[agent.id]);
+      nextFavoritesByAgent[agent.id] = migrateTerminalFavorites(payload.favoritesByAgent[agent.id], favoritesVersion, agent.id);
     });
     state.terminalFavoritesByAgent = nextFavoritesByAgent;
     state.terminalFavoriteAgent = normalizeTerminalAgentId(payload.activeAgent);
@@ -3372,7 +3525,7 @@ function applyTerminalPreferences(payload) {
     state.terminalFavoriteAgent = DEFAULT_TERMINAL_AGENT_ID;
     state.terminalFavoritesByAgent = {
       ...defaultTerminalFavoritesByAgent(),
-      claude: migrateTerminalFavorites(payload.favorites, favoritesVersion),
+      claude: migrateTerminalFavorites(payload.favorites, favoritesVersion, 'claude'),
     };
     syncTerminalFavoritesFromActiveAgent();
     needsSave = needsSave || favoritesVersion < TERMINAL_FAVORITES_VERSION;
@@ -3692,30 +3845,6 @@ function applyTerminalAntigravityCommand({ run = false } = {}) {
   applyTerminalAgentCommand('antigravity', buildTerminalAntigravityCommand(), terminalAntigravityLaunchPayload(), { run });
 }
 
-function toggleTerminalCodexSearch() {
-  const settings = normalizeTerminalCodexSettings(state.terminalCodex);
-  state.terminalCodex = normalizeTerminalCodexSettings({
-    ...settings,
-    search: !settings.search,
-  });
-  saveTerminalCodexSettings();
-  renderTerminalModal();
-}
-
-function toggleTerminalAntigravityFlag(flag) {
-  const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
-  const key = terminalAntigravityFlagKey(flag);
-  const active = settings.activeFlags.some((item) => terminalAntigravityFlagKey(item) === key);
-  state.terminalAntigravity = normalizeTerminalAntigravitySettings({
-    ...settings,
-    activeFlags: active
-      ? settings.activeFlags.filter((item) => terminalAntigravityFlagKey(item) !== key)
-      : [...settings.activeFlags, flag],
-  });
-  saveTerminalAntigravitySettings();
-  renderTerminalModal();
-}
-
 function toggleTerminalClaudeFavoriteFlag(id) {
   const settings = normalizeTerminalClaudeSettings(state.terminalClaude);
   const favorite = settings.favoriteFlags.find((item) => item.id === id);
@@ -3782,6 +3911,144 @@ function deleteTerminalClaudeFavoriteFlag(id) {
     activeFlags: settings.activeFlags.filter((flag) => terminalClaudeFlagKey(flag) !== key),
   });
   saveTerminalClaudeSettings();
+  renderTerminalModal();
+}
+
+function toggleTerminalCodexFavoriteFlag(id) {
+  const settings = normalizeTerminalCodexSettings(state.terminalCodex);
+  const favorite = settings.favoriteFlags.find((item) => item.id === id);
+  if (!favorite) {
+    return;
+  }
+
+  const key = terminalClaudeFlagKey(favorite.flag);
+  const nextActiveFlags = settings.activeFlags.some((flag) => terminalClaudeFlagKey(flag) === key)
+    ? settings.activeFlags.filter((flag) => terminalClaudeFlagKey(flag) !== key)
+    : [...settings.activeFlags, favorite.flag];
+
+  state.terminalCodex = normalizeTerminalCodexSettings({
+    ...settings,
+    activeFlags: nextActiveFlags,
+  });
+  saveTerminalCodexSettings();
+  renderTerminalModal();
+}
+
+function addTerminalCodexFavoriteFlag() {
+  const flag = normalizeTerminalClaudeFlagText(state.terminalCodexFlagDraft);
+  if (!flag) {
+    showToast('請輸入啟動旗標');
+    return;
+  }
+
+  const settings = normalizeTerminalCodexSettings(state.terminalCodex);
+  const existing = settings.favoriteFlags.find((item) => terminalClaudeFlagKey(item.flag) === terminalClaudeFlagKey(flag));
+  const favoriteFlags = existing
+    ? settings.favoriteFlags
+    : [
+        ...settings.favoriteFlags,
+        {
+          id: createTerminalAgentFlagId('codex', flag, new Set(settings.favoriteFlags.map((item) => item.id))),
+          flag,
+        },
+      ];
+  const activeFlags = settings.activeFlags.some((item) => terminalClaudeFlagKey(item) === terminalClaudeFlagKey(flag))
+    ? settings.activeFlags
+    : [...settings.activeFlags, flag];
+
+  state.terminalCodex = normalizeTerminalCodexSettings({
+    ...settings,
+    favoriteFlags,
+    activeFlags,
+  });
+  state.terminalCodexFlagDraft = '';
+  saveTerminalCodexSettings();
+  renderTerminalModal();
+}
+
+function deleteTerminalCodexFavoriteFlag(id) {
+  const settings = normalizeTerminalCodexSettings(state.terminalCodex);
+  const favorite = settings.favoriteFlags.find((item) => item.id === id);
+  if (!favorite) {
+    return;
+  }
+
+  const key = terminalClaudeFlagKey(favorite.flag);
+  state.terminalCodex = normalizeTerminalCodexSettings({
+    ...settings,
+    favoriteFlags: settings.favoriteFlags.filter((item) => item.id !== id),
+    activeFlags: settings.activeFlags.filter((flag) => terminalClaudeFlagKey(flag) !== key),
+  });
+  saveTerminalCodexSettings();
+  renderTerminalModal();
+}
+
+function toggleTerminalAntigravityFavoriteFlag(id) {
+  const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
+  const favorite = settings.favoriteFlags.find((item) => item.id === id);
+  if (!favorite) {
+    return;
+  }
+
+  const key = terminalClaudeFlagKey(favorite.flag);
+  const nextActiveFlags = settings.activeFlags.some((flag) => terminalClaudeFlagKey(flag) === key)
+    ? settings.activeFlags.filter((flag) => terminalClaudeFlagKey(flag) !== key)
+    : [...settings.activeFlags, favorite.flag];
+
+  state.terminalAntigravity = normalizeTerminalAntigravitySettings({
+    ...settings,
+    activeFlags: nextActiveFlags,
+  });
+  saveTerminalAntigravitySettings();
+  renderTerminalModal();
+}
+
+function addTerminalAntigravityFavoriteFlag() {
+  const flag = normalizeTerminalClaudeFlagText(state.terminalAntigravityFlagDraft);
+  if (!flag) {
+    showToast('請輸入啟動旗標');
+    return;
+  }
+
+  const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
+  const existing = settings.favoriteFlags.find((item) => terminalClaudeFlagKey(item.flag) === terminalClaudeFlagKey(flag));
+  const favoriteFlags = existing
+    ? settings.favoriteFlags
+    : [
+        ...settings.favoriteFlags,
+        {
+          id: createTerminalAgentFlagId('antigravity', flag, new Set(settings.favoriteFlags.map((item) => item.id))),
+          flag,
+        },
+      ];
+  const activeFlags = settings.activeFlags.some((item) => terminalClaudeFlagKey(item) === terminalClaudeFlagKey(flag))
+    ? settings.activeFlags
+    : [...settings.activeFlags, flag];
+
+  state.terminalAntigravity = normalizeTerminalAntigravitySettings({
+    ...settings,
+    favoriteFlags,
+    activeFlags,
+  });
+  state.terminalAntigravityFlagDraft = '';
+  saveTerminalAntigravitySettings();
+  renderTerminalModal();
+}
+
+function deleteTerminalAntigravityFavoriteFlag(id) {
+  const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
+  const favorite = settings.favoriteFlags.find((item) => item.id === id);
+  if (!favorite) {
+    return;
+  }
+
+  const key = terminalClaudeFlagKey(favorite.flag);
+  state.terminalAntigravity = normalizeTerminalAntigravitySettings({
+    ...settings,
+    favoriteFlags: settings.favoriteFlags.filter((item) => item.id !== id),
+    activeFlags: settings.activeFlags.filter((flag) => terminalClaudeFlagKey(flag) !== key),
+  });
+  saveTerminalAntigravitySettings();
   renderTerminalModal();
 }
 
@@ -4511,6 +4778,51 @@ function renderTerminalClaudeLauncher(session, options) {
   `;
 }
 
+function renderTerminalAgentFlagControls({
+  agentId,
+  activeFlags,
+  favoriteFlags,
+  draft,
+  disabled,
+}) {
+  const activeFlagKeys = new Set(activeFlags.map((flag) => terminalClaudeFlagKey(flag)));
+  const flags = favoriteFlags.map((item) => {
+    const active = activeFlagKeys.has(terminalClaudeFlagKey(item.flag));
+    return `
+      <div class="terminal-claude-flag-item ${active ? 'is-active' : ''}">
+        <button
+          class="terminal-claude-flag-toggle"
+          data-terminal-${agentId}-favorite-flag="${escapeHtml(item.id)}"
+          type="button"
+          aria-pressed="${active ? 'true' : 'false'}"
+          ${disabled}
+        ><span>${escapeHtml(item.flag)}</span></button>
+        <button
+          class="terminal-claude-flag-delete"
+          data-terminal-${agentId}-delete-flag="${escapeHtml(item.id)}"
+          type="button"
+          title="刪除旗標"
+          aria-label="刪除旗標 ${escapeHtml(item.flag)}"
+          ${disabled}
+        >${icons.remove}</button>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="terminal-claude-flags">
+      <div class="terminal-claude-flags-heading">其他啟動旗標</div>
+      <div class="terminal-claude-flag-list">
+        ${flags}
+      </div>
+      <div class="terminal-claude-flag-add">
+        <input data-terminal-${agentId}-flag-draft type="text" value="${escapeHtml(draft)}" placeholder="--flag value" spellcheck="false" ${disabled} />
+        <button class="copy-url" data-terminal-${agentId}-add-flag type="button" ${disabled}>${icons.add}<span>加入最愛</span></button>
+      </div>
+    </div>
+  `;
+}
+
 function renderTerminalCodexLauncher(session, options) {
   const settings = normalizeTerminalCodexSettings(state.terminalCodex);
   const preview = buildTerminalCodexCommand();
@@ -4530,6 +4842,13 @@ function renderTerminalCodexLauncher(session, options) {
       >${escapeHtml(command)}</button>
     `;
   }).join('');
+  const flags = renderTerminalAgentFlagControls({
+    agentId: 'codex',
+    activeFlags: settings.activeFlags,
+    favoriteFlags: settings.favoriteFlags,
+    draft: state.terminalCodexFlagDraft,
+    disabled,
+  });
 
   return `
     <section class="terminal-claude-launcher terminal-agent-launcher" aria-label="Codex CLI">
@@ -4568,15 +4887,7 @@ function renderTerminalCodexLauncher(session, options) {
           </select>
         </label>
       </div>
-      <div class="terminal-agent-quick-flags" role="group" aria-label="Codex quick flags">
-        <button
-          class="terminal-agent-flag-button ${settings.search ? 'is-active' : ''}"
-          data-terminal-codex-search
-          type="button"
-          aria-pressed="${settings.search ? 'true' : 'false'}"
-          ${disabled}
-        >--search</button>
-      </div>
+      ${flags}
     </section>
   `;
 }
@@ -4587,7 +4898,6 @@ function renderTerminalAntigravityLauncher(session, options) {
   const canUseAntigravity = terminalCanUseAgentLauncher(session);
   const disabled = canUseAntigravity ? '' : 'disabled';
   const commandDisabled = canUseAntigravity && !(!session.id && options.loading) ? '' : 'disabled';
-  const activeFlagKeys = new Set(settings.activeFlags.map((flag) => terminalAntigravityFlagKey(flag)));
   const commandButtons = TERMINAL_ANTIGRAVITY_COMMANDS.map((command) => {
     const active = settings.command === command;
     return `
@@ -4601,18 +4911,13 @@ function renderTerminalAntigravityLauncher(session, options) {
       >${escapeHtml(command)}</button>
     `;
   }).join('');
-  const flagButtons = TERMINAL_ANTIGRAVITY_FLAG_OPTIONS.map((item) => {
-    const active = activeFlagKeys.has(terminalAntigravityFlagKey(item.flag));
-    return `
-      <button
-        class="terminal-agent-flag-button ${active ? 'is-active' : ''}"
-        data-terminal-antigravity-flag="${escapeHtml(item.flag)}"
-        type="button"
-        aria-pressed="${active ? 'true' : 'false'}"
-        ${disabled}
-      >${escapeHtml(item.flag)}</button>
-    `;
-  }).join('');
+  const flags = renderTerminalAgentFlagControls({
+    agentId: 'antigravity',
+    activeFlags: settings.activeFlags,
+    favoriteFlags: settings.favoriteFlags,
+    draft: state.terminalAntigravityFlagDraft,
+    disabled,
+  });
 
   return `
     <section class="terminal-claude-launcher terminal-agent-launcher" aria-label="Antigravity CLI">
@@ -4626,9 +4931,7 @@ function renderTerminalAntigravityLauncher(session, options) {
         <div class="terminal-claude-command terminal-agent-single-command" role="group" aria-label="Antigravity command">
           ${commandButtons}
         </div>
-        <div class="terminal-agent-quick-flags" role="group" aria-label="Antigravity quick flags">
-          ${flagButtons}
-        </div>
+        ${flags}
       </div>
     </section>
   `;
@@ -6453,6 +6756,18 @@ elements.terminalWorkspace.addEventListener('input', (event) => {
     return;
   }
 
+  const codexFlagDraftInput = event.target.closest('[data-terminal-codex-flag-draft]');
+  if (codexFlagDraftInput) {
+    state.terminalCodexFlagDraft = codexFlagDraftInput.value;
+    return;
+  }
+
+  const antigravityFlagDraftInput = event.target.closest('[data-terminal-antigravity-flag-draft]');
+  if (antigravityFlagDraftInput) {
+    state.terminalAntigravityFlagDraft = antigravityFlagDraftInput.value;
+    return;
+  }
+
   const favoriteCommandInput = event.target.closest('[data-terminal-favorite-command]');
   if (favoriteCommandInput) {
     state.terminalFavoriteDraftCommand = favoriteCommandInput.value;
@@ -6542,9 +6857,21 @@ elements.terminalWorkspace.addEventListener('click', (event) => {
     return;
   }
 
-  const codexSearchButton = event.target.closest('button[data-terminal-codex-search]');
-  if (codexSearchButton) {
-    toggleTerminalCodexSearch();
+  const codexFavoriteFlagButton = event.target.closest('button[data-terminal-codex-favorite-flag]');
+  if (codexFavoriteFlagButton) {
+    toggleTerminalCodexFavoriteFlag(codexFavoriteFlagButton.dataset.terminalCodexFavoriteFlag);
+    return;
+  }
+
+  const codexDeleteFlagButton = event.target.closest('button[data-terminal-codex-delete-flag]');
+  if (codexDeleteFlagButton) {
+    deleteTerminalCodexFavoriteFlag(codexDeleteFlagButton.dataset.terminalCodexDeleteFlag);
+    return;
+  }
+
+  const codexAddFlagButton = event.target.closest('button[data-terminal-codex-add-flag]');
+  if (codexAddFlagButton) {
+    addTerminalCodexFavoriteFlag();
     return;
   }
 
@@ -6559,9 +6886,21 @@ elements.terminalWorkspace.addEventListener('click', (event) => {
     return;
   }
 
-  const antigravityFlagButton = event.target.closest('button[data-terminal-antigravity-flag]');
-  if (antigravityFlagButton) {
-    toggleTerminalAntigravityFlag(antigravityFlagButton.dataset.terminalAntigravityFlag);
+  const antigravityFavoriteFlagButton = event.target.closest('button[data-terminal-antigravity-favorite-flag]');
+  if (antigravityFavoriteFlagButton) {
+    toggleTerminalAntigravityFavoriteFlag(antigravityFavoriteFlagButton.dataset.terminalAntigravityFavoriteFlag);
+    return;
+  }
+
+  const antigravityDeleteFlagButton = event.target.closest('button[data-terminal-antigravity-delete-flag]');
+  if (antigravityDeleteFlagButton) {
+    deleteTerminalAntigravityFavoriteFlag(antigravityDeleteFlagButton.dataset.terminalAntigravityDeleteFlag);
+    return;
+  }
+
+  const antigravityAddFlagButton = event.target.closest('button[data-terminal-antigravity-add-flag]');
+  if (antigravityAddFlagButton) {
+    addTerminalAntigravityFavoriteFlag();
     return;
   }
 
@@ -6687,6 +7026,34 @@ elements.terminalWorkspace.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
       state.terminalClaudeFlagDraft = '';
+      renderTerminalModal();
+    }
+    return;
+  }
+
+  const codexFlagDraftInput = event.target.closest('[data-terminal-codex-flag-draft]');
+  if (codexFlagDraftInput) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      addTerminalCodexFavoriteFlag();
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      state.terminalCodexFlagDraft = '';
+      renderTerminalModal();
+    }
+    return;
+  }
+
+  const antigravityFlagDraftInput = event.target.closest('[data-terminal-antigravity-flag-draft]');
+  if (antigravityFlagDraftInput) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      addTerminalAntigravityFavoriteFlag();
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      state.terminalAntigravityFlagDraft = '';
       renderTerminalModal();
     }
     return;

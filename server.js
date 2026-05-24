@@ -81,7 +81,7 @@ const TERMINAL_WORKSPACE_SESSION_LIMIT = 80;
 const TERMINAL_DEFAULT_COLS = 100;
 const TERMINAL_DEFAULT_ROWS = 28;
 const TERMINAL_MAX_ROWS = 120;
-const TERMINAL_FAVORITES_VERSION = 6;
+const TERMINAL_FAVORITES_VERSION = 7;
 const TERMINAL_AGENT_IDS = ['claude', 'codex', 'antigravity'];
 const DEFAULT_TERMINAL_AGENT_ID = 'claude';
 const TERMINAL_LEGACY_CLAUDE_FAVORITES = ['claude', 'claude -r', 'claude -c'];
@@ -113,32 +113,58 @@ const TERMINAL_CLAUDE_SLASH_FAVORITES = [
 ];
 const TERMINAL_CODEX_SLASH_FAVORITES = [
   { id: 'favorite-codex-permissions', command: '/permissions', note: '' },
+  { id: 'favorite-codex-approve', command: '/approve', note: '' },
   { id: 'favorite-codex-model', command: '/model', note: '' },
+  { id: 'favorite-codex-fast', command: '/fast', note: '' },
   { id: 'favorite-codex-plan', command: '/plan', note: '' },
+  { id: 'favorite-codex-personality', command: '/personality', note: '' },
   { id: 'favorite-codex-compact', command: '/compact', note: '' },
   { id: 'favorite-codex-diff', command: '/diff', note: '' },
   { id: 'favorite-codex-review', command: '/review', note: '' },
   { id: 'favorite-codex-init', command: '/init', note: '' },
   { id: 'favorite-codex-mcp', command: '/mcp', note: '' },
+  { id: 'favorite-codex-plugins', command: '/plugins', note: '' },
+  { id: 'favorite-codex-apps', command: '/apps', note: '' },
+  { id: 'favorite-codex-hooks', command: '/hooks', note: '' },
   { id: 'favorite-codex-skills', command: '/skills', note: '' },
   { id: 'favorite-codex-agent', command: '/agent', note: '' },
   { id: 'favorite-codex-goal', command: '/goal', note: '' },
   { id: 'favorite-codex-fork', command: '/fork', note: '' },
   { id: 'favorite-codex-side', command: '/side', note: '' },
+  { id: 'favorite-codex-ide', command: '/ide', note: '' },
+  { id: 'favorite-codex-mention', command: '/mention', note: '' },
+  { id: 'favorite-codex-copy', command: '/copy', note: '' },
+  { id: 'favorite-codex-sandbox-add-read-dir', command: '/sandbox-add-read-dir', note: '' },
   { id: 'favorite-codex-resume', command: '/resume', note: '' },
   { id: 'favorite-codex-status', command: '/status', note: '' },
+  { id: 'favorite-codex-statusline', command: '/statusline', note: '' },
+  { id: 'favorite-codex-title', command: '/title', note: '' },
+  { id: 'favorite-codex-keymap', command: '/keymap', note: '' },
+  { id: 'favorite-codex-theme', command: '/theme', note: '' },
+  { id: 'favorite-codex-memories', command: '/memories', note: '' },
+  { id: 'favorite-codex-experimental', command: '/experimental', note: '' },
   { id: 'favorite-codex-ps', command: '/ps', note: '' },
   { id: 'favorite-codex-stop', command: '/stop', note: '' },
+  { id: 'favorite-codex-raw', command: '/raw', note: '' },
+  { id: 'favorite-codex-vim', command: '/vim', note: '' },
+  { id: 'favorite-codex-debug-config', command: '/debug-config', note: '' },
   { id: 'favorite-codex-clear', command: '/clear', note: '' },
+  { id: 'favorite-codex-new', command: '/new', note: '' },
+  { id: 'favorite-codex-logout', command: '/logout', note: '' },
+  { id: 'favorite-codex-feedback', command: '/feedback', note: '' },
   { id: 'favorite-codex-exit', command: '/exit', note: '' },
+  { id: 'favorite-codex-quit', command: '/quit', note: '' },
 ];
 const TERMINAL_ANTIGRAVITY_SLASH_FAVORITES = [
   { id: 'favorite-antigravity-resume', command: '/resume', note: '' },
+  { id: 'favorite-antigravity-switch', command: '/switch', note: '' },
   { id: 'favorite-antigravity-rewind', command: '/rewind', note: '' },
+  { id: 'favorite-antigravity-undo', command: '/undo', note: '' },
   { id: 'favorite-antigravity-rename', command: '/rename', note: '' },
   { id: 'favorite-antigravity-permissions', command: '/permissions', note: '' },
   { id: 'favorite-antigravity-model', command: '/model', note: '' },
   { id: 'favorite-antigravity-config', command: '/config', note: '' },
+  { id: 'favorite-antigravity-settings', command: '/settings', note: '' },
   { id: 'favorite-antigravity-keybindings', command: '/keybindings', note: '' },
   { id: 'favorite-antigravity-statusline', command: '/statusline', note: '' },
   { id: 'favorite-antigravity-tasks', command: '/tasks', note: '' },
@@ -156,6 +182,37 @@ const DEFAULT_TERMINAL_FAVORITES_BY_AGENT = {
   codex: TERMINAL_CODEX_SLASH_FAVORITES,
   antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES,
 };
+const TERMINAL_CODEX_FAVORITE_MIGRATION_7_COMMANDS = [
+  '/approve',
+  '/fast',
+  '/personality',
+  '/plugins',
+  '/apps',
+  '/hooks',
+  '/ide',
+  '/mention',
+  '/copy',
+  '/sandbox-add-read-dir',
+  '/statusline',
+  '/title',
+  '/keymap',
+  '/theme',
+  '/memories',
+  '/experimental',
+  '/raw',
+  '/vim',
+  '/debug-config',
+  '/new',
+  '/logout',
+  '/feedback',
+  '/quit',
+];
+const TERMINAL_ANTIGRAVITY_FAVORITE_MIGRATION_7_COMMANDS = [
+  '/switch',
+  '/undo',
+  '/settings',
+  '/agents',
+];
 const TERMINAL_SLASH_FAVORITES = TERMINAL_CLAUDE_SLASH_FAVORITES;
 const TERMINAL_FAVORITE_MIGRATIONS = [
   { version: 2, favorites: TERMINAL_CLAUDE_SLASH_FAVORITES.slice(0, 4) },
@@ -171,6 +228,17 @@ const TERMINAL_FAVORITE_MIGRATIONS = [
     favorites: TERMINAL_CLAUDE_SLASH_FAVORITES,
     reorderCommands: TERMINAL_CLAUDE_SLASH_FAVORITES.map((favorite) => favorite.command),
   },
+  {
+    version: 7,
+    favoritesByAgent: {
+      codex: TERMINAL_CODEX_SLASH_FAVORITES.filter((favorite) => TERMINAL_CODEX_FAVORITE_MIGRATION_7_COMMANDS.includes(favorite.command)),
+      antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.filter((favorite) => TERMINAL_ANTIGRAVITY_FAVORITE_MIGRATION_7_COMMANDS.includes(favorite.command)),
+    },
+    reorderCommandsByAgent: {
+      codex: TERMINAL_CODEX_SLASH_FAVORITES.map((favorite) => favorite.command),
+      antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.map((favorite) => favorite.command),
+    },
+  },
 ];
 const DEFAULT_TERMINAL_FAVORITES = [
   ...TERMINAL_CLAUDE_SLASH_FAVORITES,
@@ -180,8 +248,16 @@ const TERMINAL_CLAUDE_EFFORTS = new Set(['', 'low', 'medium', 'high', 'xhigh', '
 const TERMINAL_CLAUDE_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'dontAsk']);
 const TERMINAL_REMOTE_CLAUDE_FLAGS = new Set(['--remote-control', '--chrome', '--worktree', '--init']);
 const TERMINAL_CODEX_COMMANDS = new Set(['codex', 'codex resume --last', 'codex fork --last']);
-const TERMINAL_CODEX_SANDBOXES = new Set(['', 'read-only', 'workspace-write']);
+const TERMINAL_CODEX_SANDBOXES = new Set(['', 'read-only', 'workspace-write', 'danger-full-access']);
 const TERMINAL_CODEX_APPROVALS = new Set(['', 'untrusted', 'on-request', 'never']);
+const TERMINAL_REMOTE_CODEX_FLAGS = new Set([
+  '--search',
+  '--no-alt-screen',
+  '--oss',
+  '--yolo',
+  '--dangerously-bypass-approvals-and-sandbox',
+  '--dangerously-bypass-hook-trust',
+]);
 const TERMINAL_ANTIGRAVITY_COMMANDS = new Set(['agy']);
 const TERMINAL_REMOTE_ANTIGRAVITY_FLAGS = new Set(['--sandbox', '--dangerously-skip-permissions']);
 const VENDOR_ASSETS = new Map([
@@ -338,8 +414,9 @@ function terminalFavoriteCommandKey(command) {
   return String(command || '').trim().toLowerCase();
 }
 
-function migrateTerminalFavorites(favorites, fromVersion = 0) {
+function migrateTerminalFavorites(favorites, fromVersion = 0, agentId = DEFAULT_TERMINAL_AGENT_ID) {
   const version = Number(fromVersion) || 0;
+  const normalizedAgentId = normalizeTerminalAgentId(agentId);
   let next = normalizeTerminalFavorites(favorites);
 
   TERMINAL_FAVORITE_MIGRATIONS.forEach((migration) => {
@@ -352,8 +429,15 @@ function migrateTerminalFavorites(favorites, fromVersion = 0) {
       next = normalizeTerminalFavorites(next.filter((favorite) => !removeCommands.has(terminalFavoriteCommandKey(favorite.command))));
     }
 
+    const migrationFavorites = Array.isArray(migration.favoritesByAgent?.[normalizedAgentId])
+      ? migration.favoritesByAgent[normalizedAgentId]
+      : migration.favorites;
+    if (!Array.isArray(migrationFavorites) || !migrationFavorites.length) {
+      return;
+    }
+
     const existingCommands = new Set(next.map((favorite) => terminalFavoriteCommandKey(favorite.command)));
-    const additions = migration.favorites.filter((favorite) => {
+    const additions = migrationFavorites.filter((favorite) => {
       const key = terminalFavoriteCommandKey(favorite.command);
       if (!key || existingCommands.has(key)) {
         return false;
@@ -366,9 +450,12 @@ function migrateTerminalFavorites(favorites, fromVersion = 0) {
       next = normalizeTerminalFavorites([...next, ...additions]);
     }
 
-    if (Array.isArray(migration.reorderCommands) && migration.reorderCommands.length) {
-      const orderMap = new Map(migration.reorderCommands.map((command, index) => [terminalFavoriteCommandKey(command), index]));
-      const ordered = new Array(migration.reorderCommands.length).fill(null);
+    const reorderCommands = Array.isArray(migration.reorderCommandsByAgent?.[normalizedAgentId])
+      ? migration.reorderCommandsByAgent[normalizedAgentId]
+      : migration.reorderCommands;
+    if (Array.isArray(reorderCommands) && reorderCommands.length) {
+      const orderMap = new Map(reorderCommands.map((command, index) => [terminalFavoriteCommandKey(command), index]));
+      const ordered = new Array(reorderCommands.length).fill(null);
       const others = [];
       next.forEach((favorite) => {
         const orderIndex = orderMap.get(terminalFavoriteCommandKey(favorite.command));
@@ -406,9 +493,7 @@ function normalizeTerminalFavoritesByAgent(source, favoritesVersion = 0) {
     if (!Array.isArray(agents[agentId])) {
       return;
     }
-    favoritesByAgent[agentId] = agentId === 'claude'
-      ? migrateTerminalFavorites(agents[agentId], favoritesVersion)
-      : normalizeTerminalFavorites(agents[agentId]);
+    favoritesByAgent[agentId] = migrateTerminalFavorites(agents[agentId], favoritesVersion, agentId);
   });
 
   return favoritesByAgent;
@@ -493,7 +578,7 @@ function readTerminalPreferences() {
     : saved && Array.isArray(stored?.favorites)
       ? {
           ...defaultTerminalFavoritesByAgent(),
-          claude: migrateTerminalFavorites(stored.favorites, favoritesVersion),
+          claude: migrateTerminalFavorites(stored.favorites, favoritesVersion, 'claude'),
         }
       : defaults.favoritesByAgent;
   const activeAgent = saved ? normalizeTerminalAgentId(stored?.activeAgent) : defaults.activeAgent;
@@ -1749,6 +1834,20 @@ function normalizeTerminalCodexApprovalForLaunch(value) {
   return approval;
 }
 
+function normalizeTerminalCodexFlagForLaunch(value) {
+  let flag = normalizeTerminalClaudeText(value, 120);
+  if (!flag) {
+    return '';
+  }
+  if (!flag.startsWith('-')) {
+    flag = `--${flag}`;
+  }
+  if (!TERMINAL_REMOTE_CODEX_FLAGS.has(flag)) {
+    throw new Error(`Codex flag is not allowed for remote launch: ${flag}`);
+  }
+  return flag;
+}
+
 function buildTerminalCodexLaunchCommand(settings = {}) {
   const command = TERMINAL_CODEX_COMMANDS.has(settings.command)
     ? settings.command
@@ -1756,6 +1855,19 @@ function buildTerminalCodexLaunchCommand(settings = {}) {
   const model = normalizeTerminalCodexModelForLaunch(settings.model);
   const sandbox = normalizeTerminalCodexSandboxForLaunch(settings.sandbox);
   const approval = normalizeTerminalCodexApprovalForLaunch(settings.approval);
+  const activeFlags = [
+    ...(Array.isArray(settings.activeFlags) ? settings.activeFlags : []),
+    ...(settings.search === true ? ['--search'] : []),
+  ];
+  const flags = [];
+  const flagKeys = new Set();
+  activeFlags.forEach((item) => {
+    const flag = normalizeTerminalCodexFlagForLaunch(item);
+    if (flag && !flagKeys.has(flag)) {
+      flagKeys.add(flag);
+      flags.push(flag);
+    }
+  });
   const parts = [command];
 
   if (model) {
@@ -1767,9 +1879,7 @@ function buildTerminalCodexLaunchCommand(settings = {}) {
   if (approval) {
     parts.push('--ask-for-approval', approval);
   }
-  if (settings.search === true) {
-    parts.push('--search');
-  }
+  parts.push(...flags);
 
   return parts.join(' ');
 }
