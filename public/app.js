@@ -285,8 +285,10 @@ const TABLE_PREFERENCES_KEY = 'agentTaskManager.tablePreferences.v3';
 const THEME_PREFERENCE_KEY = 'agentTaskManager.theme.v1';
 const TERMINAL_FAVORITES_KEY = 'agentTaskManager.terminalFavorites.v1';
 const TERMINAL_FAVORITES_VERSION_KEY = 'agentTaskManager.terminalFavoritesVersion.v1';
-const TERMINAL_FAVORITES_VERSION = 5;
+const TERMINAL_FAVORITES_VERSION = 6;
 const TERMINAL_CLAUDE_SETTINGS_KEY = 'agentTaskManager.terminalClaudeSettings.v1';
+const TERMINAL_CODEX_SETTINGS_KEY = 'agentTaskManager.terminalCodexSettings.v1';
+const TERMINAL_ANTIGRAVITY_SETTINGS_KEY = 'agentTaskManager.terminalAntigravitySettings.v1';
 const TERMINAL_WORKSPACE_KEY = 'agentTaskManager.terminalWorkspace.v1';
 const LEGACY_STORAGE_KEYS = new Map([
   [TABLE_PREFERENCES_KEY, 'devDock.tablePreferences.v3'],
@@ -294,46 +296,109 @@ const LEGACY_STORAGE_KEYS = new Map([
   [TERMINAL_FAVORITES_KEY, 'devDock.terminalFavorites.v1'],
   [TERMINAL_FAVORITES_VERSION_KEY, 'devDock.terminalFavoritesVersion.v1'],
   [TERMINAL_CLAUDE_SETTINGS_KEY, 'devDock.terminalClaudeSettings.v1'],
+  [TERMINAL_CODEX_SETTINGS_KEY, 'devDock.terminalCodexSettings.v1'],
+  [TERMINAL_ANTIGRAVITY_SETTINGS_KEY, 'devDock.terminalAntigravitySettings.v1'],
   [TERMINAL_WORKSPACE_KEY, 'devDock.terminalWorkspace.v1'],
 ]);
 const TERMINAL_PREFERENCE_TEXT_LIMIT = 4096;
 const TERMINAL_FAVORITE_COLLAPSED_ROWS = 2;
+const TERMINAL_AGENT_TABS = [
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'codex', label: 'Codex CLI' },
+  { id: 'antigravity', label: 'Antigravity CLI' },
+];
+const DEFAULT_TERMINAL_AGENT_ID = 'claude';
+const terminalAgentIds = new Set(TERMINAL_AGENT_TABS.map((agent) => agent.id));
 const TERMINAL_LEGACY_CLAUDE_FAVORITES = ['claude', 'claude -r', 'claude -c'];
-const TERMINAL_BASE_SLASH_FAVORITES = [
-  { id: 'favorite-context', command: '/context', note: '' },
-  { id: 'favorite-model', command: '/model', note: '' },
-  { id: 'favorite-effect', command: '/effect', note: '' },
-  { id: 'favorite-exit', command: '/exit', note: '' },
+const TERMINAL_CLAUDE_SLASH_FAVORITES = [
+  { id: 'favorite-claude-init', command: '/init', note: '' },
+  { id: 'favorite-claude-memory', command: '/memory', note: '' },
+  { id: 'favorite-claude-mcp', command: '/mcp', note: '' },
+  { id: 'favorite-claude-permissions', command: '/permissions', note: '' },
+  { id: 'favorite-claude-model', command: '/model', note: '' },
+  { id: 'favorite-claude-effort', command: '/effort', note: '' },
+  { id: 'favorite-claude-plan', command: '/plan', note: '' },
+  { id: 'favorite-claude-context', command: '/context', note: '' },
+  { id: 'favorite-claude-compact', command: '/compact', note: '' },
+  { id: 'favorite-claude-btw', command: '/btw', note: '' },
+  { id: 'favorite-claude-agents', command: '/agents', note: '' },
+  { id: 'favorite-claude-tasks', command: '/tasks', note: '' },
+  { id: 'favorite-claude-batch', command: '/batch', note: '' },
+  { id: 'favorite-claude-diff', command: '/diff', note: '' },
+  { id: 'favorite-claude-code-review', command: '/code-review', note: '' },
+  { id: 'favorite-claude-review', command: '/review', note: '' },
+  { id: 'favorite-claude-rewind', command: '/rewind', note: '' },
+  { id: 'favorite-claude-clear', command: '/clear', note: '' },
+  { id: 'favorite-claude-resume', command: '/resume', note: '' },
+  { id: 'favorite-claude-branch', command: '/branch', note: '' },
+  { id: 'favorite-claude-doctor', command: '/doctor', note: '' },
+  { id: 'favorite-claude-debug', command: '/debug', note: '' },
+  { id: 'favorite-claude-schedule', command: '/schedule', note: '' },
+  { id: 'favorite-claude-exit', command: '/exit', note: '' },
 ];
-const TERMINAL_EXTRA_SLASH_FAVORITES = [
-  { id: 'favorite-compact', command: '/compact', note: '' },
-  { id: 'favorite-clear', command: '/clear', note: '' },
+const TERMINAL_CODEX_SLASH_FAVORITES = [
+  { id: 'favorite-codex-permissions', command: '/permissions', note: '' },
+  { id: 'favorite-codex-model', command: '/model', note: '' },
+  { id: 'favorite-codex-plan', command: '/plan', note: '' },
+  { id: 'favorite-codex-compact', command: '/compact', note: '' },
+  { id: 'favorite-codex-diff', command: '/diff', note: '' },
+  { id: 'favorite-codex-review', command: '/review', note: '' },
+  { id: 'favorite-codex-init', command: '/init', note: '' },
+  { id: 'favorite-codex-mcp', command: '/mcp', note: '' },
+  { id: 'favorite-codex-skills', command: '/skills', note: '' },
+  { id: 'favorite-codex-agent', command: '/agent', note: '' },
+  { id: 'favorite-codex-goal', command: '/goal', note: '' },
+  { id: 'favorite-codex-fork', command: '/fork', note: '' },
+  { id: 'favorite-codex-side', command: '/side', note: '' },
+  { id: 'favorite-codex-resume', command: '/resume', note: '' },
+  { id: 'favorite-codex-status', command: '/status', note: '' },
+  { id: 'favorite-codex-ps', command: '/ps', note: '' },
+  { id: 'favorite-codex-stop', command: '/stop', note: '' },
+  { id: 'favorite-codex-clear', command: '/clear', note: '' },
+  { id: 'favorite-codex-exit', command: '/exit', note: '' },
 ];
-const TERMINAL_ASSISTANT_SLASH_FAVORITES = [
-  { id: 'favorite-btw', command: '/btw', note: '' },
-  { id: 'favorite-rewind', command: '/rewind', note: '' },
-  { id: 'favorite-schedule', command: '/schedule', note: '' },
-  { id: 'favorite-tasks', command: '/tasks', note: '' },
+const TERMINAL_ANTIGRAVITY_SLASH_FAVORITES = [
+  { id: 'favorite-antigravity-resume', command: '/resume', note: '' },
+  { id: 'favorite-antigravity-rewind', command: '/rewind', note: '' },
+  { id: 'favorite-antigravity-rename', command: '/rename', note: '' },
+  { id: 'favorite-antigravity-permissions', command: '/permissions', note: '' },
+  { id: 'favorite-antigravity-model', command: '/model', note: '' },
+  { id: 'favorite-antigravity-config', command: '/config', note: '' },
+  { id: 'favorite-antigravity-keybindings', command: '/keybindings', note: '' },
+  { id: 'favorite-antigravity-statusline', command: '/statusline', note: '' },
+  { id: 'favorite-antigravity-tasks', command: '/tasks', note: '' },
+  { id: 'favorite-antigravity-agents', command: '/agents', note: '' },
+  { id: 'favorite-antigravity-skills', command: '/skills', note: '' },
+  { id: 'favorite-antigravity-mcp', command: '/mcp', note: '' },
+  { id: 'favorite-antigravity-open', command: '/open', note: '' },
+  { id: 'favorite-antigravity-usage', command: '/usage', note: '' },
+  { id: 'favorite-antigravity-clear', command: '/clear', note: '' },
+  { id: 'favorite-antigravity-fork', command: '/fork', note: '' },
+  { id: 'favorite-antigravity-logout', command: '/logout', note: '' },
 ];
-const TERMINAL_SLASH_FAVORITES = [
-  ...TERMINAL_BASE_SLASH_FAVORITES.slice(0, 3),
-  TERMINAL_EXTRA_SLASH_FAVORITES[0],
-  ...TERMINAL_ASSISTANT_SLASH_FAVORITES,
-  TERMINAL_BASE_SLASH_FAVORITES[3],
-  TERMINAL_EXTRA_SLASH_FAVORITES[1],
-];
+const DEFAULT_TERMINAL_FAVORITES_BY_AGENT = {
+  claude: TERMINAL_CLAUDE_SLASH_FAVORITES,
+  codex: TERMINAL_CODEX_SLASH_FAVORITES,
+  antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES,
+};
+const TERMINAL_SLASH_FAVORITES = TERMINAL_CLAUDE_SLASH_FAVORITES;
 const TERMINAL_FAVORITE_MIGRATIONS = [
-  { version: 2, favorites: TERMINAL_BASE_SLASH_FAVORITES },
-  { version: 3, favorites: TERMINAL_EXTRA_SLASH_FAVORITES },
+  { version: 2, favorites: TERMINAL_CLAUDE_SLASH_FAVORITES.slice(0, 4) },
+  { version: 3, favorites: TERMINAL_CLAUDE_SLASH_FAVORITES.filter((favorite) => ['/compact', '/clear'].includes(favorite.command)) },
   { version: 4, removeCommands: TERMINAL_LEGACY_CLAUDE_FAVORITES },
   {
     version: 5,
-    favorites: TERMINAL_ASSISTANT_SLASH_FAVORITES,
-    reorderCommands: TERMINAL_SLASH_FAVORITES.map((favorite) => favorite.command),
+    favorites: TERMINAL_CLAUDE_SLASH_FAVORITES.filter((favorite) => ['/btw', '/rewind', '/schedule', '/tasks'].includes(favorite.command)),
+    reorderCommands: TERMINAL_CLAUDE_SLASH_FAVORITES.map((favorite) => favorite.command),
+  },
+  {
+    version: 6,
+    favorites: TERMINAL_CLAUDE_SLASH_FAVORITES,
+    reorderCommands: TERMINAL_CLAUDE_SLASH_FAVORITES.map((favorite) => favorite.command),
   },
 ];
 const DEFAULT_TERMINAL_FAVORITES = [
-  ...TERMINAL_SLASH_FAVORITES,
+  ...TERMINAL_CLAUDE_SLASH_FAVORITES,
 ];
 
 function readLocalPreference(key) {
@@ -410,6 +475,34 @@ const DEFAULT_TERMINAL_CLAUDE_SETTINGS = {
   effort: '',
   permissionMode: 'default',
   favoriteFlags: TERMINAL_CLAUDE_DEFAULT_FLAG_FAVORITES,
+  activeFlags: [],
+};
+const TERMINAL_CODEX_COMMANDS = ['codex', 'codex resume --last', 'codex fork --last'];
+const TERMINAL_CODEX_SANDBOX_OPTIONS = [
+  { value: '', label: 'Configured default' },
+  { value: 'read-only', label: 'read-only' },
+  { value: 'workspace-write', label: 'workspace-write' },
+];
+const TERMINAL_CODEX_APPROVAL_OPTIONS = [
+  { value: '', label: 'Configured default' },
+  { value: 'untrusted', label: 'untrusted' },
+  { value: 'on-request', label: 'on-request' },
+  { value: 'never', label: 'never' },
+];
+const DEFAULT_TERMINAL_CODEX_SETTINGS = {
+  command: 'codex',
+  model: '',
+  sandbox: '',
+  approval: '',
+  search: false,
+};
+const TERMINAL_ANTIGRAVITY_COMMANDS = ['agy'];
+const TERMINAL_ANTIGRAVITY_FLAG_OPTIONS = [
+  { id: 'antigravity-flag-sandbox', flag: '--sandbox' },
+  { id: 'antigravity-flag-dangerously-skip-permissions', flag: '--dangerously-skip-permissions' },
+];
+const DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS = {
+  command: 'agy',
   activeFlags: [],
 };
 const DEFAULT_COLUMN_ORDER = ['name', 'status', 'framework', 'port', 'health', 'command', 'started', 'restarted', 'pid'];
@@ -494,8 +587,12 @@ const state = {
   terminalFavoriteDraftCommand: '',
   terminalFavoriteDraftNote: '',
   terminalFavoritesExpanded: false,
+  terminalFavoriteAgent: DEFAULT_TERMINAL_AGENT_ID,
+  terminalFavoritesByAgent: {},
   terminalClaude: { ...DEFAULT_TERMINAL_CLAUDE_SETTINGS },
   terminalClaudeFlagDraft: '',
+  terminalCodex: { ...DEFAULT_TERMINAL_CODEX_SETTINGS },
+  terminalAntigravity: { ...DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS },
   terminalTabDrag: null,
   suppressTerminalTabClick: false,
 };
@@ -1179,6 +1276,29 @@ function getProfiles() {
 
 function terminalIsReadOnly() {
   return state.payload?.manager?.terminalReadOnly === true;
+}
+
+function terminalRemoteClaudeLaunchEnabled() {
+  return state.payload?.manager?.terminalClaudeRemoteLaunch === true;
+}
+
+function terminalRemoteAgentLaunchEnabled() {
+  return terminalRemoteClaudeLaunchEnabled() || state.payload?.manager?.terminalAgentRemoteLaunch === true;
+}
+
+function terminalCanAddSession() {
+  return !terminalIsReadOnly() || terminalRemoteAgentLaunchEnabled();
+}
+
+function terminalCanUseAgentLauncher(session) {
+  return Boolean(session)
+    && !session.busy
+    && !session.exitedAt
+    && (!session.readOnly || (terminalRemoteAgentLaunchEnabled() && !session.id));
+}
+
+function terminalCanUseClaudeLauncher(session) {
+  return terminalCanUseAgentLauncher(session);
 }
 
 function filteredProjects() {
@@ -2578,8 +2698,8 @@ async function loadTerminalSessions({ silent = false } = {}) {
     );
     state.terminalWorkspaceLoaded = true;
 
-    if (!terminalIsReadOnly() && state.terminalModalOpen && state.terminalProjectName && !terminalSessionsForProject(state.terminalProjectName).length) {
-      createTerminalDraft(state.terminalProjectName);
+    if (terminalCanAddSession() && state.terminalModalOpen && state.terminalProjectName && !terminalSessionsForProject(state.terminalProjectName).length) {
+      createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
     }
     if (!state.terminalProjectName && state.terminalSessions.length) {
       state.terminalProjectName = state.terminalSessions[0].projectName;
@@ -2601,8 +2721,8 @@ async function loadTerminalSessions({ silent = false } = {}) {
     }
   } catch (error) {
     state.terminalWorkspaceLoaded = true;
-    if (!terminalIsReadOnly() && state.terminalModalOpen && state.terminalProjectName && !terminalSessionsForProject(state.terminalProjectName).length) {
-      createTerminalDraft(state.terminalProjectName);
+    if (terminalCanAddSession() && state.terminalModalOpen && state.terminalProjectName && !terminalSessionsForProject(state.terminalProjectName).length) {
+      createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
       renderTerminalModal();
     }
     if (!silent) {
@@ -2663,6 +2783,23 @@ function normalizeTerminalFavorites(favorites) {
 
 function terminalFavoriteCommandKey(command) {
   return String(command || '').trim().toLowerCase();
+}
+
+function normalizeTerminalAgentId(value) {
+  const agentId = String(value || '').trim().toLowerCase();
+  return terminalAgentIds.has(agentId) ? agentId : DEFAULT_TERMINAL_AGENT_ID;
+}
+
+function terminalAgentLabel(agentId = state.terminalFavoriteAgent) {
+  return TERMINAL_AGENT_TABS.find((agent) => agent.id === normalizeTerminalAgentId(agentId))?.label || 'Claude Code';
+}
+
+function defaultTerminalFavoritesForAgent(agentId) {
+  return normalizeTerminalFavorites(DEFAULT_TERMINAL_FAVORITES_BY_AGENT[normalizeTerminalAgentId(agentId)] || DEFAULT_TERMINAL_FAVORITES);
+}
+
+function defaultTerminalFavoritesByAgent() {
+  return Object.fromEntries(TERMINAL_AGENT_TABS.map((agent) => [agent.id, defaultTerminalFavoritesForAgent(agent.id)]));
 }
 
 function terminalClaudeModelOptionValue(model) {
@@ -2821,6 +2958,90 @@ function saveTerminalClaudeSettings() {
   }
 }
 
+function normalizeTerminalCodexSettings(settings) {
+  const source = settings && typeof settings === 'object' ? settings : {};
+  const command = TERMINAL_CODEX_COMMANDS.includes(source.command)
+    ? source.command
+    : DEFAULT_TERMINAL_CODEX_SETTINGS.command;
+  const model = String(source.model || '').replace(/\0/g, '').replace(/[\r\n]+/g, ' ').trim().slice(0, 160);
+  const sandbox = TERMINAL_CODEX_SANDBOX_OPTIONS.some((option) => option.value === source.sandbox)
+    ? source.sandbox
+    : DEFAULT_TERMINAL_CODEX_SETTINGS.sandbox;
+  const approval = TERMINAL_CODEX_APPROVAL_OPTIONS.some((option) => option.value === source.approval)
+    ? source.approval
+    : DEFAULT_TERMINAL_CODEX_SETTINGS.approval;
+
+  return {
+    ...DEFAULT_TERMINAL_CODEX_SETTINGS,
+    command,
+    model,
+    sandbox,
+    approval,
+    search: source.search === true,
+  };
+}
+
+function readTerminalCodexSettings() {
+  try {
+    return normalizeTerminalCodexSettings(JSON.parse(readLocalPreference(TERMINAL_CODEX_SETTINGS_KEY) || 'null'));
+  } catch {
+    return normalizeTerminalCodexSettings(DEFAULT_TERMINAL_CODEX_SETTINGS);
+  }
+}
+
+function saveTerminalCodexSettings() {
+  try {
+    writeLocalPreference(TERMINAL_CODEX_SETTINGS_KEY, JSON.stringify(normalizeTerminalCodexSettings(state.terminalCodex)));
+  } catch {
+    // Codex launcher settings remain usable for this session if localStorage is blocked.
+  }
+}
+
+function terminalAntigravityFlagKey(flag) {
+  return String(flag || '').replace(/\0/g, '').trim().toLowerCase();
+}
+
+function normalizeTerminalAntigravitySettings(settings) {
+  const source = settings && typeof settings === 'object' ? settings : {};
+  const command = TERMINAL_ANTIGRAVITY_COMMANDS.includes(source.command)
+    ? source.command
+    : DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS.command;
+  const allowedFlags = new Map(TERMINAL_ANTIGRAVITY_FLAG_OPTIONS.map((item) => [terminalAntigravityFlagKey(item.flag), item.flag]));
+  const activeFlagKeys = new Set();
+  const activeFlags = (Array.isArray(source.activeFlags) ? source.activeFlags : [])
+    .map((flag) => allowedFlags.get(terminalAntigravityFlagKey(flag)))
+    .filter((flag) => {
+      const key = terminalAntigravityFlagKey(flag);
+      if (!flag || activeFlagKeys.has(key)) {
+        return false;
+      }
+      activeFlagKeys.add(key);
+      return true;
+    });
+
+  return {
+    ...DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS,
+    command,
+    activeFlags,
+  };
+}
+
+function readTerminalAntigravitySettings() {
+  try {
+    return normalizeTerminalAntigravitySettings(JSON.parse(readLocalPreference(TERMINAL_ANTIGRAVITY_SETTINGS_KEY) || 'null'));
+  } catch {
+    return normalizeTerminalAntigravitySettings(DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS);
+  }
+}
+
+function saveTerminalAntigravitySettings() {
+  try {
+    writeLocalPreference(TERMINAL_ANTIGRAVITY_SETTINGS_KEY, JSON.stringify(normalizeTerminalAntigravitySettings(state.terminalAntigravity)));
+  } catch {
+    // Antigravity launcher settings remain usable for this session if localStorage is blocked.
+  }
+}
+
 function terminalQuoteArgument(value) {
   const text = String(value || '').replace(/\0/g, '').replace(/[\r\n]+/g, ' ').trim();
   if (!text) {
@@ -2854,10 +3075,73 @@ function buildTerminalClaudeCommand() {
   return parts.join(' ');
 }
 
+function terminalClaudeLaunchPayload() {
+  const settings = normalizeTerminalClaudeSettings(state.terminalClaude);
+  return {
+    command: settings.command,
+    model: settings.model,
+    effort: settings.effort,
+    permissionMode: settings.permissionMode,
+    activeFlags: settings.activeFlags,
+  };
+}
+
+function buildTerminalCodexCommand() {
+  const settings = normalizeTerminalCodexSettings(state.terminalCodex);
+  const parts = [settings.command];
+  const model = terminalQuoteArgument(settings.model);
+
+  if (model) {
+    parts.push('--model', model);
+  }
+  if (settings.sandbox) {
+    parts.push('--sandbox', settings.sandbox);
+  }
+  if (settings.approval) {
+    parts.push('--ask-for-approval', settings.approval);
+  }
+  if (settings.search) {
+    parts.push('--search');
+  }
+
+  return parts.join(' ');
+}
+
+function terminalCodexLaunchPayload() {
+  const settings = normalizeTerminalCodexSettings(state.terminalCodex);
+  return {
+    command: settings.command,
+    model: settings.model,
+    sandbox: settings.sandbox,
+    approval: settings.approval,
+    search: settings.search,
+  };
+}
+
+function buildTerminalAntigravityCommand() {
+  const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
+  return [settings.command, ...settings.activeFlags].join(' ');
+}
+
+function terminalAntigravityLaunchPayload() {
+  const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
+  return {
+    command: settings.command,
+    activeFlags: settings.activeFlags,
+  };
+}
+
 function syncTerminalClaudePreview() {
   const preview = elements.terminalWorkspace.querySelector('[data-terminal-claude-preview]');
   if (preview) {
     preview.textContent = buildTerminalClaudeCommand();
+  }
+}
+
+function syncTerminalAgentPreview(agentId, command) {
+  const preview = elements.terminalWorkspace.querySelector(`[data-terminal-agent-preview="${CSS.escape(agentId)}"]`);
+  if (preview) {
+    preview.textContent = command;
   }
 }
 
@@ -2926,18 +3210,100 @@ function readTerminalFavorites() {
     const raw = readLocalPreference(TERMINAL_FAVORITES_KEY);
     const version = Number(readLocalPreference(TERMINAL_FAVORITES_VERSION_KEY) || 0) || 0;
     if (raw === null) {
-      return normalizeTerminalFavorites(DEFAULT_TERMINAL_FAVORITES);
+      return {
+        activeAgent: DEFAULT_TERMINAL_AGENT_ID,
+        favoritesByAgent: defaultTerminalFavoritesByAgent(),
+      };
     }
 
-    return migrateTerminalFavorites(JSON.parse(raw), version);
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return {
+        activeAgent: DEFAULT_TERMINAL_AGENT_ID,
+        favoritesByAgent: {
+          ...defaultTerminalFavoritesByAgent(),
+          claude: migrateTerminalFavorites(parsed, version),
+        },
+      };
+    }
+
+    const source = parsed && typeof parsed === 'object' ? parsed : {};
+    const sourceAgents = source.agents && typeof source.agents === 'object'
+      ? source.agents
+      : source.favoritesByAgent && typeof source.favoritesByAgent === 'object'
+        ? source.favoritesByAgent
+        : {};
+    const favoritesByAgent = defaultTerminalFavoritesByAgent();
+    TERMINAL_AGENT_TABS.forEach((agent) => {
+      if (!Array.isArray(sourceAgents[agent.id])) {
+        return;
+      }
+      favoritesByAgent[agent.id] = agent.id === 'claude'
+        ? migrateTerminalFavorites(sourceAgents[agent.id], version)
+        : normalizeTerminalFavorites(sourceAgents[agent.id]);
+    });
+
+    return {
+      activeAgent: normalizeTerminalAgentId(source.activeAgent || source.agent),
+      favoritesByAgent,
+    };
   } catch {
-    return normalizeTerminalFavorites(DEFAULT_TERMINAL_FAVORITES);
+    return {
+      activeAgent: DEFAULT_TERMINAL_AGENT_ID,
+      favoritesByAgent: defaultTerminalFavoritesByAgent(),
+    };
   }
 }
 
+function terminalFavoriteAgentId() {
+  return normalizeTerminalAgentId(state.terminalFavoriteAgent);
+}
+
+function setTerminalFavoritesForAgent(agentId, favorites) {
+  const normalizedAgentId = normalizeTerminalAgentId(agentId);
+  const normalizedFavorites = normalizeTerminalFavorites(favorites);
+  state.terminalFavoritesByAgent = {
+    ...defaultTerminalFavoritesByAgent(),
+    ...state.terminalFavoritesByAgent,
+    [normalizedAgentId]: normalizedFavorites,
+  };
+  if (terminalFavoriteAgentId() === normalizedAgentId) {
+    state.terminalFavorites = normalizedFavorites;
+  }
+}
+
+function syncTerminalFavoritesFromActiveAgent() {
+  const agentId = terminalFavoriteAgentId();
+  const favorites = Array.isArray(state.terminalFavoritesByAgent[agentId])
+    ? state.terminalFavoritesByAgent[agentId]
+    : defaultTerminalFavoritesForAgent(agentId);
+  setTerminalFavoritesForAgent(agentId, favorites);
+  return state.terminalFavorites;
+}
+
+function switchTerminalFavoriteAgent(agentId, { save = true } = {}) {
+  const nextAgentId = normalizeTerminalAgentId(agentId);
+  if (terminalFavoriteAgentId() === nextAgentId) {
+    return;
+  }
+
+  state.terminalFavoriteAgent = nextAgentId;
+  state.terminalFavoritesExpanded = false;
+  clearTerminalFavoriteEditor();
+  syncTerminalFavoritesFromActiveAgent();
+  if (save) {
+    saveTerminalFavorites();
+  }
+  renderTerminalModal();
+}
+
 function saveTerminalFavorites({ sync = true } = {}) {
+  setTerminalFavoritesForAgent(terminalFavoriteAgentId(), state.terminalFavorites);
   try {
-    writeLocalPreference(TERMINAL_FAVORITES_KEY, JSON.stringify(state.terminalFavorites));
+    writeLocalPreference(TERMINAL_FAVORITES_KEY, JSON.stringify({
+      activeAgent: terminalFavoriteAgentId(),
+      agents: state.terminalFavoritesByAgent,
+    }));
     writeLocalPreference(TERMINAL_FAVORITES_VERSION_KEY, String(TERMINAL_FAVORITES_VERSION));
   } catch {
     // Favorites remain usable for this session if localStorage is blocked.
@@ -2949,9 +3315,12 @@ function saveTerminalFavorites({ sync = true } = {}) {
 }
 
 function terminalPreferencesPayload() {
+  setTerminalFavoritesForAgent(terminalFavoriteAgentId(), state.terminalFavorites);
   return {
     favoritesVersion: TERMINAL_FAVORITES_VERSION,
     favorites: state.terminalFavorites,
+    activeAgent: terminalFavoriteAgentId(),
+    favoritesByAgent: state.terminalFavoritesByAgent,
     workspace: buildTerminalWorkspaceState(),
   };
 }
@@ -2983,9 +3352,29 @@ async function saveTerminalPreferencesToServer() {
 
 function applyTerminalPreferences(payload) {
   let needsSave = false;
-  if (Array.isArray(payload.favorites)) {
+  if (payload.favoritesByAgent && typeof payload.favoritesByAgent === 'object') {
     const favoritesVersion = Number(payload.favoritesVersion || 0) || 0;
-    state.terminalFavorites = migrateTerminalFavorites(payload.favorites, favoritesVersion);
+    const nextFavoritesByAgent = defaultTerminalFavoritesByAgent();
+    TERMINAL_AGENT_TABS.forEach((agent) => {
+      if (!Array.isArray(payload.favoritesByAgent[agent.id])) {
+        return;
+      }
+      nextFavoritesByAgent[agent.id] = agent.id === 'claude'
+        ? migrateTerminalFavorites(payload.favoritesByAgent[agent.id], favoritesVersion)
+        : normalizeTerminalFavorites(payload.favoritesByAgent[agent.id]);
+    });
+    state.terminalFavoritesByAgent = nextFavoritesByAgent;
+    state.terminalFavoriteAgent = normalizeTerminalAgentId(payload.activeAgent);
+    syncTerminalFavoritesFromActiveAgent();
+    needsSave = needsSave || favoritesVersion < TERMINAL_FAVORITES_VERSION;
+  } else if (Array.isArray(payload.favorites)) {
+    const favoritesVersion = Number(payload.favoritesVersion || 0) || 0;
+    state.terminalFavoriteAgent = DEFAULT_TERMINAL_AGENT_ID;
+    state.terminalFavoritesByAgent = {
+      ...defaultTerminalFavoritesByAgent(),
+      claude: migrateTerminalFavorites(payload.favorites, favoritesVersion),
+    };
+    syncTerminalFavoritesFromActiveAgent();
     needsSave = needsSave || favoritesVersion < TERMINAL_FAVORITES_VERSION;
   }
   if (payload.workspace && typeof payload.workspace === 'object') {
@@ -3085,17 +3474,20 @@ function commitTerminalFavoriteEdit() {
   }
 
   if (state.terminalFavoriteEditingId === 'new') {
-    state.terminalFavorites.push({
-      id: createTerminalFavoriteId(command),
-      command,
-      note,
-    });
+    setTerminalFavoritesForAgent(terminalFavoriteAgentId(), [
+      ...state.terminalFavorites,
+      {
+        id: createTerminalFavoriteId(command),
+        command,
+        note,
+      },
+    ]);
   } else {
-    state.terminalFavorites = state.terminalFavorites.map((favorite) => (
+    setTerminalFavoritesForAgent(terminalFavoriteAgentId(), state.terminalFavorites.map((favorite) => (
       favorite.id === state.terminalFavoriteEditingId
         ? { ...favorite, command, note }
         : favorite
-    ));
+    )));
   }
 
   saveTerminalFavorites();
@@ -3105,7 +3497,7 @@ function commitTerminalFavoriteEdit() {
 }
 
 function deleteTerminalFavorite(id) {
-  state.terminalFavorites = state.terminalFavorites.filter((favorite) => favorite.id !== id);
+  setTerminalFavoritesForAgent(terminalFavoriteAgentId(), state.terminalFavorites.filter((favorite) => favorite.id !== id));
   if (state.terminalFavoriteEditingId === id) {
     clearTerminalFavoriteEditor();
   }
@@ -3165,6 +3557,102 @@ function setTerminalSessionInput(session, command) {
   return true;
 }
 
+async function launchRemoteTerminalClaude(session) {
+  if (!session || !terminalCanUseClaudeLauncher(session)) {
+    showToast('Terminal is read-only from LAN/Tailscale.');
+    return;
+  }
+
+  const command = buildTerminalClaudeCommand();
+  session.input = command;
+  setTerminalTitleFromCommand(session, command);
+  session.busy = true;
+  renderTerminalModal();
+
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(session.projectName)}/terminal-claude`, {
+      method: 'POST',
+      body: JSON.stringify({
+        settings: terminalClaudeLaunchPayload(),
+        cols: session.cols,
+        rows: session.rows,
+      }),
+    });
+
+    session.input = '';
+    applyTerminalPayload(session, payload);
+    startTerminalPolling();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    session.busy = false;
+    renderTerminalModal();
+  }
+}
+
+async function launchRemoteTerminalAgent(session, agent, command, settings) {
+  if (!session || !terminalCanUseAgentLauncher(session)) {
+    showToast('Terminal is read-only from LAN/Tailscale.');
+    return;
+  }
+
+  session.input = command;
+  setTerminalTitleFromCommand(session, command);
+  session.busy = true;
+  renderTerminalModal();
+
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(session.projectName)}/terminal-agent`, {
+      method: 'POST',
+      body: JSON.stringify({
+        agent,
+        settings,
+        cols: session.cols,
+        rows: session.rows,
+      }),
+    });
+
+    session.input = '';
+    applyTerminalPayload(session, payload);
+    startTerminalPolling();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    session.busy = false;
+    renderTerminalModal();
+  }
+}
+
+function applyTerminalAgentCommand(agent, command, settings, { run = false } = {}) {
+  const session = findTerminalSession(state.terminalActiveSessionId);
+  if (!session) {
+    return;
+  }
+
+  if (session.readOnly) {
+    if (run && terminalCanUseAgentLauncher(session)) {
+      launchRemoteTerminalAgent(session, agent, command, settings);
+      return;
+    }
+    showToast('Terminal is read-only from LAN/Tailscale.');
+    return;
+  }
+
+  if (!setTerminalSessionInput(session, command)) {
+    return;
+  }
+
+  if (run) {
+    runTerminalCommand(session.localId);
+    return;
+  }
+
+  window.requestAnimationFrame(() => {
+    const input = elements.terminalWorkspace.querySelector(`[data-terminal-input="${CSS.escape(session.localId)}"]`);
+    input?.focus();
+  });
+}
+
 function applyTerminalClaudeCommand({ run = false } = {}) {
   const session = findTerminalSession(state.terminalActiveSessionId);
   if (!session) {
@@ -3172,6 +3660,10 @@ function applyTerminalClaudeCommand({ run = false } = {}) {
   }
 
   if (session.readOnly) {
+    if (run && terminalCanUseClaudeLauncher(session)) {
+      launchRemoteTerminalClaude(session);
+      return;
+    }
     showToast('Terminal is read-only from LAN/Tailscale.');
     return;
   }
@@ -3190,6 +3682,38 @@ function applyTerminalClaudeCommand({ run = false } = {}) {
     const input = elements.terminalWorkspace.querySelector(`[data-terminal-input="${CSS.escape(session.localId)}"]`);
     input?.focus();
   });
+}
+
+function applyTerminalCodexCommand({ run = false } = {}) {
+  applyTerminalAgentCommand('codex', buildTerminalCodexCommand(), terminalCodexLaunchPayload(), { run });
+}
+
+function applyTerminalAntigravityCommand({ run = false } = {}) {
+  applyTerminalAgentCommand('antigravity', buildTerminalAntigravityCommand(), terminalAntigravityLaunchPayload(), { run });
+}
+
+function toggleTerminalCodexSearch() {
+  const settings = normalizeTerminalCodexSettings(state.terminalCodex);
+  state.terminalCodex = normalizeTerminalCodexSettings({
+    ...settings,
+    search: !settings.search,
+  });
+  saveTerminalCodexSettings();
+  renderTerminalModal();
+}
+
+function toggleTerminalAntigravityFlag(flag) {
+  const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
+  const key = terminalAntigravityFlagKey(flag);
+  const active = settings.activeFlags.some((item) => terminalAntigravityFlagKey(item) === key);
+  state.terminalAntigravity = normalizeTerminalAntigravitySettings({
+    ...settings,
+    activeFlags: active
+      ? settings.activeFlags.filter((item) => terminalAntigravityFlagKey(item) !== key)
+      : [...settings.activeFlags, flag],
+  });
+  saveTerminalAntigravitySettings();
+  renderTerminalModal();
 }
 
 function toggleTerminalClaudeFavoriteFlag(id) {
@@ -3534,14 +4058,15 @@ async function loadTerminalDirectory(projectName, relativePath = '') {
   }
 }
 
-function createTerminalDraft(projectName) {
+function createTerminalDraft(projectName, draftOptions = {}) {
   const options = terminalOptionsForProject(projectName);
   const sessionNumber = terminalSessionsForProject(projectName).length + 1;
+  const readOnly = draftOptions.readOnly === true;
   const session = {
     localId: `terminal-${Date.now()}-${nextTerminalLocalId}`,
     id: null,
     projectName,
-    title: `對話 ${sessionNumber}`,
+    title: readOnly ? `Claude launch ${sessionNumber}` : `對話 ${sessionNumber}`,
     titleEdited: false,
     input: '',
     output: '',
@@ -3555,7 +4080,7 @@ function createTerminalDraft(projectName) {
     projectLocalUrl: options.localUrl || '',
     running: false,
     interactive: false,
-    readOnly: false,
+    readOnly,
     exitedAt: null,
     exitCode: null,
     exitSignal: null,
@@ -3569,7 +4094,7 @@ function createTerminalDraft(projectName) {
   return session;
 }
 
-function ensureTerminalDraft(projectName) {
+function ensureTerminalDraft(projectName, options = {}) {
   const sessions = terminalSessionsForProject(projectName);
   if (sessions.length) {
     const rememberedId = state.terminalActiveSessionByProject.get(projectName);
@@ -3582,7 +4107,7 @@ function ensureTerminalDraft(projectName) {
     return;
   }
 
-  createTerminalDraft(projectName);
+  createTerminalDraft(projectName, options);
 }
 
 function switchTerminalProject(projectName, { ensureDraft = true } = {}) {
@@ -3593,8 +4118,8 @@ function switchTerminalProject(projectName, { ensureDraft = true } = {}) {
   rememberTerminalActiveSession();
   state.selectedName = projectName;
   state.terminalProjectName = projectName;
-  if (!terminalIsReadOnly() && ensureDraft && (state.terminalWorkspaceLoaded || !hasRestorableTerminalProject(projectName))) {
-    ensureTerminalDraft(projectName);
+  if (terminalCanAddSession() && ensureDraft && (state.terminalWorkspaceLoaded || !hasRestorableTerminalProject(projectName))) {
+    ensureTerminalDraft(projectName, { readOnly: terminalIsReadOnly() });
   } else {
     const sessions = terminalSessionsForProject(projectName);
     const rememberedId = state.terminalActiveSessionByProject.get(projectName);
@@ -3804,7 +4329,7 @@ function renderTerminalSetup(session, options, project, sessionTitleControl, pro
   const selectedShellId = selectedTerminalShellId(session, options);
   const selectedPath = session.cwd || terminalSelectedDirectoryPath(session, options, project);
   const shellLabel = session.shellLabel || terminalShellLabel(selectedShellId, options);
-  const disabled = session.busy || options.loading ? 'disabled' : '';
+  const disabled = session.readOnly || session.busy || options.loading ? 'disabled' : '';
   const shellControl = session.id
     ? `<div class="terminal-shell-value" title="${escapeHtml(shellLabel)}">${escapeHtml(shellLabel)}</div>`
     : `<select data-terminal-shell="${escapeHtml(session.localId)}" ${disabled}>
@@ -3835,7 +4360,7 @@ function renderTerminalSetup(session, options, project, sessionTitleControl, pro
           ${shellControl}
         </label>
       </div>
-      ${session.id ? '' : `
+      ${session.id || session.readOnly ? '' : `
         <div class="terminal-directory-panel">
           ${renderTerminalDirectoryTree(session, options)}
         </div>
@@ -3844,11 +4369,43 @@ function renderTerminalSetup(session, options, project, sessionTitleControl, pro
   `;
 }
 
+function renderTerminalAgentTabs() {
+  const activeAgentId = terminalFavoriteAgentId();
+  return `
+    <div class="terminal-agent-tabs" role="tablist" aria-label="Agent quick launch">
+      ${TERMINAL_AGENT_TABS.map((agent) => {
+        const active = activeAgentId === agent.id;
+        return `
+          <button
+            class="terminal-agent-tab ${active ? 'is-active' : ''}"
+            data-terminal-agent-tab="${escapeHtml(agent.id)}"
+            type="button"
+            role="tab"
+            aria-selected="${active ? 'true' : 'false'}"
+          >${escapeHtml(agent.label)}</button>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderTerminalActiveAgentLauncher(session, options) {
+  const activeAgentId = terminalFavoriteAgentId();
+  if (activeAgentId === 'codex') {
+    return renderTerminalCodexLauncher(session, options);
+  }
+  if (activeAgentId === 'antigravity') {
+    return renderTerminalAntigravityLauncher(session, options);
+  }
+  return renderTerminalClaudeLauncher(session, options);
+}
+
 function renderTerminalClaudeLauncher(session, options) {
   const settings = normalizeTerminalClaudeSettings(state.terminalClaude);
   const preview = buildTerminalClaudeCommand();
-  const disabled = session.readOnly || session.busy || session.exitedAt ? 'disabled' : '';
-  const commandDisabled = session.readOnly || session.busy || session.exitedAt || (!session.id && options.loading) ? 'disabled' : '';
+  const canUseClaude = terminalCanUseClaudeLauncher(session);
+  const disabled = canUseClaude ? '' : 'disabled';
+  const commandDisabled = canUseClaude && !(!session.id && options.loading) ? '' : 'disabled';
   const selectedModelOption = settings.customModel
     ? TERMINAL_CLAUDE_CUSTOM_MODEL_VALUE
     : terminalClaudeModelOptionValue(settings.model);
@@ -3954,8 +4511,132 @@ function renderTerminalClaudeLauncher(session, options) {
   `;
 }
 
+function renderTerminalCodexLauncher(session, options) {
+  const settings = normalizeTerminalCodexSettings(state.terminalCodex);
+  const preview = buildTerminalCodexCommand();
+  const canUseCodex = terminalCanUseAgentLauncher(session);
+  const disabled = canUseCodex ? '' : 'disabled';
+  const commandDisabled = canUseCodex && !(!session.id && options.loading) ? '' : 'disabled';
+  const commandButtons = TERMINAL_CODEX_COMMANDS.map((command) => {
+    const active = settings.command === command;
+    return `
+      <button
+        class="terminal-claude-command-button ${active ? 'is-active' : ''}"
+        data-terminal-codex-command="${escapeHtml(command)}"
+        type="button"
+        aria-label="Launch ${escapeHtml(command)}"
+        aria-pressed="${active ? 'true' : 'false'}"
+        ${commandDisabled}
+      >${escapeHtml(command)}</button>
+    `;
+  }).join('');
+
+  return `
+    <section class="terminal-claude-launcher terminal-agent-launcher" aria-label="Codex CLI">
+      <div class="terminal-claude-header">
+        <div>
+          <strong>Codex CLI</strong>
+          <span data-terminal-agent-preview="codex">${escapeHtml(preview)}</span>
+        </div>
+      </div>
+      <div class="terminal-claude-grid terminal-agent-grid">
+        <div class="terminal-claude-command" role="group" aria-label="Codex command">
+          ${commandButtons}
+        </div>
+        <label class="terminal-claude-field">
+          <span>--model</span>
+          <input data-terminal-codex-model type="text" value="${escapeHtml(settings.model)}" placeholder="gpt-5.4" spellcheck="false" ${disabled} />
+        </label>
+        <label class="terminal-claude-field">
+          <span>--sandbox</span>
+          <select data-terminal-codex-sandbox ${disabled}>
+            ${TERMINAL_CODEX_SANDBOX_OPTIONS.map((option) => `
+              <option value="${escapeHtml(option.value)}" ${settings.sandbox === option.value ? 'selected' : ''}>
+                ${escapeHtml(option.label)}
+              </option>
+            `).join('')}
+          </select>
+        </label>
+        <label class="terminal-claude-field terminal-agent-wide-field">
+          <span>--ask-for-approval</span>
+          <select data-terminal-codex-approval ${disabled}>
+            ${TERMINAL_CODEX_APPROVAL_OPTIONS.map((option) => `
+              <option value="${escapeHtml(option.value)}" ${settings.approval === option.value ? 'selected' : ''}>
+                ${escapeHtml(option.label)}
+              </option>
+            `).join('')}
+          </select>
+        </label>
+      </div>
+      <div class="terminal-agent-quick-flags" role="group" aria-label="Codex quick flags">
+        <button
+          class="terminal-agent-flag-button ${settings.search ? 'is-active' : ''}"
+          data-terminal-codex-search
+          type="button"
+          aria-pressed="${settings.search ? 'true' : 'false'}"
+          ${disabled}
+        >--search</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderTerminalAntigravityLauncher(session, options) {
+  const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
+  const preview = buildTerminalAntigravityCommand();
+  const canUseAntigravity = terminalCanUseAgentLauncher(session);
+  const disabled = canUseAntigravity ? '' : 'disabled';
+  const commandDisabled = canUseAntigravity && !(!session.id && options.loading) ? '' : 'disabled';
+  const activeFlagKeys = new Set(settings.activeFlags.map((flag) => terminalAntigravityFlagKey(flag)));
+  const commandButtons = TERMINAL_ANTIGRAVITY_COMMANDS.map((command) => {
+    const active = settings.command === command;
+    return `
+      <button
+        class="terminal-claude-command-button ${active ? 'is-active' : ''}"
+        data-terminal-antigravity-command="${escapeHtml(command)}"
+        type="button"
+        aria-label="Launch ${escapeHtml(command)}"
+        aria-pressed="${active ? 'true' : 'false'}"
+        ${commandDisabled}
+      >${escapeHtml(command)}</button>
+    `;
+  }).join('');
+  const flagButtons = TERMINAL_ANTIGRAVITY_FLAG_OPTIONS.map((item) => {
+    const active = activeFlagKeys.has(terminalAntigravityFlagKey(item.flag));
+    return `
+      <button
+        class="terminal-agent-flag-button ${active ? 'is-active' : ''}"
+        data-terminal-antigravity-flag="${escapeHtml(item.flag)}"
+        type="button"
+        aria-pressed="${active ? 'true' : 'false'}"
+        ${disabled}
+      >${escapeHtml(item.flag)}</button>
+    `;
+  }).join('');
+
+  return `
+    <section class="terminal-claude-launcher terminal-agent-launcher" aria-label="Antigravity CLI">
+      <div class="terminal-claude-header">
+        <div>
+          <strong>Antigravity CLI</strong>
+          <span data-terminal-agent-preview="antigravity">${escapeHtml(preview)}</span>
+        </div>
+      </div>
+      <div class="terminal-agent-compact-grid">
+        <div class="terminal-claude-command terminal-agent-single-command" role="group" aria-label="Antigravity command">
+          ${commandButtons}
+        </div>
+        <div class="terminal-agent-quick-flags" role="group" aria-label="Antigravity quick flags">
+          ${flagButtons}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderTerminalFavorites(session) {
   const editing = Boolean(state.terminalFavoriteEditingId);
+  const activeAgentLabel = terminalAgentLabel();
   const editor = editing
     ? `
       <div class="terminal-favorite-editor">
@@ -4009,7 +4690,7 @@ function renderTerminalFavorites(session) {
   return `
     <section class="terminal-favorites" aria-label="我的最愛指令">
       <div class="terminal-favorites-heading">
-        <span>我的最愛指令</span>
+        <span>${escapeHtml(activeAgentLabel)} 我的最愛指令</span>
         <div>
           <button class="copy-url terminal-favorite-current-button" data-terminal-favorite-current type="button">${icons.add}<span>加入目前</span></button>
           <button class="copy-url terminal-favorite-add-button" data-terminal-favorite-add type="button">${icons.add}<span>新增</span></button>
@@ -4061,7 +4742,7 @@ function renderTerminalModal() {
   rememberTerminalActiveSession();
 
   elements.terminalTitle.textContent = project ? `終端管理：${project.name}` : '終端管理';
-  elements.addTerminalSession.disabled = terminalIsReadOnly();
+  elements.addTerminalSession.disabled = !terminalCanAddSession();
   elements.terminalEmpty.hidden = sessions.length > 0;
   renderTerminalProjectBar();
   renderTerminalTabs();
@@ -4086,19 +4767,23 @@ function renderTerminalModal() {
       </div>
     `
     : `<pre class="terminal-output" data-terminal-output="${escapeHtml(activeSession.localId)}"></pre>`;
+  const agentLaunchOnly = activeSession.readOnly && !activeSession.id && terminalCanUseAgentLauncher(activeSession);
   const commandReadOnly = activeSession.readOnly ? 'readonly disabled' : '';
   const commandDisabled = activeSession.readOnly || activeSession.busy || activeSession.exitedAt || (!activeSession.id && options.loading) ? 'disabled' : '';
   const commandPlaceholder = activeSession.readOnly
-    ? 'Read-only from LAN/Tailscale'
+    ? agentLaunchOnly
+      ? 'Use the quick-launch buttons above to start from mobile'
+      : 'Read-only from LAN/Tailscale'
     : activeSession.id
       ? 'Send command to terminal'
       : 'Optional command, e.g. claude';
-  const commandButtonLabel = activeSession.readOnly ? 'Read-only' : activeSession.id ? 'Send' : 'Start';
+  const commandButtonLabel = activeSession.readOnly ? (agentLaunchOnly ? 'Launch only' : 'Read-only') : activeSession.id ? 'Send' : 'Start';
 
   elements.terminalWorkspace.innerHTML = `
     <section class="terminal-session" data-terminal-panel="${escapeHtml(activeSession.localId)}">
       ${renderTerminalSetup(activeSession, options, project, sessionTitleControl, projectPort)}
-      ${renderTerminalClaudeLauncher(activeSession, options)}
+      ${renderTerminalAgentTabs()}
+      ${renderTerminalActiveAgentLauncher(activeSession, options)}
       ${renderTerminalFavorites(activeSession)}
       ${renderTerminalScrollControls(activeSession)}
       ${terminalSurface}
@@ -5076,7 +5761,7 @@ async function closeTerminalDialog(localId) {
     return;
   }
 
-  if (session.readOnly) {
+  if (session.readOnly && session.id) {
     showToast('Terminal is read-only from LAN/Tailscale.');
     return;
   }
@@ -5523,7 +6208,7 @@ elements.firewallModal.addEventListener('click', (event) => {
 elements.closeTerminalModal.addEventListener('click', hideTerminalManager);
 elements.backToHomeFromTerminal.addEventListener('click', hideTerminalManager);
 elements.addTerminalSession.addEventListener('click', () => {
-  if (terminalIsReadOnly()) {
+  if (!terminalCanAddSession()) {
     showToast('Terminal is read-only from LAN/Tailscale.');
     return;
   }
@@ -5533,7 +6218,7 @@ elements.addTerminalSession.addEventListener('click', () => {
     return;
   }
 
-  createTerminalDraft(state.terminalProjectName);
+  createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
   saveTerminalWorkspaceState();
   renderTerminalModal();
 });
@@ -5715,6 +6400,28 @@ elements.terminalWorkspace.addEventListener('change', (event) => {
     return;
   }
 
+  const codexSandboxSelect = event.target.closest('select[data-terminal-codex-sandbox]');
+  if (codexSandboxSelect) {
+    state.terminalCodex = normalizeTerminalCodexSettings({
+      ...state.terminalCodex,
+      sandbox: codexSandboxSelect.value,
+    });
+    saveTerminalCodexSettings();
+    syncTerminalAgentPreview('codex', buildTerminalCodexCommand());
+    return;
+  }
+
+  const codexApprovalSelect = event.target.closest('select[data-terminal-codex-approval]');
+  if (codexApprovalSelect) {
+    state.terminalCodex = normalizeTerminalCodexSettings({
+      ...state.terminalCodex,
+      approval: codexApprovalSelect.value,
+    });
+    saveTerminalCodexSettings();
+    syncTerminalAgentPreview('codex', buildTerminalCodexCommand());
+    return;
+  }
+
 });
 elements.terminalWorkspace.addEventListener('input', (event) => {
   const claudeCustomModelInput = event.target.closest('[data-terminal-claude-custom-model]');
@@ -5732,6 +6439,17 @@ elements.terminalWorkspace.addEventListener('input', (event) => {
   const claudeFlagDraftInput = event.target.closest('[data-terminal-claude-flag-draft]');
   if (claudeFlagDraftInput) {
     state.terminalClaudeFlagDraft = claudeFlagDraftInput.value;
+    return;
+  }
+
+  const codexModelInput = event.target.closest('[data-terminal-codex-model]');
+  if (codexModelInput) {
+    state.terminalCodex = normalizeTerminalCodexSettings({
+      ...state.terminalCodex,
+      model: codexModelInput.value,
+    });
+    saveTerminalCodexSettings();
+    syncTerminalAgentPreview('codex', buildTerminalCodexCommand());
     return;
   }
 
@@ -5778,6 +6496,12 @@ elements.terminalWorkspace.addEventListener('focusout', (event) => {
   }
 });
 elements.terminalWorkspace.addEventListener('click', (event) => {
+  const agentTabButton = event.target.closest('button[data-terminal-agent-tab]');
+  if (agentTabButton) {
+    switchTerminalFavoriteAgent(agentTabButton.dataset.terminalAgentTab);
+    return;
+  }
+
   const claudeCommandButton = event.target.closest('button[data-terminal-claude-command]');
   if (claudeCommandButton) {
     state.terminalClaude = normalizeTerminalClaudeSettings({
@@ -5804,6 +6528,40 @@ elements.terminalWorkspace.addEventListener('click', (event) => {
   const claudeAddFlagButton = event.target.closest('button[data-terminal-claude-add-flag]');
   if (claudeAddFlagButton) {
     addTerminalClaudeFavoriteFlag();
+    return;
+  }
+
+  const codexCommandButton = event.target.closest('button[data-terminal-codex-command]');
+  if (codexCommandButton) {
+    state.terminalCodex = normalizeTerminalCodexSettings({
+      ...state.terminalCodex,
+      command: codexCommandButton.dataset.terminalCodexCommand,
+    });
+    saveTerminalCodexSettings();
+    applyTerminalCodexCommand({ run: true });
+    return;
+  }
+
+  const codexSearchButton = event.target.closest('button[data-terminal-codex-search]');
+  if (codexSearchButton) {
+    toggleTerminalCodexSearch();
+    return;
+  }
+
+  const antigravityCommandButton = event.target.closest('button[data-terminal-antigravity-command]');
+  if (antigravityCommandButton) {
+    state.terminalAntigravity = normalizeTerminalAntigravitySettings({
+      ...state.terminalAntigravity,
+      command: antigravityCommandButton.dataset.terminalAntigravityCommand,
+    });
+    saveTerminalAntigravitySettings();
+    applyTerminalAntigravityCommand({ run: true });
+    return;
+  }
+
+  const antigravityFlagButton = event.target.closest('button[data-terminal-antigravity-flag]');
+  if (antigravityFlagButton) {
+    toggleTerminalAntigravityFlag(antigravityFlagButton.dataset.terminalAntigravityFlag);
     return;
   }
 
@@ -5984,8 +6742,13 @@ elements.healthThresholdInput.addEventListener('change', updateSettings);
 elements.reloadLogsButton.addEventListener('click', loadLogs);
 
 applyDemoModeUi();
-state.terminalFavorites = readTerminalFavorites();
+const terminalFavoriteState = readTerminalFavorites();
+state.terminalFavoriteAgent = terminalFavoriteState.activeAgent;
+state.terminalFavoritesByAgent = terminalFavoriteState.favoritesByAgent;
+syncTerminalFavoritesFromActiveAgent();
 state.terminalClaude = readTerminalClaudeSettings();
+state.terminalCodex = readTerminalCodexSettings();
+state.terminalAntigravity = readTerminalAntigravitySettings();
 restoreTerminalWorkspaceState();
 const terminalPreferencesReady = loadTerminalPreferences({ silent: true });
 applyTheme(readThemePreference());

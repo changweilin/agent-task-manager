@@ -2091,6 +2091,36 @@ a.page-link:hover {
   font-size: 12px;
 }
 
+.terminal-agent-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.terminal-agent-tab {
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  overflow: hidden;
+  color: var(--muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 780;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.terminal-agent-tab:hover,
+.terminal-agent-tab.is-active {
+  color: var(--teal);
+  background: var(--teal-soft);
+  border-color: var(--teal-border);
+}
+
 .terminal-claude-launcher {
   display: grid;
   gap: 8px;
@@ -2120,7 +2150,8 @@ a.page-link:hover {
   font-weight: 780;
 }
 
-.terminal-claude-header span[data-terminal-claude-preview] {
+.terminal-claude-header span[data-terminal-claude-preview],
+.terminal-claude-header span[data-terminal-agent-preview] {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -2138,11 +2169,26 @@ a.page-link:hover {
   gap: 8px;
 }
 
+.terminal-agent-grid {
+  grid-template-columns: minmax(240px, 1.35fr) minmax(126px, 0.52fr) minmax(130px, 0.45fr) minmax(170px, 0.65fr);
+}
+
+.terminal-agent-compact-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.32fr) minmax(240px, 1fr);
+  align-items: end;
+  gap: 8px;
+}
+
 .terminal-claude-command {
   min-width: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 5px;
+}
+
+.terminal-agent-single-command {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .terminal-claude-command-button {
@@ -2164,6 +2210,37 @@ a.page-link:hover {
 
 .terminal-claude-command-button:hover,
 .terminal-claude-command-button.is-active {
+  color: var(--teal);
+  background: var(--teal-soft);
+  border-color: var(--teal-border);
+}
+
+.terminal-agent-quick-flags {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.terminal-agent-flag-button {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  overflow: hidden;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.terminal-agent-flag-button:hover,
+.terminal-agent-flag-button.is-active {
   color: var(--teal);
   background: var(--teal-soft);
   border-color: var(--teal-border);
@@ -3573,6 +3650,10 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
+  .terminal-agent-compact-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .terminal-claude-command {
     grid-column: 1 / -1;
   }
@@ -3725,6 +3806,10 @@ button:disabled {
 
   .terminal-claude-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .terminal-agent-compact-grid {
+    grid-template-columns: 1fr;
   }
 
   .terminal-claude-command {
