@@ -350,6 +350,7 @@ const AI_QUOTA_MONITOR_AGENTS = [
     probe: 'agy + /usage',
   },
 ];
+const AI_QUOTA_MONITOR_STALE_MS = 5 * 60 * 60 * 1000;
 const TERMINAL_LEGACY_CLAUDE_FAVORITES = ['claude', 'claude -r', 'claude -c'];
 const TERMINAL_CLAUDE_SLASH_FAVORITES = [
   { id: 'favorite-claude-init', command: '/init', note: '' },
@@ -6331,6 +6332,14 @@ function quotaAgentFromPayload(agentId) {
   return state.quotaPayload?.agents?.find((agent) => agent.id === agentId) || null;
 }
 
+function quotaPayloadIsStale(payload = state.quotaPayload) {
+  const checkedAt = payload?.checkedAt ? new Date(payload.checkedAt).getTime() : 0;
+  if (!Number.isFinite(checkedAt) || checkedAt <= 0) {
+    return true;
+  }
+  return Date.now() - checkedAt >= AI_QUOTA_MONITOR_STALE_MS;
+}
+
 function quotaPercentLabel(percent) {
   const value = Number(percent);
   if (!Number.isFinite(value)) {
@@ -6463,7 +6472,7 @@ function openQuotaMonitor({ syncHash = true, refresh = true } = {}) {
   state.quotaModalOpen = true;
   elements.quotaModal.hidden = false;
   renderQuotaMonitor();
-  if (refresh || !state.quotaPayload) {
+  if (refresh || quotaPayloadIsStale()) {
     loadAiQuotas();
   }
 }
@@ -6479,7 +6488,7 @@ function hideQuotaMonitor({ syncHash = true } = {}) {
 
 function syncQuotaRouteFromHash() {
   if (window.location.hash === '#ai-quota') {
-    openQuotaMonitor({ syncHash: false, refresh: !state.quotaPayload });
+    openQuotaMonitor({ syncHash: false, refresh: quotaPayloadIsStale() });
   } else if (state.quotaModalOpen) {
     hideQuotaMonitor({ syncHash: false });
   }
@@ -7365,6 +7374,11 @@ loadStatus().then(() => {
   terminalPreferencesReady.finally(() => loadTerminalSessions({ silent: true }));
 });
 setInterval(() => loadStatus({ silent: true }), 6000);
+setInterval(() => {
+  if (state.quotaModalOpen && !state.quotaLoading && quotaPayloadIsStale()) {
+    loadAiQuotas();
+  }
+}, 60 * 1000);
 setInterval(() => {
   if (elements.autoLogInput.checked && !document.hidden) {
     loadLogs({ silent: true });
