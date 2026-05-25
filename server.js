@@ -2222,10 +2222,58 @@ function quotaSignalScore(signal, index) {
   return score;
 }
 
-function chooseQuotaSignal(signals) {
+function rankedQuotaSignals(signals) {
   return signals
     .map((signal, index) => ({ signal, index, score: quotaSignalScore(signal, index) }))
-    .sort((a, b) => (b.score - a.score) || (b.index - a.index))[0]?.signal || null;
+    .sort((a, b) => (b.score - a.score) || (b.index - a.index));
+}
+
+function chooseQuotaSignal(signals) {
+  return rankedQuotaSignals(signals)[0]?.signal || null;
+}
+
+function quotaSignalGroupKey(signal) {
+  const label = String(signal?.label || '').toLowerCase();
+  if (/(weekly|current week|\bweek\b|每週|週)/i.test(label)) {
+    return 'weekly-limit';
+  }
+  if (/(5\s*h|5\s*-?\s*hour|5h limit)/i.test(label)) {
+    return '5h-limit';
+  }
+  if (/(current session|session)/i.test(label)) {
+    return 'session';
+  }
+  return label
+    .replace(/\d{1,3}(?:\.\d+)?\s*%/g, '')
+    .replace(/[█▌▐▍▎▏░▒▓|[\](){}:·.,-]/g, ' ')
+    .replace(/\b\d{1,2}:\d{2}\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80) || `signal-${signal?.direction || 'used'}`;
+}
+
+function displayQuotaSignals(signals, primary) {
+  const latestByGroup = new Map();
+  signals.forEach((signal, index) => {
+    const key = quotaSignalGroupKey(signal);
+    const previous = latestByGroup.get(key);
+    if (!previous || index > previous.index) {
+      latestByGroup.set(key, { signal, index });
+    }
+  });
+
+  const deduped = [...latestByGroup.values()]
+    .sort((a, b) => (quotaSignalScore(b.signal, b.index) - quotaSignalScore(a.signal, a.index)) || (b.index - a.index))
+    .map((item) => item.signal);
+  if (!primary) {
+    return deduped;
+  }
+
+  const primaryKey = quotaSignalGroupKey(primary);
+  return [
+    primary,
+    ...deduped.filter((signal) => quotaSignalGroupKey(signal) !== primaryKey),
+  ];
 }
 
 function summarizeQuotaOutput(text, signals) {
@@ -2677,6 +2725,7 @@ async function probeAiQuotaAgent(agent, signal = null) {
   const combinedOutput = attempts.map((attempt) => attempt.output).filter(Boolean).join('\n');
   const signals = extractQuotaSignals(combinedOutput);
   const primary = chooseQuotaSignal(signals);
+  const visibleSignals = displayQuotaSignals(signals, primary);
   const hasAuthFailure = isQuotaAuthFailure(combinedOutput);
   const slashProbeAttempted = (agent.interactiveCommands || []).length > 0;
   const usedPty = Boolean(interactiveResult.pty);
@@ -2707,7 +2756,7 @@ async function probeAiQuotaAgent(agent, signal = null) {
       : needsTty
         ? '此 CLI 的配額 slash 指令需要互動式終端才會輸出百分比；安全非 prompt 查詢未取得百分比。'
         : summarizeQuotaOutput(combinedOutput, signals),
-    signals: signals.slice(0, 4).map((signal) => ({
+    signals: visibleSignals.slice(0, 4).map((signal) => ({
       label: signal.label,
       percent: signal.percent,
       direction: signal.direction,

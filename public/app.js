@@ -6397,8 +6397,16 @@ function renderQuotaMonitor() {
           </div>
           <span class="quota-status ${escapeHtml(status)}">${escapeHtml(quotaStatusLabel(status))}</span>
         </div>
-        <div class="quota-meter" style="--quota-percent: ${progressValue}%">
-          <div class="quota-meter-ring" aria-label="${escapeHtml(agent.label)} usage ${escapeHtml(percentText)}">
+        <div class="quota-meter">
+          <div
+            class="quota-meter-ring"
+            style="--quota-percent: ${progressValue}%"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="${Math.round(progressValue)}"
+            aria-label="${escapeHtml(agent.label)} usage ${escapeHtml(percentText)}"
+          >
             <span>${escapeHtml(percentText)}</span>
           </div>
           <div class="quota-meter-body">

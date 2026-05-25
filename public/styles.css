@@ -2549,13 +2549,14 @@ a.page-link:hover {
 }
 
 .quota-meter-ring {
+  --quota-percent: 0%;
   width: 82px;
   aspect-ratio: 1;
   display: grid;
   place-items: center;
   background:
     radial-gradient(circle at center, var(--surface-muted) 55%, transparent 56%),
-    conic-gradient(var(--teal) var(--quota-percent), var(--border-strong) 0);
+    conic-gradient(var(--teal) 0 var(--quota-percent), var(--border-strong) var(--quota-percent) 100%);
   border-radius: 50%;
 }
 
