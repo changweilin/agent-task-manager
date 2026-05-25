@@ -276,6 +276,7 @@ const AI_QUOTA_AGENTS = [
     exitCommand: '/exit',
     ptyStartupDelayMs: 9000,
     ptySettleDelayMs: 14000,
+    minSignalCollectDelayMs: 12000,
     probe: 'claude auth status + /usage',
   },
   {
@@ -290,6 +291,7 @@ const AI_QUOTA_AGENTS = [
     confirmInteractiveCommand: true,
     ptyStartupDelayMs: 9000,
     ptySettleDelayMs: 12000,
+    minSignalCollectDelayMs: 8000,
     probe: 'codex login status + /status',
   },
   {
@@ -301,6 +303,7 @@ const AI_QUOTA_AGENTS = [
     exitCommand: '/quit',
     ptyStartupDelayMs: 10000,
     ptySettleDelayMs: 20000,
+    minSignalCollectDelayMs: 4000,
     probe: 'agy + /usage',
   },
 ];
@@ -1342,6 +1345,70 @@ function canBindPort(projectPort) {
   });
 }
 
+function createHttpError(message, statusCode = 500, payload = {}) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.payload = payload;
+  return error;
+}
+
+function parseNetstatPort(localAddress) {
+  const match = String(localAddress || '').trim().match(/:(\d{1,5})$/);
+  return normalizePort(match?.[1]);
+}
+
+function getListeningPortOwnerPids(projectPort) {
+  const portNumber = normalizePort(projectPort);
+  if (!portNumber || process.platform !== 'win32') {
+    return [];
+  }
+
+  try {
+    const output = execFileSync('netstat', ['-ano', '-p', 'tcp'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+    });
+    const pids = new Set();
+
+    for (const line of output.split(/\r?\n/)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 5 || parts[0] !== 'TCP' || parts[3] !== 'LISTENING') {
+        continue;
+      }
+
+      if (parseNetstatPort(parts[1]) !== portNumber) {
+        continue;
+      }
+
+      const pid = Number(parts[4]);
+      if (Number.isInteger(pid) && pid > 0) {
+        pids.add(pid);
+      }
+    }
+
+    return [...pids];
+  } catch (error) {
+    return [];
+  }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForPortAvailable(projectPort, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await canBindPort(projectPort)) {
+      return true;
+    }
+    await wait(200);
+  }
+
+  return canBindPort(projectPort);
+}
+
 async function findAvailablePort(startPort, reservedPorts = new Set()) {
   const firstPort = Math.max(1, Number(startPort || DEFAULT_BASE_PORT));
   for (let candidate = firstPort; candidate <= 65535; candidate += 1) {
@@ -1512,19 +1579,10 @@ async function ensureProjectPort(project) {
     return project;
   }
 
-  const config = getConfig();
-  const otherPorts = new Set(
-    normalizeProjects(config.projects, config.basePort)
-      .filter((item) => normalizePath(item.path) !== normalizePath(project.path))
-      .map((item) => Number(item.port)),
-  );
-  const nextPort = await findAvailablePort(project.port + 1, otherPorts);
-  saveProjectPort(project.path, nextPort);
-
-  return {
-    ...project,
-    port: nextPort,
-  };
+  throw createHttpError(`Port ${project.port} is already in use. Use restart to clean the old listener before starting ${project.name}.`, 409, {
+    port: project.port,
+    owners: getListeningPortOwnerPids(project.port),
+  });
 }
 
 function getProjectByName(projects, name) {
@@ -1730,6 +1788,29 @@ function stopProcessTree(pid) {
   });
 }
 
+async function stopListeningPortOwners(project) {
+  const portNumber = normalizePort(project.port);
+  if (!portNumber) {
+    return { owners: [], released: true };
+  }
+
+  if (Number(portNumber) === Number(port)) {
+    throw createHttpError('Refusing to clean the manager port.', 409, { port: portNumber });
+  }
+
+  const owners = getListeningPortOwnerPids(portNumber)
+    .filter((pid) => Number(pid) !== Number(process.pid));
+
+  for (const pid of owners) {
+    await stopProcessTree(pid);
+  }
+
+  return {
+    owners,
+    released: await waitForPortAvailable(portNumber),
+  };
+}
+
 async function stopProject(project) {
   const state = getState();
   const entry = getStateEntryByPath(state, project.path);
@@ -1739,6 +1820,31 @@ async function stopProject(project) {
   removeStateEntry(state, project.path);
   saveState(state);
   return { stopped: true };
+}
+
+async function restartProject(project, options = {}) {
+  const entry = getStateEntryByPath(getState(), project.path);
+  const lanIp = options.lanIp || getLanIp();
+  const tailscaleIp = options.tailscaleIp || getTailscaleIp();
+  const lanMode = options.lanMode !== undefined ? options.lanMode : entry?.lanMode;
+  const tailscaleMode = options.tailscaleMode !== undefined ? options.tailscaleMode : entry?.tailscaleMode;
+
+  await stopProject(project);
+  const cleanup = await stopListeningPortOwners(project);
+  if (!cleanup.released) {
+    throw createHttpError(`Port ${project.port} is still in use after cleanup.`, 409, {
+      port: project.port,
+      owners: getListeningPortOwnerPids(project.port),
+      stoppedOwners: cleanup.owners,
+    });
+  }
+
+  return startProject(project, {
+    lanMode: Boolean(lanMode && lanIp),
+    lanIp: lanMode ? lanIp : null,
+    tailscaleMode: Boolean(tailscaleMode && tailscaleIp),
+    tailscaleIp: tailscaleMode ? tailscaleIp : null,
+  });
 }
 
 function buildTerminalEnv(project) {
@@ -2132,7 +2238,7 @@ function cleanAiQuotaText(text) {
 }
 
 function quotaLineRelevant(line) {
-  return /(usage|quota|limit|used|remaining|left|available|token|context|window|weekly|daily|5\s*-?\s*h|rate|credit|plan|用量|配額|限制|剩餘|可用|每週|週|重置|百分)/i.test(line);
+  return /(usage|quota|limit|used|remaining|left|available|token|context|window|weekly|daily|5\s*-?\s*h|rate|credit|plan|design|other|model|models|spark|opus|sonnet|haiku|gemini|gpt|用量|配額|限制|剩餘|可用|每週|週|重置|百分|模型|設計|其他)/i.test(line);
 }
 
 function clampQuotaPercent(value) {
@@ -2143,12 +2249,49 @@ function clampQuotaPercent(value) {
   return Math.max(0, Math.min(100, Math.round(number * 10) / 10));
 }
 
+function quotaPercentText(percent, direction = 'used') {
+  const value = clampQuotaPercent(percent);
+  if (value === null) {
+    return '--%';
+  }
+  const rounded = Math.round(value);
+  if (direction === 'remaining') {
+    return `${rounded}% 剩餘`;
+  }
+  return `${rounded}% 已用`;
+}
+
+function quotaContextFromLine(line) {
+  const normalized = String(line || '')
+    .replace(/[│╭╰╯─]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized || /\d{1,3}(?:\.\d+)?\s*%/.test(normalized)) {
+    return '';
+  }
+  const limitMatch = normalized.match(/\b((?:gpt|claude|gemini|codex|openai)[a-z0-9 ._+()/-]*?)\s+limit\s*:?\s*$/i);
+  if (limitMatch) {
+    return `${limitMatch[1].trim()} limit`;
+  }
+  if (normalized.length <= 96 && /(design|other|all models|model quota|current week|weekly|spark|opus|sonnet|haiku|gemini|gpt|模型|設計|其他)/i.test(normalized)) {
+    return normalized;
+  }
+  return '';
+}
+
 function extractQuotaSignals(text) {
   const lines = cleanAiQuotaText(text).split('\n').filter(Boolean);
   const signals = [];
   const seen = new Set();
+  let context = '';
 
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    const nextContext = quotaContextFromLine(line);
+    if (nextContext) {
+      context = nextContext;
+    }
+
     if (/(nothing over|nothing above|less than|under \d{1,3}(?:\.\d+)?\s*%|try the other window)/i.test(line)) {
       continue;
     }
@@ -2161,9 +2304,14 @@ function extractQuotaSignals(text) {
         if (rawPercent === null) {
           continue;
         }
-        const remaining = /(remaining|left|available|剩餘|可用)/i.test(line);
+        const nearby = `${lines[lineIndex - 1] || ''} ${line} ${lines[lineIndex + 1] || ''}`;
+        const explicitlyUsed = /(used|已用)/i.test(line);
+        const remaining = !explicitlyUsed && /(remaining|left|available|quota available|剩餘|可用)/i.test(nearby);
         const percent = remaining ? clampQuotaPercent(100 - rawPercent) : rawPercent;
-        const label = line.slice(0, 180);
+        const labelText = context && /(weekly|daily|5\s*-?\s*h|limit|quota|remaining|left|available|剩餘|可用)/i.test(line)
+          ? `${context} · ${line}`
+          : line;
+        const label = labelText.slice(0, 220);
         const key = `${label}:${percent}`;
         if ((relevant || signals.length < 3) && !seen.has(key)) {
           seen.add(key);
@@ -2171,7 +2319,10 @@ function extractQuotaSignals(text) {
             label,
             percent,
             rawPercent,
+            displayPercent: remaining ? rawPercent : percent,
+            percentLabel: quotaPercentText(remaining ? rawPercent : percent, remaining ? 'remaining' : 'used'),
             direction: remaining ? 'remaining' : 'used',
+            context,
           });
         }
       }
@@ -2189,11 +2340,20 @@ function extractQuotaSignals(text) {
         continue;
       }
       const percent = clampQuotaPercent((used / total) * 100);
-      const label = line.slice(0, 180);
+      const labelText = context ? `${context} · ${line}` : line;
+      const label = labelText.slice(0, 220);
       const key = `${label}:${percent}`;
       if (percent !== null && !seen.has(key)) {
         seen.add(key);
-        signals.push({ label, percent, rawPercent: percent, direction: 'used' });
+        signals.push({
+          label,
+          percent,
+          rawPercent: percent,
+          displayPercent: percent,
+          percentLabel: quotaPercentText(percent, 'used'),
+          direction: 'used',
+          context,
+        });
       }
     }
   }
@@ -2229,27 +2389,36 @@ function rankedQuotaSignals(signals) {
 }
 
 function chooseQuotaSignal(signals) {
+  const remainingSignals = signals
+    .map((signal, index) => ({ signal, index }))
+    .filter((item) => item.signal.direction === 'remaining')
+    .sort((a, b) => (Number(a.signal.rawPercent) - Number(b.signal.rawPercent)) || (b.index - a.index));
+  if (remainingSignals.length) {
+    return remainingSignals[0].signal;
+  }
+
   return rankedQuotaSignals(signals)[0]?.signal || null;
 }
 
 function quotaSignalGroupKey(signal) {
   const label = String(signal?.label || '').toLowerCase();
+  const context = String(signal?.context || '').toLowerCase().replace(/\s+/g, ' ').trim();
   if (/(weekly|current week|\bweek\b|每週|週)/i.test(label)) {
-    return 'weekly-limit';
+    return `${context}:weekly-limit`;
   }
   if (/(5\s*h|5\s*-?\s*hour|5h limit)/i.test(label)) {
-    return '5h-limit';
+    return `${context}:5h-limit`;
   }
   if (/(current session|session)/i.test(label)) {
-    return 'session';
+    return `${context}:session`;
   }
-  return label
+  return `${context}:${label
     .replace(/\d{1,3}(?:\.\d+)?\s*%/g, '')
     .replace(/[█▌▐▍▎▏░▒▓|[\](){}:·.,-]/g, ' ')
     .replace(/\b\d{1,2}:\d{2}\b/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 80) || `signal-${signal?.direction || 'used'}`;
+    .slice(0, 80) || `signal-${signal?.direction || 'used'}`}`;
 }
 
 function displayQuotaSignals(signals, primary) {
@@ -2588,7 +2757,8 @@ function runAiQuotaInteractiveProbe(agent, executable, signal = null) {
     };
     const writeLine = (text) => writeRaw(`${text}${shell.lineEnding}`);
     const maybeFinishWithSignal = () => {
-      if (!slashSentAt || Date.now() - slashSentAt < 1800) {
+      const minCollectDelay = Math.max(1800, Number(agent.minSignalCollectDelayMs) || 1800);
+      if (!slashSentAt || Date.now() - slashSentAt < minCollectDelay) {
         return;
       }
       const primary = chooseQuotaSignal(extractQuotaSignals(output));
@@ -2748,8 +2918,10 @@ async function probeAiQuotaAgent(agent, signal = null) {
     label: agent.label,
     provider: agent.provider,
     status,
-    percent: primary?.percent ?? null,
-    percentLabel: primary ? `${Math.round(primary.percent)}%` : '--%',
+    percent: primary ? (primary.displayPercent ?? primary.percent) : null,
+    usedPercent: primary?.percent ?? null,
+    direction: primary?.direction || 'used',
+    percentLabel: primary ? (primary.percentLabel || quotaPercentText(primary.displayPercent ?? primary.percent, primary.direction)) : '--%',
     probe: agent.probe,
     summary: status === 'timeout'
       ? '配額 slash 指令逾時，已中斷監控終端。'
@@ -2758,7 +2930,9 @@ async function probeAiQuotaAgent(agent, signal = null) {
         : summarizeQuotaOutput(combinedOutput, signals),
     signals: visibleSignals.slice(0, 4).map((signal) => ({
       label: signal.label,
-      percent: signal.percent,
+      percent: signal.displayPercent ?? signal.percent,
+      usedPercent: signal.percent,
+      percentLabel: signal.percentLabel || quotaPercentText(signal.displayPercent ?? signal.percent, signal.direction),
       direction: signal.direction,
     })),
     checkedAt,
@@ -3528,8 +3702,7 @@ async function applyHealthPolicy(project, entry, running, probe, config, network
       lastHealthError: 'Auto restart triggered after failed health checks.',
     });
 
-    await stopProject(project);
-    const restartedEntry = await startProject(project, {
+    const restartedEntry = await restartProject(project, {
       lanMode: Boolean(entry.lanMode && networkContext.lanIp),
       lanIp: entry.lanMode ? networkContext.lanIp : null,
       tailscaleMode: Boolean(entry.tailscaleMode && networkContext.tailscaleIp),
@@ -3762,8 +3935,7 @@ async function runProfileAction(profile, projects, action) {
     if (action === 'stop') {
       await stopProject(project);
     } else if (action === 'restart') {
-      await stopProject(project);
-      await startProject(project);
+      await restartProject(project);
     } else {
       await startProject(project);
     }
@@ -4263,8 +4435,7 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await stopProject(project);
-    await startProject(project);
+    await restartProject(project);
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -4905,7 +5076,10 @@ const server = http.createServer(async (request, response) => {
 
     serveStatic(request, response, url);
   } catch (error) {
-    sendError(response, 500, error.message || 'Internal server error.');
+    sendJson(response, error.statusCode || 500, {
+      error: error.message || 'Internal server error.',
+      ...(error.payload || {}),
+    });
   }
 });
 

@@ -2562,9 +2562,11 @@ a.page-link:hover {
 
 .quota-meter-ring span {
   color: var(--graphite);
-  font-size: 18px;
+  max-width: 68px;
+  font-size: 14px;
   font-weight: 820;
-  line-height: 1;
+  line-height: 1.15;
+  text-align: center;
 }
 
 .quota-meter-body {

@@ -259,7 +259,7 @@ async function demoApi(path, options = {}) {
         percentLabel: `${[42, 27, 64][index]}%`,
         probe: agent.probe,
         summary: 'Mocked demo usage signal.',
-        signals: [{ label: 'Demo usage', percent: [42, 27, 64][index] }],
+        signals: [{ label: 'Demo usage', percent: [42, 27, 64][index], percentLabel: `${[42, 27, 64][index]}% 已用` }],
         checkedAt: new Date().toISOString(),
       })),
     };
@@ -6382,7 +6382,7 @@ function renderQuotaMonitor() {
       ? signals.map((signal) => `
           <li>
             <span>${escapeHtml(signal.label || 'usage')}</span>
-            <strong>${quotaPercentLabel(signal.percent)}</strong>
+            <strong>${escapeHtml(signal.percentLabel || quotaPercentLabel(signal.percent))}</strong>
           </li>
         `).join('')
       : '<li><span>usage</span><strong>--%</strong></li>';
@@ -6405,7 +6405,7 @@ function renderQuotaMonitor() {
             aria-valuemin="0"
             aria-valuemax="100"
             aria-valuenow="${Math.round(progressValue)}"
-            aria-label="${escapeHtml(agent.label)} usage ${escapeHtml(percentText)}"
+            aria-label="${escapeHtml(agent.label)} quota ${escapeHtml(percentText)}"
           >
             <span>${escapeHtml(percentText)}</span>
           </div>
