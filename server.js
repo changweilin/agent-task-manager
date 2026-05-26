@@ -408,19 +408,34 @@ function getConfig() {
   };
 }
 
-function saveConfig(config) {
+function buildConfigForWrite(config) {
   const basePort = Number(config.basePort || DEFAULT_BASE_PORT);
   const defaultRoots = config.defaultRoots || [ROOT_DIR];
   const projects = normalizeProjects(collapseProjectsToRoots(config.projects || [], defaultRoots), basePort);
 
-  writeJson(CONFIG_PATH, {
+  return {
     defaultRoots,
     basePort,
     autoRestoreOnStartup: config.autoRestoreOnStartup !== false,
     health: normalizeHealthSettings(config.health),
     profiles: normalizeProfiles(config.profiles || [], projects),
     projects,
-  });
+  };
+}
+
+function saveConfig(config) {
+  writeJson(CONFIG_PATH, buildConfigForWrite(config));
+}
+
+function saveConfigIfChanged(config) {
+  const nextConfig = buildConfigForWrite(config);
+  const currentConfig = readJson(CONFIG_PATH, null);
+
+  if (JSON.stringify(currentConfig) !== JSON.stringify(nextConfig)) {
+    writeJson(CONFIG_PATH, nextConfig);
+  }
+
+  return nextConfig;
 }
 
 function getState() {
@@ -1534,6 +1549,55 @@ function collapseProjectsToRoots(projects, roots) {
   return collapsed.sort((a, b) => String(a.path || '').localeCompare(String(b.path || '')));
 }
 
+function mergeDuplicateProject(existing, project) {
+  const projectPath = normalizePath(existing.path || project.path);
+  const existingDevScript = typeof existing.devScript === 'string' ? existing.devScript.trim() : '';
+  const projectDevScript = typeof project.devScript === 'string' ? project.devScript.trim() : '';
+  const existingHasWebTarget = Boolean(existingDevScript) || objectValue(existing, 'hasWebTarget') === true || normalizePort(existing.port);
+  const projectHasWebTarget = Boolean(projectDevScript) || objectValue(project, 'hasWebTarget') === true || normalizePort(project.port);
+  const preferProject = !existingHasWebTarget && Boolean(projectHasWebTarget);
+  const primary = preferProject ? project : existing;
+  const secondary = preferProject ? existing : project;
+  const primaryDevScript = preferProject ? projectDevScript : existingDevScript;
+  const secondaryDevScript = preferProject ? existingDevScript : projectDevScript;
+  const devScript = primaryDevScript || secondaryDevScript;
+
+  return {
+    ...secondary,
+    ...primary,
+    name: primary.name || secondary.name,
+    path: projectPath,
+    framework: primary.framework || secondary.framework || 'folder',
+    devScript,
+    port: normalizePort(primary.port) || normalizePort(secondary.port) || detectPortFromDevScript(devScript) || null,
+    canStart: objectValue(primary, 'canStart') ?? objectValue(secondary, 'canStart'),
+    hasWebTarget: objectValue(primary, 'hasWebTarget') ?? objectValue(secondary, 'hasWebTarget'),
+    sourceType: primary.sourceType || secondary.sourceType,
+    branches: mergeProjectBranches([
+      ...(Array.isArray(existing.branches) ? existing.branches : []),
+      ...(Array.isArray(project.branches) ? project.branches : []),
+    ], projectPath),
+  };
+}
+
+function dedupeProjectsByPath(projects) {
+  const projectsByPath = new Map();
+
+  for (const project of Array.isArray(projects) ? projects : []) {
+    if (!project?.path) {
+      continue;
+    }
+
+    const projectPath = normalizePath(project.path);
+    const key = projectPath.toLowerCase();
+    const normalized = { ...project, path: projectPath };
+    const existing = projectsByPath.get(key);
+    projectsByPath.set(key, existing ? mergeDuplicateProject(existing, normalized) : normalized);
+  }
+
+  return [...projectsByPath.values()];
+}
+
 function normalizeProjectBranches(branches, rootPath, assignPort = null) {
   const seenNames = new Map();
   return mergeProjectBranches(branches, rootPath)
@@ -1590,8 +1654,7 @@ function normalizeProjects(projects, basePort) {
     return assignedPort;
   };
 
-  return projects
-    .filter(Boolean)
+  return dedupeProjectsByPath(projects)
     .sort((a, b) => String(a.path || '').localeCompare(String(b.path || '')))
     .map((project) => {
       const projectPath = normalizePath(project.path);
@@ -1750,18 +1813,33 @@ async function findAvailablePort(startPort, reservedPorts = new Set()) {
 
 function saveProjectPort(projectPath, projectPort) {
   const config = getConfig();
-  const projects = normalizeProjects(config.projects, config.basePort).map((project) => {
-    if (normalizePath(project.path) !== normalizePath(projectPath)) {
-      return project;
-    }
-
-    return {
-      ...project,
-      port: projectPort,
-    };
-  });
+  const projects = applyProjectPortOverride(config.projects, projectPath, projectPort, config.basePort);
 
   saveConfig({ ...config, projects });
+}
+
+async function reassignProjectPort(project, startPort = null) {
+  const config = getConfig();
+  const currentPort = normalizePort(project.port);
+  const searchStart = Math.max(
+    config.basePort || DEFAULT_BASE_PORT,
+    normalizePort(startPort) || (currentPort ? currentPort + 1 : config.basePort || DEFAULT_BASE_PORT),
+  );
+  const otherReservedPorts = new Set(
+    getProjectPortTargets(normalizeProjects(config.projects, config.basePort))
+      .filter((target) => !isSamePath(target.path, project.path))
+      .map((target) => normalizePort(target.port))
+      .filter(Boolean),
+  );
+  const nextPort = await findAvailablePort(searchStart, otherReservedPorts);
+  const projects = applyProjectPortOverride(config.projects, project.path, nextPort, config.basePort);
+
+  saveConfig({ ...config, projects });
+
+  return {
+    ...project,
+    port: nextPort,
+  };
 }
 
 function readRecentFile(filePath, maxBytes = 64 * 1024) {
@@ -2011,16 +2089,76 @@ function derivedPagesFromChildTargets(targets, homeTarget) {
   return [...pagesByPath.values()].slice(0, PAGE_SCAN_MAX_PAGES);
 }
 
+function getProjectPortTargets(projects) {
+  const targets = [];
+
+  for (const project of Array.isArray(projects) ? projects : []) {
+    if (projectHasWebTarget(project)) {
+      targets.push(project);
+    }
+
+    for (const branch of Array.isArray(project.branches) ? project.branches : []) {
+      if (projectHasWebTarget(branch)) {
+        targets.push(branch);
+      }
+    }
+  }
+
+  return targets;
+}
+
+function nextUnreservedPort(startPort, reservedPorts) {
+  let candidate = Math.max(1, Number(startPort || DEFAULT_BASE_PORT));
+  while (reservedPorts.has(candidate) && candidate <= 65535) {
+    candidate += 1;
+  }
+  if (candidate > 65535) {
+    throw new Error(`No available port found from ${startPort} to 65535.`);
+  }
+  return candidate;
+}
+
+function applyProjectPortOverride(projects, projectPath, projectPort, basePort) {
+  const overridePath = normalizePath(projectPath);
+  const overridePort = normalizePort(projectPort);
+  if (!overridePort) {
+    return normalizeProjects(projects, basePort);
+  }
+
+  const normalized = normalizeProjects(projects, basePort);
+  const targets = getProjectPortTargets(normalized);
+  const orderedTargets = [
+    ...targets.filter((target) => isSamePath(target.path, overridePath)),
+    ...targets.filter((target) => !isSamePath(target.path, overridePath)),
+  ];
+  const reservedPorts = new Set();
+
+  for (const target of orderedTargets) {
+    const desiredPort = isSamePath(target.path, overridePath)
+      ? overridePort
+      : normalizePort(target.port);
+
+    if (desiredPort && !reservedPorts.has(desiredPort)) {
+      target.port = desiredPort;
+      reservedPorts.add(desiredPort);
+      continue;
+    }
+
+    const searchStart = Math.max(basePort || DEFAULT_BASE_PORT, (desiredPort || target.port || basePort || DEFAULT_BASE_PORT) + 1);
+    const nextPort = nextUnreservedPort(searchStart, reservedPorts);
+    target.port = nextPort;
+    reservedPorts.add(nextPort);
+  }
+
+  return normalized;
+}
+
 async function allocateAvailablePorts(projects, basePort) {
   const state = getState();
   const normalized = normalizeProjects(projects, basePort);
   const reservedPorts = new Set();
 
-  for (const project of normalized) {
-    if (!project.hasWebTarget) {
-      continue;
-    }
-
+  for (const project of getProjectPortTargets(normalized)) {
     const stateEntry = getStateEntryByPath(state, project.path);
     const stateOwnsPort =
       stateEntry &&
@@ -2078,10 +2216,7 @@ async function ensureProjectPort(project) {
     return project;
   }
 
-  throw createHttpError(`Port ${portNumber} is already in use. Use restart to clean the old listener before starting ${project.name}.`, 409, {
-    port: portNumber,
-    owners: getListeningPortOwnerPids(portNumber),
-  });
+  return reassignProjectPort(project, portNumber + 1);
 }
 
 function getProjectByName(projects, name) {
@@ -4245,7 +4380,7 @@ async function applyHealthPolicy(project, entry, running, probe, config, network
 }
 
 async function getStatusPayload(request = null) {
-  const config = getConfig();
+  const config = saveConfigIfChanged(getConfig());
   const state = getState();
   const tailscaleIp = getTailscaleIp();
   const lanIp = getLanIp();
