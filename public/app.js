@@ -861,7 +861,7 @@ const tableColumns = [
     label: 'Port',
     sortable: true,
     getSortValue: (project) => Number(project.port) || 0,
-    render: (project) => `<span class="mono-muted">${project.port}</span>`,
+    render: (project) => `<span class="mono-muted">${project.port || '--'}</span>`,
   },
   {
     id: 'health',
@@ -933,7 +933,7 @@ const tableColumns = [
       return `
         <div class="row-actions">
           ${renderProjectPowerAction(project, context)}
-          <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
+          <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
           <button class="row-action firewall" data-action="firewall" data-name="${escapeHtml(project.name)}" ${!project.lanUrl || DEMO_MODE ? 'disabled' : ''} type="button" title="LAN 防火牆" aria-label="設定 ${escapeHtml(project.name)} 的 LAN 防火牆">${icons.firewall}</button>
           ${renderMobileInstallAction(project, context)}
           <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
@@ -959,11 +959,23 @@ function statusLabel(status) {
 }
 
 function frameworkLabel(framework) {
+  if (!framework) {
+    return 'project';
+  }
   return framework === 'generic' ? 'npm' : framework;
 }
 
 function projectCommandLabel(project) {
-  return project.command || `npm run dev (${project.devScript || 'script'})`;
+  if (project.command) {
+    return project.command;
+  }
+  if (project.canStart !== false && project.devScript) {
+    return `npm run dev (${project.devScript})`;
+  }
+  if (project.devScript) {
+    return project.devScript;
+  }
+  return 'Terminal only';
 }
 
 function projectIsManagedRunning(project) {
@@ -973,11 +985,14 @@ function projectIsManagedRunning(project) {
 function renderProjectPowerAction(project, context = {}) {
   const action = projectIsManagedRunning(project) ? 'stop' : 'start';
   const label = action === 'stop' ? '停止' : '啟動';
-  const disabled = DEMO_MODE || context.busy || (action === 'start' && project.status === 'external');
+  const noStartCommand = action === 'start' && project.canStart === false;
+  const disabled = DEMO_MODE || context.busy || noStartCommand || (action === 'start' && project.status === 'external');
   const disabledAttr = disabled ? 'disabled' : '';
-  const title = project.status === 'external' && action === 'start'
-    ? '此 port 已有外部服務回應'
-    : label;
+  const title = noStartCommand
+    ? '開啟終端後手動執行此專案'
+    : project.status === 'external' && action === 'start'
+      ? '此 port 已有外部服務回應'
+      : label;
 
   return `<button class="row-action ${action}" data-action="${action}" data-name="${escapeHtml(project.name)}" ${disabledAttr} type="button" title="${escapeHtml(title)}" aria-label="${label} ${escapeHtml(project.name)}">${icons[action]}</button>`;
 }
@@ -1000,6 +1015,10 @@ function renderMobileInstallAction(project, context = {}) {
 }
 
 function renderHealth(project) {
+  if (project.hasWebTarget === false) {
+    return '<span class="mono-muted">--</span>';
+  }
+
   const failures = Number(project.healthFailures || 0);
   const restarts = Number(project.restartCount || 0);
   const title = [
@@ -1068,6 +1087,10 @@ function renderUrlLink(value, label) {
 }
 
 function renderProjectActionUrls(project) {
+  if (project.hasWebTarget === false) {
+    return '';
+  }
+
   const pages = getProjectPages(project);
   const hasPages = pages.length > 0;
   const selectedTarget = getProjectPageTarget(project);
@@ -1450,7 +1473,7 @@ function filteredProjects() {
     const pageHaystack = getProjectPages(project)
       .map((page) => `${page.path || ''} ${page.title || ''} ${page.file || ''}`)
       .join(' ');
-    const haystack = `${project.name} ${project.framework} ${project.path} ${project.port} ${pageHaystack}`.toLowerCase();
+    const haystack = `${project.name} ${project.framework} ${project.sourceType || ''} ${project.path} ${project.port || ''} ${pageHaystack}`.toLowerCase();
     return matchesFilter && haystack.includes(state.search.toLowerCase());
   });
 }

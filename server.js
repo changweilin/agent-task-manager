@@ -35,11 +35,28 @@ const IGNORED_DIRS = new Set([
   '.nuxt',
   '.svelte-kit',
   '.turbo',
+  '.venv',
+  'venv',
+  '__pycache__',
+  '.pytest_cache',
+  '.uv-cache',
+  '.hf-cache',
+  '.ultralytics',
   'dist',
   'build',
   'coverage',
   'out',
   '.output',
+]);
+const PROJECT_MARKER_FILES = new Set([
+  'package.json',
+  'pyproject.toml',
+  'requirements.txt',
+  'Cargo.toml',
+  'go.mod',
+  'deno.json',
+  'bun.lockb',
+  'uv.lock',
 ]);
 const PAGE_SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro']);
 const ROUTE_PAGE_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.md', '.mdx', '.html', '.htm']);
@@ -785,6 +802,7 @@ function detectPortFromDevScript(devScript) {
 
   const patterns = [
     /(?:^|\s)--port(?:=|\s+)(\d{1,5})(?=\s|$)/i,
+    /(?:^|\s)-Port(?:=|\s+)(\d{1,5})(?=\s|$)/i,
     /(?:^|\s)-p(?:=|\s+)(\d{1,5})(?=\s|$)/i,
     /(?:^|\s)(?:PORT|VITE_PORT)=(\d{1,5})(?=\s|$)/i,
   ];
@@ -798,6 +816,18 @@ function detectPortFromDevScript(devScript) {
   }
 
   return null;
+}
+
+function projectHasStartCommand(project) {
+  return Boolean(String(project?.devScript || '').trim());
+}
+
+function projectHasWebTarget(project) {
+  return project?.hasWebTarget !== false && Boolean(normalizePort(project?.port));
+}
+
+function projectCanStart(project) {
+  return projectHasStartCommand(project) && projectHasWebTarget(project);
 }
 
 function normalizeUrlPath(routePath) {
@@ -1217,12 +1247,37 @@ function shouldIgnore(entryPath) {
   return entryPath.split(/[\\/]+/).some((segment) => IGNORED_DIRS.has(segment));
 }
 
-function discoverPackageFiles(rootPath) {
-  const results = [];
+function hasProjectMarker(projectPath) {
+  if (fs.existsSync(path.join(projectPath, '.git'))) {
+    return true;
+  }
+
+  for (const marker of PROJECT_MARKER_FILES) {
+    if (fs.existsSync(path.join(projectPath, marker))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function discoverProjectDirs(rootPath) {
+  const results = new Set([rootPath]);
+  const seen = new Set();
   const stack = [rootPath];
 
   while (stack.length) {
-    const current = stack.pop();
+    const current = normalizePath(stack.pop());
+    const key = current.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    if (hasProjectMarker(current)) {
+      results.add(current);
+    }
+
     let entries;
 
     try {
@@ -1239,17 +1294,99 @@ function discoverPackageFiles(rootPath) {
 
       if (entry.isDirectory()) {
         stack.push(entryPath);
-      } else if (entry.isFile() && entry.name === 'package.json') {
-        results.push(entryPath);
       }
     }
   }
 
-  return results;
+  return [...results];
+}
+
+function readPyprojectName(projectPath) {
+  const pyprojectPath = path.join(projectPath, 'pyproject.toml');
+  if (!fs.existsSync(pyprojectPath)) {
+    return '';
+  }
+
+  try {
+    const lines = fs.readFileSync(pyprojectPath, 'utf8').split(/\r?\n/);
+    let inProjectSection = false;
+    for (const line of lines) {
+      if (/^\s*\[/.test(line)) {
+        inProjectSection = /^\s*\[project\]\s*$/.test(line);
+        continue;
+      }
+
+      if (!inProjectSection) {
+        continue;
+      }
+
+      const match = line.match(/^\s*name\s*=\s*["']([^"']+)["']/);
+      if (match) {
+        return match[1];
+      }
+    }
+  } catch (error) {
+    return '';
+  }
+
+  return '';
+}
+
+function detectProjectFramework(projectPath, packageJson, devScript) {
+  if (packageJson) {
+    return devScript ? detectFramework(packageJson, devScript) : 'node';
+  }
+
+  if (
+    fs.existsSync(path.join(projectPath, 'pyproject.toml')) ||
+    fs.existsSync(path.join(projectPath, 'requirements.txt'))
+  ) {
+    return 'python';
+  }
+
+  if (fs.existsSync(path.join(projectPath, 'Cargo.toml'))) {
+    return 'rust';
+  }
+
+  if (fs.existsSync(path.join(projectPath, 'go.mod'))) {
+    return 'go';
+  }
+
+  return 'folder';
+}
+
+function projectFromDirectory(projectPath) {
+  const packageJsonPath = path.join(projectPath, 'package.json');
+  const packageJson = fs.existsSync(packageJsonPath) ? readJson(packageJsonPath, null) : null;
+  const packageName = packageJson?.name || '';
+  const devScript = typeof packageJson?.scripts?.dev === 'string'
+    ? packageJson.scripts.dev.trim()
+    : '';
+  const pyprojectName = readPyprojectName(projectPath);
+  const name = safeName(packageName || pyprojectName || path.basename(projectPath));
+  const framework = detectProjectFramework(projectPath, packageJson, devScript);
+  const hasWebTarget = Boolean(devScript);
+
+  return {
+    name,
+    path: projectPath,
+    framework,
+    devScript,
+    port: hasWebTarget ? detectPortFromDevScript(devScript) || undefined : null,
+    canStart: hasWebTarget,
+    hasWebTarget,
+    sourceType: packageJson
+      ? 'package'
+      : pyprojectName || fs.existsSync(path.join(projectPath, 'pyproject.toml'))
+        ? 'pyproject'
+        : hasProjectMarker(projectPath)
+          ? 'marker'
+          : 'root',
+  };
 }
 
 function discoverProjects(roots) {
-  const projects = [];
+  const projectsByPath = new Map();
 
   for (const root of roots) {
     const rootPath = normalizePath(root);
@@ -1257,32 +1394,17 @@ function discoverProjects(roots) {
       continue;
     }
 
-    for (const packageFile of discoverPackageFiles(rootPath)) {
-      let packageJson;
-      try {
-        packageJson = JSON.parse(fs.readFileSync(packageFile, 'utf8'));
-      } catch (error) {
-        continue;
+    for (const projectPath of discoverProjectDirs(rootPath)) {
+      const project = projectFromDirectory(projectPath);
+      const key = normalizePath(project.path).toLowerCase();
+      const existing = projectsByPath.get(key);
+      if (!existing || (!projectHasStartCommand(existing) && projectHasStartCommand(project))) {
+        projectsByPath.set(key, project);
       }
-
-      const devScript = packageJson?.scripts?.dev;
-      if (!devScript || typeof devScript !== 'string') {
-        continue;
-      }
-
-      const projectPath = path.dirname(packageFile);
-      const packageName = packageJson.name || path.basename(projectPath);
-      projects.push({
-        name: safeName(packageName),
-        path: projectPath,
-        framework: detectFramework(packageJson, devScript),
-        devScript,
-        port: detectPortFromDevScript(devScript) || undefined,
-      });
     }
   }
 
-  return projects.sort((a, b) => a.path.localeCompare(b.path));
+  return [...projectsByPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function normalizeProjects(projects, basePort) {
@@ -1300,22 +1422,32 @@ function normalizeProjects(projects, basePort) {
       seenNames.set(baseName, count);
 
       const name = count > 1 ? `${baseName}-${count}` : baseName;
-      let projectPort = normalizePort(project.port) || detectPortFromDevScript(project.devScript) || 0;
-      if (!projectPort) {
+      const devScript = typeof project.devScript === 'string' ? project.devScript.trim() : '';
+      const rawHasWebTarget = objectValue(project, 'hasWebTarget');
+      const hasWebTarget = Boolean(devScript) || rawHasWebTarget === true;
+      let projectPort = hasWebTarget
+        ? normalizePort(project.port) || detectPortFromDevScript(devScript) || 0
+        : null;
+      if (hasWebTarget && !projectPort) {
         while (usedPorts.has(nextPort)) {
           nextPort += 1;
         }
         projectPort = nextPort;
         nextPort += 1;
       }
-      usedPorts.add(projectPort);
+      if (projectPort) {
+        usedPorts.add(projectPort);
+      }
 
       return {
         name,
         path: projectPath,
-        framework: project.framework || 'generic',
-        devScript: project.devScript || '',
+        framework: project.framework || 'folder',
+        devScript,
         port: projectPort,
+        canStart: Boolean(devScript && hasWebTarget && projectPort),
+        hasWebTarget: Boolean(hasWebTarget && projectPort),
+        sourceType: project.sourceType || 'configured',
       };
     });
 }
@@ -1324,10 +1456,19 @@ function mergeDiscoveredWithExisting(discovered, existingProjects, basePort) {
   const existingByPath = new Map(existingProjects.map((project) => [normalizePath(project.path), project]));
   const merged = discovered.map((project) => {
     const existing = existingByPath.get(normalizePath(project.path));
+    const existingDevScript = typeof existing?.devScript === 'string' && existing.devScript.trim()
+      ? existing.devScript.trim()
+      : '';
+    const devScript = existingDevScript || project.devScript;
+    const hasWebTarget = Boolean(devScript) || Boolean(project.hasWebTarget);
     return {
       ...project,
       name: existing?.name || project.name,
+      framework: existing?.framework || project.framework,
+      devScript,
       port: normalizePort(existing?.port) || project.port,
+      hasWebTarget,
+      sourceType: existing?.sourceType || project.sourceType,
     };
   });
 
@@ -1335,13 +1476,18 @@ function mergeDiscoveredWithExisting(discovered, existingProjects, basePort) {
 }
 
 function canBindPort(projectPort) {
+  const portNumber = normalizePort(projectPort);
+  if (!portNumber) {
+    return Promise.resolve(false);
+  }
+
   return new Promise((resolve) => {
     const server = net.createServer();
     server.once('error', () => resolve(false));
     server.once('listening', () => {
       server.close(() => resolve(true));
     });
-    server.listen(projectPort, '0.0.0.0');
+    server.listen(portNumber, '0.0.0.0');
   });
 }
 
@@ -1503,6 +1649,10 @@ function syncProjectPort(projectPath, projectPort) {
 }
 
 function resolveProjectPort(project, entry, running) {
+  if (!project.hasWebTarget) {
+    return project;
+  }
+
   const logPort = running ? detectPortFromProjectLogs(entry) : null;
   const scriptedPort = detectPortFromDevScript(project.devScript);
   const portNumber = logPort || normalizePort(project.port) || scriptedPort;
@@ -1531,6 +1681,10 @@ async function allocateAvailablePorts(projects, basePort) {
   const reservedPorts = new Set();
 
   for (const project of normalized) {
+    if (!project.hasWebTarget) {
+      continue;
+    }
+
     const stateEntry = getStateEntryByPath(state, project.path);
     const stateOwnsPort =
       stateEntry &&
@@ -1569,19 +1723,28 @@ function clearStaleStateForProjects(projects) {
 }
 
 async function ensureProjectPort(project) {
+  if (!projectCanStart(project)) {
+    throw createHttpError(`${project.name} does not have a managed web dev command. Open its terminal to run project-specific commands.`, 400);
+  }
+
+  const portNumber = normalizePort(project.port);
+  if (!portNumber) {
+    throw createHttpError(`${project.name} does not have a web port configured.`, 400);
+  }
+
   const stateEntry = getStateEntryByPath(getState(), project.path);
   const stateOwnsPort =
     stateEntry &&
-    Number(stateEntry.port) === Number(project.port) &&
+    Number(stateEntry.port) === Number(portNumber) &&
     processIsRunning(stateEntry.pid);
 
-  if (stateOwnsPort || (await canBindPort(project.port))) {
+  if (stateOwnsPort || (await canBindPort(portNumber))) {
     return project;
   }
 
-  throw createHttpError(`Port ${project.port} is already in use. Use restart to clean the old listener before starting ${project.name}.`, 409, {
-    port: project.port,
-    owners: getListeningPortOwnerPids(project.port),
+  throw createHttpError(`Port ${portNumber} is already in use. Use restart to clean the old listener before starting ${project.name}.`, 409, {
+    port: portNumber,
+    owners: getListeningPortOwnerPids(portNumber),
   });
 }
 
@@ -1684,6 +1847,10 @@ function updateProjectEntry(project, patch) {
 }
 
 async function startProject(project, options = {}) {
+  if (!projectCanStart(project)) {
+    throw createHttpError(`${project.name} does not have a managed web dev command. Open its terminal to run project-specific commands.`, 400);
+  }
+
   const state = getState();
   const existing = getStateEntryByPath(state, project.path);
   if (existing && processIsRunning(existing.pid)) {
@@ -1823,6 +1990,10 @@ async function stopProject(project) {
 }
 
 async function restartProject(project, options = {}) {
+  if (!projectCanStart(project)) {
+    throw createHttpError(`${project.name} does not have a managed web dev command. Open its terminal to run project-specific commands.`, 400);
+  }
+
   const entry = getStateEntryByPath(getState(), project.path);
   const lanIp = options.lanIp || getLanIp();
   const tailscaleIp = options.tailscaleIp || getTailscaleIp();
@@ -1854,12 +2025,15 @@ function buildTerminalEnv(project) {
   }
 
   if (project) {
-    env.PORT = String(project.port);
-    env.VITE_PORT = String(project.port);
+    const projectPort = normalizePort(project.port);
+    if (projectPort) {
+      env.PORT = String(projectPort);
+      env.VITE_PORT = String(projectPort);
+      env.DEV_DOCK_PROJECT_PORT = String(projectPort);
+      env.DEV_DOCK_PROJECT_LOCAL_URL = buildUrl('127.0.0.1', projectPort);
+    }
     env.DEV_DOCK_PROJECT_NAME = project.name;
     env.DEV_DOCK_PROJECT_PATH = project.path;
-    env.DEV_DOCK_PROJECT_PORT = String(project.port);
-    env.DEV_DOCK_PROJECT_LOCAL_URL = buildUrl('127.0.0.1', project.port);
   }
 
   return env;
@@ -3187,7 +3361,7 @@ function getTerminalOptions(project) {
   return {
     name: project.name,
     port: project.port,
-    localUrl: buildUrl('127.0.0.1', project.port),
+    localUrl: projectHasWebTarget(project) ? buildUrl('127.0.0.1', project.port) : '',
     defaultCwd: project.path,
     directories: [rootDirectory],
     rootDirectory,
@@ -3328,7 +3502,7 @@ function createTerminalSession(project, options = {}) {
     sockets: new Set(),
     projectName: project.name,
     projectPort: project.port,
-    projectLocalUrl: buildUrl('127.0.0.1', project.port),
+    projectLocalUrl: projectHasWebTarget(project) ? buildUrl('127.0.0.1', project.port) : '',
     cwd,
     shellId: shell.id,
     shellLabel: shell.label,
@@ -3521,7 +3695,8 @@ function getLanIp() {
 }
 
 function buildUrl(ipAddress, projectPort) {
-  return ipAddress ? `http://${ipAddress}:${projectPort}` : '';
+  const portNumber = normalizePort(projectPort);
+  return ipAddress && portNumber ? `http://${ipAddress}:${portNumber}` : '';
 }
 
 function quotePowerShellArgument(value) {
@@ -3623,13 +3798,22 @@ function openProjectFolder(project) {
 }
 
 function probeLocalPort(projectPort) {
+  const portNumber = normalizePort(projectPort);
   const startedAt = Date.now();
+  if (!portNumber) {
+    return Promise.resolve({
+      ok: false,
+      error: 'no-port',
+      latencyMs: 0,
+      checkedAt: new Date().toISOString(),
+    });
+  }
 
   return new Promise((resolve) => {
     const request = http.get(
       {
         host: '127.0.0.1',
-        port: projectPort,
+        port: portNumber,
         path: '/',
         timeout: 900,
       },
@@ -3741,24 +3925,36 @@ async function getStatusPayload(request = null) {
     resolvedProjects.map(async (project) => {
       let entry = getStateEntryByPath(state, project.path);
       let running = Boolean(entry?.pid && processIsRunning(entry.pid));
-      const probe = await probeLocalPort(project.port);
-      const healthResult = await applyHealthPolicy(project, entry, running, probe, config, { lanIp, tailscaleIp });
+      const webTarget = projectHasWebTarget(project);
+      const probe = webTarget
+        ? await probeLocalPort(project.port)
+        : {
+            ok: false,
+            error: 'no-web-target',
+            latencyMs: 0,
+            checkedAt: new Date().toISOString(),
+          };
+      const healthResult = webTarget
+        ? await applyHealthPolicy(project, entry, running, probe, config, { lanIp, tailscaleIp })
+        : { entry, autoRestarted: false };
       entry = healthResult.entry || entry;
       running = Boolean(entry?.pid && processIsRunning(entry.pid));
-      const status = healthResult.autoRestarted
-        ? 'restarting'
-        : running
-          ? probe.ok
-            ? 'running'
-            : 'unhealthy'
-          : probe.ok
-            ? 'external'
-            : entry
-              ? 'stale'
-              : 'stopped';
-      const localUrl = buildUrl('127.0.0.1', project.port);
-      const lanUrl = buildUrl(lanIp, project.port);
-      const tailscaleUrl = buildUrl(tailscaleIp, project.port);
+      const status = webTarget
+        ? healthResult.autoRestarted
+          ? 'restarting'
+          : running
+            ? probe.ok
+              ? 'running'
+              : 'unhealthy'
+            : probe.ok
+              ? 'external'
+              : entry
+                ? 'stale'
+                : 'stopped'
+        : 'stopped';
+      const localUrl = webTarget ? buildUrl('127.0.0.1', project.port) : '';
+      const lanUrl = webTarget ? buildUrl(lanIp, project.port) : '';
+      const tailscaleUrl = webTarget ? buildUrl(tailscaleIp, project.port) : '';
       const mobileInstall = getMobileInstallSummary(project);
       const pages = discoverProjectPages(project).map((page) => ({
         ...page,
@@ -3787,6 +3983,7 @@ async function getStatusPayload(request = null) {
         tailscaleUrl,
         mobileInstall,
         pages,
+        hasDetectedPages: pages.length > 0,
         probe,
         healthFailures: Number(entry?.healthFailures || 0),
         lastHealthAt: entry?.lastHealthAt || probe.checkedAt,
@@ -3844,7 +4041,7 @@ async function restoreEnabledProjectsOnStartup() {
     }
 
     const project = getProjectByPath(projects, entry.path);
-    if (!project) {
+    if (!project || !projectCanStart(project)) {
       continue;
     }
 
@@ -3934,6 +4131,8 @@ async function runProfileAction(profile, projects, action) {
   for (const project of selectedProjects) {
     if (action === 'stop') {
       await stopProject(project);
+    } else if (!projectCanStart(project)) {
+      continue;
     } else if (action === 'restart') {
       await restartProject(project);
     } else {
@@ -4007,6 +4206,10 @@ async function handleApi(request, response, url) {
       sendError(response, 404, 'Project not found.');
       return;
     }
+    if (!projectHasWebTarget(project)) {
+      sendError(response, 400, 'Project does not have a web port configured.');
+      return;
+    }
 
     const lanIp = getLanIp();
     sendJson(response, 200, {
@@ -4042,6 +4245,10 @@ async function handleApi(request, response, url) {
     const project = getProjectByName(projects, body.name || '');
     if (!project) {
       sendError(response, 404, 'Project not found.');
+      return;
+    }
+    if (!projectHasWebTarget(project)) {
+      sendError(response, 400, 'Project does not have a web port configured.');
       return;
     }
 
