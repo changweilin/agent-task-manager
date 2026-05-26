@@ -380,6 +380,10 @@ h1 {
   color: var(--coral);
 }
 
+.row-action.refresh {
+  color: var(--teal);
+}
+
 .row-action.restart {
   color: var(--amber);
 }

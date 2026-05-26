@@ -750,6 +750,7 @@ const icons = {
   tailscale: '<svg viewBox="0 0 24 24" focusable="false"><path d="M7 16.5a4.5 4.5 0 0 1 0-9"/><path d="M17 7.5a4.5 4.5 0 0 1 0 9"/><path d="M8.5 12h7"/><path d="M12 8.5v7"/></svg>',
   firewall: '<svg viewBox="0 0 24 24" focusable="false"><path d="M12 3 19 6v5c0 4.5-2.7 8.1-7 10-4.3-1.9-7-5.5-7-10V6l7-3Z"/><path d="M9 12h6"/></svg>',
   stop: '<svg viewBox="0 0 24 24" focusable="false"><path d="M7 7h10v10H7z"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" focusable="false"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M19 11a7 7 0 0 0-12.1-4.8L4 9"/><path d="M5 13a7 7 0 0 0 12.1 4.8L20 15"/></svg>',
   restart: '<svg viewBox="0 0 24 24" focusable="false"><path d="M20 6v5h-5"/><path d="M19 11a7 7 0 0 0-12.1-4.8L4 9"/><path d="M5 13a7 7 0 0 0 12.1 4.8L20 15"/></svg>',
   apk: '<svg viewBox="0 0 24 24" focusable="false"><path d="M8 4h8l3 3v13H5V4h3Z"/><path d="M16 4v4h4"/><path d="M8 12h8"/><path d="M8 16h5"/></svg>',
   terminal: '<svg viewBox="0 0 24 24" focusable="false"><path d="M4 5h16v14H4z"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>',
@@ -934,6 +935,7 @@ const tableColumns = [
       return `
         <div class="row-actions">
           ${renderProjectPowerAction(project, context)}
+          <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${context.busy || state.discoverLoading || DEMO_MODE ? 'disabled' : ''} type="button" title="重新整理" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
           <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
           <button class="row-action firewall" data-action="firewall" data-name="${escapeHtml(project.name)}" ${!project.lanUrl || DEMO_MODE || project.firewallSupported === false ? 'disabled' : ''} type="button" title="LAN 防火牆" aria-label="設定 ${escapeHtml(project.name)} 的 LAN 防火牆">${icons.firewall}</button>
           ${renderMobileInstallAction(project, context)}
@@ -2276,6 +2278,10 @@ async function runAction(name, action) {
     return true;
   }
 
+  if (action === 'refresh') {
+    return refreshProject(name);
+  }
+
   state.busy.add(name);
   render();
 
@@ -2329,14 +2335,14 @@ async function openProjectFolder(name) {
   }
 }
 
-async function discover({ commitDraft = true } = {}) {
+async function discover({ commitDraft = true, includeDraft = true, showToastOnSuccess = true } = {}) {
   if (DEMO_MODE) {
     showDemoNotice();
-    return;
+    return false;
   }
 
   if (state.discoverLoading) {
-    return;
+    return false;
   }
 
   state.discoverLoading = true;
@@ -2345,7 +2351,7 @@ async function discover({ commitDraft = true } = {}) {
     if (commitDraft) {
       commitRootInput();
     }
-    const roots = readRootPathsForDiscover();
+    const roots = includeDraft ? readRootPathsForDiscover() : normalizeRootPaths(state.rootPaths);
     const basePort = Number(elements.basePortInput.value || state.payload?.config?.basePort || 5173);
     state.payload = await api('/api/discover', {
       method: 'POST',
@@ -2357,12 +2363,49 @@ async function discover({ commitDraft = true } = {}) {
     if (!state.selectedName && state.payload.projects.length) {
       state.selectedName = state.payload.projects[0].name;
     }
-    showToast('掃描完成');
+    if (showToastOnSuccess) {
+      showToast('掃描完成');
+    }
     render();
+    return true;
   } catch (error) {
     showToast(error.message);
+    return false;
   } finally {
     state.discoverLoading = false;
+    render();
+  }
+}
+
+async function refreshProject(name) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return false;
+  }
+
+  state.selectedName = name;
+  state.busy.add(name);
+  render();
+
+  try {
+    const scanned = await discover({
+      commitDraft: false,
+      includeDraft: false,
+      showToastOnSuccess: false,
+    });
+    if (!scanned) {
+      return false;
+    }
+
+    await loadStatus({ silent: true });
+    if (state.payload?.projects.some((project) => project.name === name)) {
+      state.selectedName = name;
+    }
+    showToast('已掃描並重新整理');
+    render();
+    return true;
+  } finally {
+    state.busy.delete(name);
     render();
   }
 }
