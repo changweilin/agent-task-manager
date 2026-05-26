@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const dns = require('dns');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
@@ -26,6 +27,7 @@ const DEFAULT_MANAGER_PORT = 8787;
 const DEFAULT_HEALTH_FAILURE_THRESHOLD = 3;
 const PAGE_SCAN_TTL_MS = 30000;
 const TAILSCALE_SERVE_SCAN_TTL_MS = 30000;
+const TAILSCALE_DNS_LOOKUP_TTL_MS = 300000;
 const PAGE_SCAN_MAX_FILES = 800;
 const PAGE_SCAN_MAX_PAGES = 80;
 const PAGE_SCAN_MAX_DEPTH = 8;
@@ -94,6 +96,7 @@ const mobileInstallLocks = new Set();
 const restartLocks = new Set();
 const pageScanCache = new Map();
 let tailscaleServeCache = { checkedAt: 0, routes: [] };
+let tailscaleDnsCache = { checkedAt: 0, ip: '', hostName: '' };
 const TERMINAL_BUFFER_LIMIT = 2 * 1024 * 1024;
 const TERMINAL_INPUT_LIMIT = 16 * 1024;
 const TERMINAL_PREFERENCE_TEXT_LIMIT = 4096;
@@ -2278,15 +2281,15 @@ function childWebTargetScore(target) {
   return score;
 }
 
-function targetUrlsForProject(project, lanIp, tailscaleIp) {
+function targetUrlsForProject(project, lanIp, tailscaleIp, tailscaleHost = '') {
   return {
     localUrl: buildUrl('127.0.0.1', project.port),
     lanUrl: buildUrl(lanIp, project.port),
-    tailscaleUrl: buildProjectTailscaleUrl(project.port, tailscaleIp),
+    tailscaleUrl: buildProjectTailscaleUrl(project.port, tailscaleIp, { tailscaleHost }),
   };
 }
 
-async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp }) {
+async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tailscaleHost }) {
   const branches = Array.isArray(project.branches) ? project.branches : [];
   const targets = [];
 
@@ -2298,7 +2301,7 @@ async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp }) {
     const resolved = await resolveWebTargetProject(branch, state);
     targets.push({
       ...resolved,
-      ...targetUrlsForProject(resolved.project, lanIp, tailscaleIp),
+      ...targetUrlsForProject(resolved.project, lanIp, tailscaleIp, tailscaleHost),
     });
   }
 
@@ -4563,6 +4566,66 @@ function buildUrl(ipAddress, projectPort) {
   return ipAddress && portNumber ? `http://${ipAddress}:${portNumber}` : '';
 }
 
+function localProxyPortFromValue(value) {
+  const match = String(value || '').match(/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})(?:[/?#\s]|$)/i);
+  return normalizePort(match?.[1]);
+}
+
+function tailscaleWebKeyToOrigin(key) {
+  const value = String(key || '').trim();
+  if (!value) {
+    return '';
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value);
+      return `https://${parsed.host}`.replace(/\/+$/, '');
+    } catch (error) {
+      return value.replace(/\/+$/, '');
+    }
+  }
+
+  const hostPortMatch = value.match(/^(.+):(\d{1,5})$/);
+  const hostName = hostPortMatch ? hostPortMatch[1] : value;
+  const httpsPort = normalizePort(hostPortMatch?.[2]) || 443;
+  const formattedHost = hostName.includes(':') && !hostName.startsWith('[') ? `[${hostName}]` : hostName;
+  return `https://${formattedHost}${httpsPort === 443 ? '' : `:${httpsPort}`}`;
+}
+
+function buildTailscaleServeRouteUrl(origin, routePath) {
+  if (!origin) {
+    return '';
+  }
+
+  const normalizedPath = normalizeUrlPath(routePath || '/');
+  return normalizedPath === '/' ? origin : `${origin}${normalizedPath}`;
+}
+
+function tailscaleServeRoutesFromJson(output) {
+  const parsed = JSON.parse(output);
+  const routes = [];
+
+  for (const [webKey, webConfig] of Object.entries(parsed?.Web || {})) {
+    const origin = tailscaleWebKeyToOrigin(webKey);
+    const handlers = webConfig?.Handlers || {};
+
+    for (const [routePath, handler] of Object.entries(handlers)) {
+      const proxyPort = localProxyPortFromValue(handler?.Proxy);
+      if (origin && proxyPort) {
+        routes.push({
+          port: proxyPort,
+          path: normalizeUrlPath(routePath || '/'),
+          origin,
+          url: buildTailscaleServeRouteUrl(origin, routePath),
+        });
+      }
+    }
+  }
+
+  return routes;
+}
+
 function getTailscaleServeRoutes() {
   if (Date.now() - tailscaleServeCache.checkedAt < TAILSCALE_SERVE_SCAN_TTL_MS) {
     return tailscaleServeCache.routes;
@@ -4570,33 +4633,110 @@ function getTailscaleServeRoutes() {
 
   const routes = [];
   try {
-    const output = execFileSync('tailscale', ['serve', 'status'], {
+    const jsonOutput = execFileSync('tailscale', ['serve', 'status', '--json'], {
       encoding: 'utf8',
       timeout: 700,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    let origin = '';
-
-    for (const line of output.split(/\r?\n/)) {
-      const originMatch = line.match(/^\s*(https?:\/\/\S+)/i);
-      if (originMatch) {
-        origin = originMatch[1].replace(/\/+$/, '');
-        continue;
-      }
-
-      const proxyMatch = line.match(/\bproxy\s+https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})(?:[/?#\s]|$)/i);
-      const proxyPort = normalizePort(proxyMatch?.[1]);
-      if (origin && proxyPort) {
-        routes.push({ port: proxyPort, url: origin });
-      }
-    }
+    routes.push(...tailscaleServeRoutesFromJson(jsonOutput));
   } catch (error) {
-    // Tailscale Serve is optional; direct Tailscale IP URLs remain the fallback.
+    // Older Tailscale versions may not support --json; fall back to the text output below.
+  }
+
+  if (!routes.length) {
+    try {
+      const output = execFileSync('tailscale', ['serve', 'status'], {
+        encoding: 'utf8',
+        timeout: 700,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let origin = '';
+
+      for (const line of output.split(/\r?\n/)) {
+        const originMatch = line.match(/^\s*(https?:\/\/\S+)/i);
+        if (originMatch) {
+          origin = originMatch[1].replace(/\/+$/, '');
+          continue;
+        }
+
+        const proxyPort = localProxyPortFromValue(line.match(/\bproxy\s+(https?:\/\/\S+)/i)?.[1]);
+        if (origin && proxyPort) {
+          routes.push({
+            port: proxyPort,
+            path: '/',
+            origin,
+            url: origin,
+          });
+        }
+      }
+    } catch (error) {
+      // Tailscale Serve is optional; direct Tailscale IP URLs remain the fallback.
+    }
   }
 
   tailscaleServeCache = { checkedAt: Date.now(), routes };
   return routes;
+}
+
+function startTailscaleServeForPort(projectPort) {
+  const portNumber = normalizePort(projectPort);
+  if (!portNumber) {
+    return false;
+  }
+
+  try {
+    const child = spawn('tailscale', ['serve', '--bg', '--yes', '--https', String(portNumber), String(portNumber)], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function getTailscaleDnsName(tailscaleIp) {
+  if (!tailscaleIp) {
+    return '';
+  }
+
+  if (
+    tailscaleDnsCache.ip === tailscaleIp &&
+    Date.now() - tailscaleDnsCache.checkedAt < TAILSCALE_DNS_LOOKUP_TTL_MS
+  ) {
+    return tailscaleDnsCache.hostName;
+  }
+
+  try {
+    const result = await dns.promises.lookupService(tailscaleIp, 0);
+    const hostName = String(result.hostname || '')
+      .trim()
+      .replace(/\.$/, '');
+    tailscaleDnsCache = { checkedAt: Date.now(), ip: tailscaleIp, hostName };
+    return hostName;
+  } catch (error) {
+    tailscaleDnsCache = { checkedAt: Date.now(), ip: tailscaleIp, hostName: '' };
+    return '';
+  }
+}
+
+function buildHttpsUrl(hostName, projectPort) {
+  const portNumber = normalizePort(projectPort);
+  if (!hostName || !portNumber) {
+    return '';
+  }
+
+  const formattedHost = hostName.includes(':') && !hostName.startsWith('[') ? `[${hostName}]` : hostName;
+  return `https://${formattedHost}${portNumber === 443 ? '' : `:${portNumber}`}`;
+}
+
+function refreshTailscaleServeRoutes() {
+  tailscaleServeCache = { checkedAt: 0, routes: [] };
+  return getTailscaleServeRoutes();
 }
 
 function getTailscaleServeUrlForPort(projectPort) {
@@ -4605,11 +4745,26 @@ function getTailscaleServeUrlForPort(projectPort) {
     return '';
   }
 
-  return getTailscaleServeRoutes().find((route) => route.port === portNumber)?.url || '';
+  const matchingRoutes = getTailscaleServeRoutes()
+    .filter((route) => route.port === portNumber)
+    .sort((left, right) => (left.path === '/' ? 0 : 1) - (right.path === '/' ? 0 : 1));
+  return matchingRoutes[0]?.url || '';
 }
 
-function buildProjectTailscaleUrl(projectPort, tailscaleIp) {
-  return getTailscaleServeUrlForPort(projectPort) || buildUrl(tailscaleIp, projectPort);
+function buildProjectTailscaleUrl(projectPort, tailscaleIp, options = {}) {
+  const httpsUrl = buildHttpsUrl(options.tailscaleHost || '', projectPort);
+  if (httpsUrl) {
+    return httpsUrl;
+  }
+
+  if (options.allowServeStatusLookup) {
+    const serveUrl = getTailscaleServeUrlForPort(projectPort);
+    if (serveUrl) {
+      return serveUrl;
+    }
+  }
+
+  return buildUrl(tailscaleIp, projectPort);
 }
 
 function quotePowerShellArgument(value) {
@@ -4830,6 +4985,7 @@ async function getStatusPayload(request = null) {
   const state = getState();
   const tailscaleIp = getTailscaleIp();
   const lanIp = getLanIp();
+  const tailscaleHost = await getTailscaleDnsName(tailscaleIp);
   const terminalReadOnly = request ? !isLocalRequest(request) : false;
   const normalizedProjects = normalizeProjects(config.projects, config.basePort);
   const resolvedProjects = normalizedProjects.map((project) => {
@@ -4846,7 +5002,7 @@ async function getStatusPayload(request = null) {
       const webTarget = projectHasWebTarget(project);
       const childWebTargets = webTarget
         ? []
-        : await resolveChildWebTargets(project, state, { lanIp, tailscaleIp });
+        : await resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tailscaleHost });
       const homeChildWebTarget = childWebTargets[0] || null;
       let probe = webTarget
         ? await probeLocalPort(project.port)
@@ -4903,7 +5059,7 @@ async function getStatusPayload(request = null) {
           : 'stopped';
       const localUrl = webTarget ? buildUrl('127.0.0.1', project.port) : homeChildWebTarget?.localUrl || '';
       const lanUrl = webTarget ? buildUrl(lanIp, project.port) : homeChildWebTarget?.lanUrl || '';
-      const tailscaleUrl = webTarget ? buildProjectTailscaleUrl(project.port, tailscaleIp) : homeChildWebTarget?.tailscaleUrl || '';
+      const tailscaleUrl = webTarget ? buildProjectTailscaleUrl(project.port, tailscaleIp, { tailscaleHost }) : homeChildWebTarget?.tailscaleUrl || '';
       const mobileInstall = getMobileInstallSummary(project);
       const pages = homeChildWebTarget && !webTarget
         ? derivedPagesFromChildTargets(childWebTargets, homeChildWebTarget)
@@ -4968,7 +5124,7 @@ async function getStatusPayload(request = null) {
       port,
       localUrl: buildUrl('127.0.0.1', port),
       lanUrl: buildUrl(lanIp, port),
-      tailscaleUrl: buildUrl(tailscaleIp, port),
+      tailscaleUrl: buildProjectTailscaleUrl(port, tailscaleIp, { tailscaleHost }),
       tailscaleIp,
       terminalReadOnly,
       terminalClaudeRemoteLaunch: true,
@@ -5618,7 +5774,9 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await startProject(getProjectActionTarget(project), { tailscaleMode: true, tailscaleIp });
+    const actionProject = getProjectActionTarget(project);
+    startTailscaleServeForPort(actionProject.port);
+    await startProject(actionProject, { tailscaleMode: true, tailscaleIp });
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -6357,7 +6515,9 @@ server.listen(port, host, () => {
     console.log('LAN IP not found yet. Connect to Wi-Fi or Ethernet, then refresh the UI.');
   }
   if (tailscale.ip) {
-    console.log(`Tailscale URL: http://${tailscale.ip}:${port}`);
+    getTailscaleDnsName(tailscale.ip).then((tailscaleHost) => {
+      console.log(`Tailscale URL: ${buildProjectTailscaleUrl(port, tailscale.ip, { tailscaleHost })}`);
+    });
   } else {
     console.log('Tailscale IP not found yet. Agent Task Manager (ATM) tried to start Tailscale; connect or sign in, then refresh the UI.');
     if (tailscale.error) {

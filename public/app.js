@@ -624,13 +624,14 @@ const DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS = {
   favoriteFlags: TERMINAL_ANTIGRAVITY_DEFAULT_FLAG_FAVORITES,
   activeFlags: [],
 };
-const DEFAULT_COLUMN_ORDER = ['name', 'status', 'framework', 'port', 'health', 'command', 'started', 'restarted', 'pid'];
-const ACTION_URL_COLUMN_IDS = ['local', 'lan', 'tailscale'];
+const DEFAULT_COLUMN_ORDER = ['name', 'status', 'framework', 'port', 'tailscale', 'health', 'command', 'started', 'restarted', 'pid'];
+const ACTION_URL_COLUMN_IDS = ['local', 'lan'];
 const DEFAULT_COLUMN_WIDTHS = {
   name: 238,
   status: 104,
   framework: 92,
   port: 78,
+  tailscale: 270,
   health: 108,
   command: 210,
   started: 142,
@@ -639,7 +640,7 @@ const DEFAULT_COLUMN_WIDTHS = {
 };
 const MIN_COLUMN_WIDTH = 72;
 const MAX_COLUMN_WIDTH = 520;
-const MIN_TABLE_WIDTH = 1190;
+const MIN_TABLE_WIDTH = 1460;
 const COLUMN_REORDER_MOVE_THRESHOLD = 6;
 const ROOT_REORDER_MOVE_THRESHOLD = 6;
 const SOURCE_ORDER_SORT_ID = 'sourceOrder';
@@ -772,6 +773,9 @@ const icons = {
 
 const elements = {
   managerUrl: document.querySelector('#managerUrl'),
+  managerLocalLink: document.querySelector('#managerLocalLink'),
+  managerLanLink: document.querySelector('#managerLanLink'),
+  managerTailLink: document.querySelector('#managerTailLink'),
   tailscaleIp: document.querySelector('#tailscaleIp'),
   runningCount: document.querySelector('#runningCount'),
   themeToggleButton: document.querySelector('#themeToggleButton'),
@@ -2295,6 +2299,25 @@ function toggleProjectPanel(projectName) {
   render();
 }
 
+function updateManagerConnectionLink(link, copyButton, value, label) {
+  const hasUrl = Boolean(value);
+  link.textContent = hasUrl ? value : '--';
+  link.title = hasUrl ? value : `${label} 連結尚未就緒`;
+  link.setAttribute('aria-disabled', hasUrl && !DEMO_MODE ? 'false' : 'true');
+  link.classList.toggle('is-disabled', !hasUrl || DEMO_MODE);
+
+  if (hasUrl && !DEMO_MODE) {
+    link.href = value;
+  } else {
+    link.removeAttribute('href');
+  }
+
+  copyButton.disabled = DEMO_MODE || !hasUrl;
+  copyButton.textContent = '複製';
+  copyButton.title = hasUrl ? `複製 ${label} 連結` : `${label} 連結尚未就緒`;
+  copyButton.setAttribute('aria-label', copyButton.title);
+}
+
 function render() {
   const payload = state.payload;
   if (!payload) {
@@ -2315,9 +2338,9 @@ function render() {
   if (document.activeElement !== elements.basePortInput) {
     elements.basePortInput.value = payload.config.basePort || 5173;
   }
-  elements.copyManagerLocal.textContent = payload.manager.localUrl || '--';
-  elements.copyManagerLan.textContent = payload.manager.lanUrl || '--';
-  elements.copyManagerTail.textContent = payload.manager.tailscaleUrl || '--';
+  updateManagerConnectionLink(elements.managerLocalLink, elements.copyManagerLocal, payload.manager.localUrl, '本機');
+  updateManagerConnectionLink(elements.managerLanLink, elements.copyManagerLan, payload.manager.lanUrl, 'LAN');
+  updateManagerConnectionLink(elements.managerTailLink, elements.copyManagerTail, payload.manager.tailscaleUrl, 'Tailscale');
   if (document.activeElement !== elements.autoRestoreInput) {
     elements.autoRestoreInput.checked = payload.config.autoRestoreOnStartup !== false;
   }
@@ -2330,9 +2353,9 @@ function render() {
   elements.rootsInput.disabled = DEMO_MODE || state.discoverLoading;
   elements.addRootButton.disabled = DEMO_MODE || state.discoverLoading;
   elements.basePortInput.disabled = DEMO_MODE || state.discoverLoading;
-  elements.copyManagerLocal.disabled = DEMO_MODE;
-  elements.copyManagerLan.disabled = DEMO_MODE;
-  elements.copyManagerTail.disabled = DEMO_MODE;
+  elements.copyManagerLocal.disabled = DEMO_MODE || !payload.manager.localUrl;
+  elements.copyManagerLan.disabled = DEMO_MODE || !payload.manager.lanUrl;
+  elements.copyManagerTail.disabled = DEMO_MODE || !payload.manager.tailscaleUrl;
   elements.autoRestoreInput.disabled = DEMO_MODE;
   elements.autoRestartInput.disabled = DEMO_MODE;
   elements.healthThresholdInput.disabled = DEMO_MODE;

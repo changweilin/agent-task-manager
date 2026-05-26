@@ -151,15 +151,30 @@
             <dl class="detail-list compact">
               <div>
                 <dt>本機</dt>
-                <dd><button class="link-button" id="copyManagerLocal" type="button">--</button></dd>
+                <dd>
+                  <div class="manager-link-row">
+                    <a class="url-link manager-connection-link is-disabled" id="managerLocalLink" target="_blank" rel="noreferrer" aria-disabled="true">--</a>
+                    <button class="copy-url manager-copy-button" id="copyManagerLocal" type="button" title="複製本機連結" aria-label="複製本機連結">複製</button>
+                  </div>
+                </dd>
               </div>
               <div>
                 <dt>LAN</dt>
-                <dd><button class="link-button" id="copyManagerLan" type="button">--</button></dd>
+                <dd>
+                  <div class="manager-link-row">
+                    <a class="url-link manager-connection-link is-disabled" id="managerLanLink" target="_blank" rel="noreferrer" aria-disabled="true">--</a>
+                    <button class="copy-url manager-copy-button" id="copyManagerLan" type="button" title="複製 LAN 連結" aria-label="複製 LAN 連結">複製</button>
+                  </div>
+                </dd>
               </div>
               <div>
                 <dt>Tailscale</dt>
-                <dd><button class="link-button" id="copyManagerTail" type="button">--</button></dd>
+                <dd>
+                  <div class="manager-link-row">
+                    <a class="url-link manager-connection-link is-disabled" id="managerTailLink" target="_blank" rel="noreferrer" aria-disabled="true">--</a>
+                    <button class="copy-url manager-copy-button" id="copyManagerTail" type="button" title="複製 Tailscale 連結" aria-label="複製 Tailscale 連結">複製</button>
+                  </div>
+                </dd>
               </div>
             </dl>
           </section>
