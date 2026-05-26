@@ -5,6 +5,7 @@ const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { spawn, execFileSync } = require('child_process');
 const { WebSocketServer } = require('ws');
 
@@ -20,6 +21,7 @@ const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const CONFIG_PATH = process.env.DEV_DOCK_CONFIG || path.join(ROOT_DIR, 'dev-projects.json');
 const MANAGER_DIR = path.join(ROOT_DIR, '.dev-manager');
 const LOG_DIR = path.join(MANAGER_DIR, 'logs');
+const VITE_CONFIG_DIR = path.join(MANAGER_DIR, 'vite-configs');
 const STATE_PATH = path.join(MANAGER_DIR, 'state.json');
 const TERMINAL_PREFERENCES_PATH = path.join(MANAGER_DIR, 'terminal-preferences.json');
 const DEFAULT_BASE_PORT = 5173;
@@ -2572,7 +2574,7 @@ function getNpmExecutable() {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm';
 }
 
-function getNpmDevArgs(framework, projectPort, devScript = '') {
+function getNpmDevArgs(framework, projectPort, devScript = '', launchOptions = {}) {
   const args = ['run', 'dev'];
   const scriptedPort = detectPortFromDevScript(devScript);
 
@@ -2582,7 +2584,11 @@ function getNpmDevArgs(framework, projectPort, devScript = '') {
 
   if (['vite', 'astro', 'nuxt'].includes(framework)) {
     if (framework === 'vite') {
-      return [...args, '--', '--host', '0.0.0.0', '--port', String(projectPort), '--strictPort'];
+      const viteArgs = ['--host', '0.0.0.0', '--port', String(projectPort), '--strictPort'];
+      if (launchOptions.viteConfigPath) {
+        viteArgs.push('--config', launchOptions.viteConfigPath);
+      }
+      return [...args, '--', ...viteArgs];
     }
 
     return [...args, '--', '--host', '0.0.0.0', '--port', String(projectPort)];
@@ -2599,12 +2605,166 @@ function getNpmDevArgs(framework, projectPort, devScript = '') {
   return args;
 }
 
+function normalizeHostName(value) {
+  const rawValue = String(value || '').trim();
+  if (!rawValue) {
+    return '';
+  }
+
+  let hostName = rawValue;
+  if (/^https?:\/\//i.test(hostName)) {
+    try {
+      hostName = new URL(hostName).hostname;
+    } catch (error) {
+      return '';
+    }
+  } else {
+    const hostPortMatch = hostName.match(/^([^/\s]+):\d{1,5}$/);
+    hostName = hostPortMatch ? hostPortMatch[1] : hostName.split(/[/?#\s]/)[0];
+  }
+
+  if (hostName.startsWith('[') && hostName.endsWith(']')) {
+    hostName = hostName.slice(1, -1);
+  }
+
+  return hostName.trim().replace(/\.$/, '').toLowerCase();
+}
+
+function getConfiguredViteAllowedHosts() {
+  return String(process.env.ATM_VITE_ALLOWED_HOSTS || '')
+    .split(/[,;\s]+/)
+    .map(normalizeHostName)
+    .filter(Boolean);
+}
+
+function resolveViteConfigFromDevScript(projectPath, devScript = '') {
+  const match = String(devScript || '').match(/(?:^|\s)--config(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/i);
+  const configPath = match?.[1] || match?.[2] || match?.[3] || '';
+  if (!configPath) {
+    return '';
+  }
+
+  return path.resolve(projectPath, configPath);
+}
+
+function findDefaultViteConfig(projectPath) {
+  const configNames = [
+    'vite.config.js',
+    'vite.config.mjs',
+    'vite.config.ts',
+    'vite.config.cjs',
+    'vite.config.mts',
+    'vite.config.cts',
+  ];
+
+  return configNames
+    .map((configName) => path.join(projectPath, configName))
+    .find((configPath) => fs.existsSync(configPath)) || '';
+}
+
+function resolveOriginalViteConfigPath(project) {
+  const scriptedConfigPath = resolveViteConfigFromDevScript(project.path, project.devScript);
+  if (scriptedConfigPath && fs.existsSync(scriptedConfigPath)) {
+    return scriptedConfigPath;
+  }
+
+  return findDefaultViteConfig(project.path);
+}
+
+function buildViteAllowedHostsConfigSource(originalConfigPath, allowedHosts) {
+  const originalConfigUrl = originalConfigPath ? pathToFileURL(originalConfigPath).href : '';
+  return `const originalConfigUrl = ${JSON.stringify(originalConfigUrl)};
+const allowedHosts = ${JSON.stringify(allowedHosts)};
+
+function normalizeConfig(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function mergeAllowedHosts(options) {
+  if (options?.allowedHosts === true) {
+    return options;
+  }
+
+  const currentHosts = Array.isArray(options?.allowedHosts) ? options.allowedHosts : [];
+  return {
+    ...(options || {}),
+    allowedHosts: [...new Set([...currentHosts, ...allowedHosts])],
+  };
+}
+
+function withAllowedHosts(config) {
+  const normalized = normalizeConfig(config);
+  return {
+    ...normalized,
+    server: mergeAllowedHosts(normalized.server),
+    preview: mergeAllowedHosts(normalized.preview),
+  };
+}
+
+async function loadOriginalConfig(environment) {
+  if (!originalConfigUrl) {
+    return {};
+  }
+
+  const originalModule = await import(originalConfigUrl);
+  const exportedConfig = originalModule.default ?? originalModule;
+  const resolvedConfig = typeof exportedConfig === 'function'
+    ? exportedConfig(environment)
+    : exportedConfig;
+  return await resolvedConfig;
+}
+
+export default async function atmViteAllowedHostsConfig(environment) {
+  return withAllowedHosts(await loadOriginalConfig(environment));
+}
+`;
+}
+
+function ensureViteAllowedHostsConfig(project, allowedHosts) {
+  if (!allowedHosts.length) {
+    return '';
+  }
+
+  ensureDir(VITE_CONFIG_DIR);
+  const originalConfigPath = resolveOriginalViteConfigPath(project);
+  const hash = crypto
+    .createHash('sha1')
+    .update(`${normalizePath(project.path)}|${normalizePath(originalConfigPath)}|${allowedHosts.join(',')}`)
+    .digest('hex')
+    .slice(0, 10);
+  const configPath = path.join(VITE_CONFIG_DIR, `${safeName(project.name)}-${hash}.mjs`);
+  const source = buildViteAllowedHostsConfigSource(originalConfigPath, allowedHosts);
+  const existingSource = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
+  if (existingSource !== source) {
+    fs.writeFileSync(configPath, source, 'utf8');
+  }
+  return configPath;
+}
+
+async function resolveViteLaunchOptions(project, options = {}) {
+  if (project?.framework !== 'vite') {
+    return {};
+  }
+
+  const tailscaleIp = options.tailscaleIp || getTailscaleIp();
+  const tailscaleHost = await getTailscaleDnsName(tailscaleIp);
+  const allowedHosts = [...getConfiguredViteAllowedHosts(), normalizeHostName(tailscaleHost)]
+    .filter(Boolean)
+    .filter((hostName, index, values) => values.indexOf(hostName) === index);
+  const viteAllowedHost = allowedHosts[0] || '';
+
+  return {
+    viteAllowedHost,
+    viteConfigPath: ensureViteAllowedHostsConfig(project, allowedHosts),
+  };
+}
+
 function projectBuildCacheDir(project) {
   const hash = crypto.createHash('sha1').update(normalizePath(project?.path || ROOT_DIR)).digest('hex').slice(0, 10);
   return path.join(MANAGER_DIR, 'cargo-targets', hash);
 }
 
-function buildChildEnv(project) {
+function buildChildEnv(project, launchOptions = {}) {
   const projectPort = normalizePort(project?.port ?? project);
   const cargoTargetDir = projectBuildCacheDir(project);
   ensureDir(cargoTargetDir);
@@ -2620,6 +2780,10 @@ function buildChildEnv(project) {
     npm_config_host: '0.0.0.0',
     CARGO_TARGET_DIR: cargoTargetDir,
   };
+
+  if (launchOptions.viteAllowedHost) {
+    env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = launchOptions.viteAllowedHost;
+  }
 
   if (process.platform === 'win32' && env.Path && env.PATH) {
     delete env.PATH;
@@ -2726,9 +2890,10 @@ async function startProject(project, options = {}) {
   }
 
   project = await ensureProjectPort(project);
+  const launchOptions = await resolveViteLaunchOptions(project, options);
 
   const npm = getNpmExecutable();
-  const args = getNpmDevArgs(project.framework, project.port, project.devScript);
+  const args = getNpmDevArgs(project.framework, project.port, project.devScript, launchOptions);
   const prefix = logPrefix(project);
   const stdoutPath = path.join(LOG_DIR, `${prefix}.out.log`);
   const stderrPath = path.join(LOG_DIR, `${prefix}.err.log`);
@@ -2741,7 +2906,7 @@ async function startProject(project, options = {}) {
 
   const child = spawn(npm, args, {
     cwd: project.path,
-    env: buildChildEnv(project),
+    env: buildChildEnv(project, launchOptions),
     shell: process.platform === 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -4524,6 +4689,34 @@ function getTailscaleIp() {
   return null;
 }
 
+function getTailscaleStatusJson() {
+  try {
+    const output = execFileSync('tailscale', ['status', '--json'], {
+      encoding: 'utf8',
+      timeout: 1500,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return JSON.parse(output);
+  } catch (error) {
+    return null;
+  }
+}
+
+function getTailscaleSelfDnsName(tailscaleIp = '') {
+  const status = getTailscaleStatusJson();
+  if (!status?.Self) {
+    return '';
+  }
+
+  const selfIps = Array.isArray(status.Self.TailscaleIPs) ? status.Self.TailscaleIPs : [];
+  if (tailscaleIp && selfIps.length && !selfIps.includes(tailscaleIp)) {
+    return '';
+  }
+
+  return normalizeHostName(status.Self.DNSName || status.CertDomains?.[0]);
+}
+
 function startTailscaleIfNeeded() {
   const currentIp = getTailscaleIp();
   if (currentIp) {
@@ -4719,8 +4912,9 @@ async function getTailscaleDnsName(tailscaleIp) {
     tailscaleDnsCache = { checkedAt: Date.now(), ip: tailscaleIp, hostName };
     return hostName;
   } catch (error) {
-    tailscaleDnsCache = { checkedAt: Date.now(), ip: tailscaleIp, hostName: '' };
-    return '';
+    const hostName = getTailscaleSelfDnsName(tailscaleIp);
+    tailscaleDnsCache = { checkedAt: Date.now(), ip: tailscaleIp, hostName };
+    return hostName;
   }
 }
 
