@@ -173,7 +173,7 @@ button {
 
 .is-demo-mode .row-action,
 .is-demo-mode .project-action-url,
-.is-demo-mode .project-path-button,
+.is-demo-mode .root-path-button,
 .is-demo-mode .link-button {
   cursor: default;
 }
@@ -524,6 +524,54 @@ textarea {
   align-items: center;
   gap: 6px;
   padding: 5px 5px 5px 9px;
+  cursor: grab;
+  touch-action: none;
+  transition: border-color 140ms ease, background 140ms ease, opacity 140ms ease;
+}
+
+.root-list-item.is-dragging {
+  border-color: var(--teal-border);
+  background: var(--row-hover-bg);
+  opacity: 0.82;
+}
+
+.is-root-reordering .root-list-item {
+  cursor: grabbing;
+}
+
+.root-path-button {
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.root-path-button:disabled {
+  cursor: default;
+}
+
+.root-drag-handle {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.root-drag-handle svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .root-path-marquee {
@@ -554,6 +602,11 @@ textarea {
 
 .root-path-marquee:hover .root-path-text {
   animation-play-state: paused;
+}
+
+.root-path-button:hover .root-path-text {
+  color: var(--text);
+  text-decoration: underline;
 }
 
 @keyframes root-path-marquee {
@@ -1151,7 +1204,7 @@ tbody tr.project-actions-row td {
 }
 
 .project-name span,
-.project-path-button,
+.project-path-text,
 .mono-muted {
   color: var(--muted);
   font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
@@ -1161,19 +1214,9 @@ tbody tr.project-actions-row td {
   white-space: nowrap;
 }
 
-.project-path-button {
-  width: max-content;
+.project-path-text {
+  display: block;
   max-width: 100%;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  text-align: left;
-}
-
-.project-path-button:hover {
-  color: var(--text);
-  text-decoration: underline;
 }
 
 .project-name-links {
@@ -3703,7 +3746,7 @@ button:disabled {
   }
 
   .project-name span,
-  .project-path-button,
+  .project-path-text,
   .mono-muted,
   .url-link,
   .link-button {

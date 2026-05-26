@@ -4685,16 +4685,16 @@ function openElevatedLanFirewall(project) {
   child.unref();
 }
 
-function openProjectFolder(project) {
-  if (!project?.path || !fs.existsSync(project.path) || !fs.statSync(project.path).isDirectory()) {
-    throw new Error('Project folder was not found.');
+function openFolderPath(folderPath, missingMessage = 'Folder was not found.') {
+  if (!folderPath || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+    throw new Error(missingMessage);
   }
 
   const opener = process.platform === 'win32'
-    ? { command: 'explorer.exe', args: [project.path] }
+    ? { command: 'explorer.exe', args: [folderPath] }
     : process.platform === 'darwin'
-      ? { command: 'open', args: [project.path] }
-      : { command: 'xdg-open', args: [project.path] };
+      ? { command: 'open', args: [folderPath] }
+      : { command: 'xdg-open', args: [folderPath] };
   return new Promise((resolve, reject) => {
     const child = spawn(opener.command, opener.args, {
       detached: true,
@@ -4708,6 +4708,10 @@ function openProjectFolder(project) {
     });
     child.once('error', reject);
   });
+}
+
+function openProjectFolder(project) {
+  return openFolderPath(project?.path, 'Project folder was not found.');
 }
 
 function probeLocalPort(projectPort) {
@@ -5260,6 +5264,33 @@ async function handleApi(request, response, url) {
     try {
       await openProjectFolder(project);
       sendJson(response, 200, { opened: true, path: project.path });
+    } catch (error) {
+      sendError(response, 400, error.message);
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/roots/open-folder') {
+    const body = await readRequestBody(request);
+    const requestedPath = String(body.path || '').trim();
+    if (!requestedPath) {
+      sendError(response, 400, 'Project source path is required.');
+      return;
+    }
+
+    const config = getConfig();
+    const normalizedRequestedPath = normalizePath(requestedPath).toLowerCase();
+    const rootPath = (config.defaultRoots || [])
+      .map((root) => normalizePath(root))
+      .find((root) => root.toLowerCase() === normalizedRequestedPath);
+    if (!rootPath) {
+      sendError(response, 404, 'Project source not found.');
+      return;
+    }
+
+    try {
+      await openFolderPath(rootPath, 'Project source folder was not found.');
+      sendJson(response, 200, { opened: true, path: rootPath });
     } catch (error) {
       sendError(response, 400, error.message);
     }
