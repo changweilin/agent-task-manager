@@ -2637,6 +2637,13 @@ function getConfiguredViteAllowedHosts() {
     .filter(Boolean);
 }
 
+function uniqueHostNames(hostNames) {
+  return hostNames
+    .map(normalizeHostName)
+    .filter(Boolean)
+    .filter((hostName, index, values) => values.indexOf(hostName) === index);
+}
+
 function resolveViteConfigFromDevScript(projectPath, devScript = '') {
   const match = String(devScript || '').match(/(?:^|\s)--config(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/i);
   const configPath = match?.[1] || match?.[2] || match?.[3] || '';
@@ -2748,9 +2755,12 @@ async function resolveViteLaunchOptions(project, options = {}) {
 
   const tailscaleIp = options.tailscaleIp || getTailscaleIp();
   const tailscaleHost = await getTailscaleDnsName(tailscaleIp);
-  const allowedHosts = [...getConfiguredViteAllowedHosts(), normalizeHostName(tailscaleHost)]
-    .filter(Boolean)
-    .filter((hostName, index, values) => values.indexOf(hostName) === index);
+  const tailscaleSuffix = getTailscaleMagicDnsSuffix(tailscaleIp);
+  const allowedHosts = uniqueHostNames([
+    ...getConfiguredViteAllowedHosts(),
+    tailscaleHost,
+    tailscaleSuffix ? `.${tailscaleSuffix}` : '',
+  ]);
   const viteAllowedHost = allowedHosts[0] || '';
 
   return {
@@ -4715,6 +4725,20 @@ function getTailscaleSelfDnsName(tailscaleIp = '') {
   }
 
   return normalizeHostName(status.Self.DNSName || status.CertDomains?.[0]);
+}
+
+function getTailscaleMagicDnsSuffix(tailscaleIp = '') {
+  const status = getTailscaleStatusJson();
+  if (!status) {
+    return '';
+  }
+
+  const selfIps = Array.isArray(status.Self?.TailscaleIPs) ? status.Self.TailscaleIPs : [];
+  if (tailscaleIp && selfIps.length && !selfIps.includes(tailscaleIp)) {
+    return '';
+  }
+
+  return normalizeHostName(status.MagicDNSSuffix || status.CurrentTailnet?.MagicDNSSuffix);
 }
 
 function startTailscaleIfNeeded() {
