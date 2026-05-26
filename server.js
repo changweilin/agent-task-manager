@@ -25,6 +25,7 @@ const DEFAULT_BASE_PORT = 5173;
 const DEFAULT_MANAGER_PORT = 8787;
 const DEFAULT_HEALTH_FAILURE_THRESHOLD = 3;
 const PAGE_SCAN_TTL_MS = 30000;
+const TAILSCALE_SERVE_SCAN_TTL_MS = 30000;
 const PAGE_SCAN_MAX_FILES = 800;
 const PAGE_SCAN_MAX_PAGES = 80;
 const PAGE_SCAN_MAX_DEPTH = 8;
@@ -92,6 +93,7 @@ let aiQuotaProbeInFlight = null;
 const mobileInstallLocks = new Set();
 const restartLocks = new Set();
 const pageScanCache = new Map();
+let tailscaleServeCache = { checkedAt: 0, routes: [] };
 const TERMINAL_BUFFER_LIMIT = 2 * 1024 * 1024;
 const TERMINAL_INPUT_LIMIT = 16 * 1024;
 const TERMINAL_PREFERENCE_TEXT_LIMIT = 4096;
@@ -823,7 +825,8 @@ function detectPortFromDevScript(devScript) {
     /(?:^|\s)--port(?:=|\s+)(\d{1,5})(?=\s|$)/i,
     /(?:^|\s)-Port(?:=|\s+)(\d{1,5})(?=\s|$)/i,
     /(?:^|\s)-p(?:=|\s+)(\d{1,5})(?=\s|$)/i,
-    /(?:^|\s)(?:PORT|VITE_PORT)=(\d{1,5})(?=\s|$)/i,
+    /(?:^|\s)(?:[A-Z][A-Z0-9_]*_)?PORT=(\d{1,5})(?=\s|$)/i,
+    /\$env:(?:[A-Z][A-Z0-9_]*_)?PORT\s*=\s*['"]?(\d{1,5})['"]?/i,
   ];
 
   for (const pattern of patterns) {
@@ -835,6 +838,22 @@ function detectPortFromDevScript(devScript) {
   }
 
   return null;
+}
+
+function scriptHasNamedPortParameter(devScript) {
+  return /(?:^|\s)-Port(?:=|\s+)\d{1,5}(?=\s|$)/i.test(String(devScript || ''));
+}
+
+function scriptUsesPowerShell(devScript) {
+  return /(?:^|\s)(?:powershell|powershell\.exe|pwsh|pwsh\.exe)(?:\s|$)/i.test(String(devScript || ''));
+}
+
+function shouldPreferScriptedPort(project) {
+  const devScript = String(project?.devScript || '');
+  return Boolean(
+    detectPortFromDevScript(devScript) &&
+    (scriptUsesPowerShell(devScript) || scriptHasNamedPortParameter(devScript)),
+  );
 }
 
 function projectHasStartCommand(project) {
@@ -1189,6 +1208,121 @@ function readSmallTextFile(filePath) {
   }
 }
 
+function projectNameParts(project) {
+  const names = [
+    project?.name,
+    project?.path ? path.basename(project.path) : '',
+  ];
+  const parts = new Set();
+
+  for (const name of names) {
+    const normalized = safeName(name)
+      .replace(/[.-]+/g, '_')
+      .toLowerCase();
+    if (!normalized || normalized === 'project') {
+      continue;
+    }
+
+    parts.add(normalized);
+    for (const part of normalized.split(/_+/)) {
+      if (part.length >= 3) {
+        parts.add(part);
+      }
+    }
+  }
+
+  return [...parts];
+}
+
+function projectEnvPrefixes(project) {
+  return new Set(projectNameParts(project).map((part) => part.toUpperCase()));
+}
+
+function projectConfigFileCandidates(project) {
+  const projectPath = normalizePath(project.path);
+  const names = projectNameParts(project);
+  const directories = new Set([
+    projectPath,
+    path.join(projectPath, 'src'),
+  ]);
+
+  for (const name of names) {
+    directories.add(path.join(projectPath, name));
+    directories.add(path.join(projectPath, 'src', name));
+  }
+
+  const fileNames = [
+    '.env',
+    '.env.local',
+    'config.py',
+    'settings.py',
+    'main.py',
+    'server.py',
+  ];
+  const files = [];
+
+  for (const directory of directories) {
+    for (const fileName of fileNames) {
+      files.push(path.join(directory, fileName));
+    }
+  }
+
+  return [...new Set(files)];
+}
+
+function scoreProjectPortEnv(project, envName) {
+  const upperName = String(envName || '').toUpperCase();
+  if (!upperName.endsWith('PORT')) {
+    return 0;
+  }
+
+  const prefixes = projectEnvPrefixes(project);
+  const prefix = upperName.replace(/_?PORT$/, '');
+  if (prefixes.has(prefix)) {
+    return 100;
+  }
+  if (upperName === 'PORT') {
+    return 20;
+  }
+  return 5;
+}
+
+function detectPortFromProjectFiles(project) {
+  if (!project?.path) {
+    return null;
+  }
+
+  const matches = [];
+  const patterns = [
+    /(?:_int_env|os\.getenv)\(\s*["']([A-Z][A-Z0-9_]*PORT)["']\s*,\s*["']?(\d{1,5})["']?/g,
+    /\b([A-Z][A-Z0-9_]*PORT)\s*=\s*["']?(\d{1,5})["']?/g,
+  ];
+
+  for (const filePath of projectConfigFileCandidates(project)) {
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+
+    const text = readSmallTextFile(filePath);
+    if (!text) {
+      continue;
+    }
+
+    for (const pattern of patterns) {
+      for (const match of text.matchAll(pattern)) {
+        const portNumber = normalizePort(match[2]);
+        const score = scoreProjectPortEnv(project, match[1]);
+        if (portNumber && score > 0) {
+          matches.push({ port: portNumber, score });
+        }
+      }
+    }
+  }
+
+  return matches
+    .sort((left, right) => right.score - left.score)[0]?.port || null;
+}
+
 function discoverSourceDeclaredPages(project, pagesByPath) {
   const sourceRoots = uniqueExistingDirs(['src', 'app', 'pages', 'routes'].map((sourceRoot) => path.join(project.path, sourceRoot)));
   const roots = sourceRoots.length ? sourceRoots : getServedRootCandidates(project);
@@ -1391,7 +1525,7 @@ function projectFromDirectory(projectPath) {
     path: projectPath,
     framework,
     devScript,
-    port: hasWebTarget ? detectPortFromDevScript(devScript) || undefined : null,
+    port: hasWebTarget ? detectPortFromDevScript(devScript) || detectPortFromProjectFiles({ name, path: projectPath }) || undefined : null,
     canStart: hasWebTarget,
     hasWebTarget,
     sourceType: packageJson
@@ -1666,8 +1800,11 @@ function normalizeProjects(projects, basePort) {
       const devScript = typeof project.devScript === 'string' ? project.devScript.trim() : '';
       const rawHasWebTarget = objectValue(project, 'hasWebTarget');
       const hasWebTarget = Boolean(devScript) || rawHasWebTarget === true;
+      const scriptedPort = detectPortFromDevScript(devScript);
       let projectPort = hasWebTarget
-        ? normalizePort(project.port) || detectPortFromDevScript(devScript) || 0
+        ? shouldPreferScriptedPort({ ...project, devScript })
+          ? scriptedPort || normalizePort(project.port) || 0
+          : normalizePort(project.port) || scriptedPort || 0
         : null;
       if (hasWebTarget && !projectPort) {
         projectPort = assignPort();
@@ -1698,12 +1835,16 @@ function mergeDiscoveredWithExisting(discovered, existingProjects, basePort) {
       : '';
     const devScript = existingDevScript || project.devScript;
     const hasWebTarget = Boolean(devScript) || Boolean(project.hasWebTarget);
+    const scriptedPort = detectPortFromDevScript(devScript);
+    const preferredPort = shouldPreferScriptedPort({ ...project, ...existing, devScript })
+      ? scriptedPort || normalizePort(existing?.port) || project.port
+      : normalizePort(existing?.port) || project.port;
     return {
       ...project,
       name: existing?.name || project.name,
       framework: existing?.framework || project.framework,
       devScript,
-      port: normalizePort(existing?.port) || project.port,
+      port: preferredPort,
       hasWebTarget,
       sourceType: existing?.sourceType || project.sourceType,
       branches: mergeProjectBranches([
@@ -1879,11 +2020,106 @@ function detectPortFromLogText(text) {
     portNumber = normalizePort(match[1]) || portNumber;
   }
 
+  const fallbackPatterns = [
+    /https?:\/\/(?:\[[^\]]+\]|[^:\s/]+):(\d{1,5})(?:[/?#\s]|$)/gi,
+    /address\s*\(\s*['"][^'"]+['"]\s*,\s*(\d{1,5})\s*\)/gi,
+  ];
+
+  for (const pattern of fallbackPatterns) {
+    while ((match = pattern.exec(text)) !== null) {
+      portNumber = normalizePort(match[1]) || portNumber;
+    }
+  }
+
   return portNumber;
 }
 
 function detectPortFromProjectLogs(entry) {
   return detectPortFromLogText(readRecentFile(entry?.stdout)) || detectPortFromLogText(readRecentFile(entry?.stderr));
+}
+
+function addProjectPortCandidate(candidates, seenPorts, portValue, source) {
+  const portNumber = normalizePort(portValue);
+  if (!portNumber || seenPorts.has(portNumber)) {
+    return;
+  }
+
+  seenPorts.add(portNumber);
+  candidates.push({ port: portNumber, source });
+}
+
+function projectActiveServerPortCandidates(project, entry = null) {
+  const candidates = [];
+  const seenPorts = new Set();
+
+  addProjectPortCandidate(candidates, seenPorts, detectPortFromDevScript(project.devScript), 'script');
+  addProjectPortCandidate(candidates, seenPorts, detectPortFromProjectFiles(project), 'project-file');
+  addProjectPortCandidate(candidates, seenPorts, project.port, 'config');
+  addProjectPortCandidate(candidates, seenPorts, entry?.port, 'state');
+  addProjectPortCandidate(
+    candidates,
+    seenPorts,
+    detectPortFromProjectLogs(entry || historicalLogEntryForProject(project)),
+    entry ? 'state-log' : 'historical-log',
+  );
+
+  return candidates;
+}
+
+function otherManagedProjectPorts(projectPath) {
+  const ports = new Set();
+  for (const entry of getState().projects) {
+    if (!entry?.pid || isSamePath(entry.path, projectPath) || !processIsRunning(entry.pid)) {
+      continue;
+    }
+
+    const entryPort = normalizePort(entry.port);
+    if (entryPort) {
+      ports.add(entryPort);
+    }
+
+    const logPort = detectPortFromProjectLogs(entry);
+    if (logPort) {
+      ports.add(logPort);
+    }
+  }
+
+  return ports;
+}
+
+async function findActiveProjectServer(project, { entry = null, excludeManaged = false } = {}) {
+  const managedPort = entry?.pid && processIsRunning(entry.pid) ? normalizePort(entry.port) : null;
+  const managedLogPort = excludeManaged && entry ? detectPortFromProjectLogs(entry) : null;
+  const otherManagedPorts = otherManagedProjectPorts(project.path);
+
+  for (const candidate of projectActiveServerPortCandidates(project, entry)) {
+    if (Number(candidate.port) === Number(port)) {
+      continue;
+    }
+
+    if (otherManagedPorts.has(candidate.port)) {
+      continue;
+    }
+
+    if (
+      excludeManaged &&
+      (
+        candidate.source === 'state' ||
+        candidate.source === 'state-log' ||
+        (managedPort && Number(candidate.port) === Number(managedPort)) ||
+        (managedLogPort && Number(candidate.port) === Number(managedLogPort))
+      )
+    ) {
+      continue;
+    }
+
+    const probe = await probeLocalPort(candidate.port);
+    if (probe.ok) {
+      return { port: candidate.port, source: candidate.source, probe };
+    }
+  }
+
+  return null;
 }
 
 function syncProjectPort(projectPath, projectPort) {
@@ -1911,8 +2147,14 @@ function resolveProjectPort(project, entry, running) {
   }
 
   const logPort = running ? detectPortFromProjectLogs(entry) : null;
+  const filePort = detectPortFromProjectFiles(project);
   const scriptedPort = detectPortFromDevScript(project.devScript);
-  const portNumber = logPort || normalizePort(project.port) || scriptedPort;
+  const configuredPort = normalizePort(project.port);
+  const portNumber = logPort ||
+    (shouldPreferScriptedPort(project) ? scriptedPort : null) ||
+    filePort ||
+    configuredPort ||
+    scriptedPort;
 
   if (!portNumber) {
     return project;
@@ -1954,15 +2196,35 @@ async function resolveWebTargetProject(project, state) {
       };
 
   if (!probe.ok) {
+    const activeServer = await findActiveProjectServer(resolvedProject, { entry });
+    if (activeServer) {
+      if (Number(activeServer.port) !== Number(resolvedProject.port)) {
+        syncProjectPort(resolvedProject.path, activeServer.port);
+      }
+      resolvedProject = {
+        ...resolvedProject,
+        port: activeServer.port,
+      };
+      probe = activeServer.probe;
+    }
+  }
+
+  if (!probe.ok) {
     const logPort = detectPortFromProjectLogs(entry || historicalLogEntryForProject(resolvedProject));
     if (logPort && Number(logPort) !== Number(resolvedProject.port)) {
       const logProbe = await probeLocalPort(logPort);
+      syncProjectPort(resolvedProject.path, logPort);
       if (logProbe.ok) {
         resolvedProject = {
           ...resolvedProject,
           port: logPort,
         };
         probe = logProbe;
+      } else {
+        resolvedProject = {
+          ...resolvedProject,
+          port: logPort,
+        };
       }
     }
   }
@@ -1998,7 +2260,7 @@ function targetUrlsForProject(project, lanIp, tailscaleIp) {
   return {
     localUrl: buildUrl('127.0.0.1', project.port),
     lanUrl: buildUrl(lanIp, project.port),
-    tailscaleUrl: buildUrl(tailscaleIp, project.port),
+    tailscaleUrl: buildProjectTailscaleUrl(project.port, tailscaleIp),
   };
 }
 
@@ -2164,8 +2426,15 @@ async function allocateAvailablePorts(projects, basePort) {
       stateEntry &&
       Number(stateEntry.port) === Number(project.port) &&
       processIsRunning(stateEntry.pid);
+    const portIsManagedElsewhere = otherManagedProjectPorts(project.path).has(project.port);
 
-    if (!reservedPorts.has(project.port) && (stateOwnsPort || (await canBindPort(project.port)))) {
+    const canUsePort = !portIsManagedElsewhere && (
+      stateOwnsPort ||
+      (await canBindPort(project.port)) ||
+      (await probeLocalPort(project.port)).ok
+    );
+
+    if (!reservedPorts.has(project.port) && canUsePort) {
       reservedPorts.add(project.port);
       continue;
     }
@@ -2212,7 +2481,12 @@ async function ensureProjectPort(project) {
     Number(stateEntry.port) === Number(portNumber) &&
     processIsRunning(stateEntry.pid);
 
-  if (stateOwnsPort || (await canBindPort(portNumber))) {
+  if (!stateOwnsPort && otherManagedProjectPorts(project.path).has(portNumber)) {
+    return reassignProjectPort(project, portNumber + 1);
+  }
+
+  const probe = stateOwnsPort ? null : await probeLocalPort(portNumber);
+  if (stateOwnsPort || (await canBindPort(portNumber)) || probe?.ok) {
     return project;
   }
 
@@ -2225,6 +2499,22 @@ function getProjectByName(projects, name) {
 
 function getProjectByPath(projects, projectPath) {
   return projects.find((project) => normalizePath(project.path) === normalizePath(projectPath));
+}
+
+function getProjectActionTarget(project) {
+  if (projectCanStart(project) || projectHasWebTarget(project)) {
+    return project;
+  }
+
+  return (Array.isArray(project?.branches) ? project.branches : [])
+    .filter((branch) => projectCanStart(branch) || projectHasWebTarget(branch))
+    .sort((left, right) => {
+      const leftText = `${left.relativePath || ''} ${left.name || ''}`.toLowerCase();
+      const rightText = `${right.relativePath || ''} ${right.name || ''}`.toLowerCase();
+      const leftHome = /(^|[-_/])(home|web|app|frontend|site|demo)([-_/]|$)/.test(leftText) ? 0 : 1;
+      const rightHome = /(^|[-_/])(home|web|app|frontend|site|demo)([-_/]|$)/.test(rightText) ? 0 : 1;
+      return (leftHome - rightHome) || String(left.relativePath || left.path).localeCompare(String(right.relativePath || right.path));
+    })[0] || project;
 }
 
 function getStateEntryByPath(state, projectPath) {
@@ -2259,6 +2549,7 @@ function getNpmExecutable() {
 
 function getNpmDevArgs(framework, projectPort, devScript = '') {
   const args = ['run', 'dev'];
+  const scriptedPort = detectPortFromDevScript(devScript);
 
   if (framework === 'next') {
     return [...args, '--', '-H', '0.0.0.0', '-p', String(projectPort)];
@@ -2272,7 +2563,10 @@ function getNpmDevArgs(framework, projectPort, devScript = '') {
     return [...args, '--', '--host', '0.0.0.0', '--port', String(projectPort)];
   }
 
-  const scriptedPort = detectPortFromDevScript(devScript);
+  if (shouldPreferScriptedPort({ framework, devScript, port: projectPort })) {
+    return args;
+  }
+
   if (scriptedPort && Number(scriptedPort) !== Number(projectPort)) {
     return [...args, '--', '--host', '0.0.0.0', '--port', String(projectPort)];
   }
@@ -2280,7 +2574,16 @@ function getNpmDevArgs(framework, projectPort, devScript = '') {
   return args;
 }
 
-function buildChildEnv(projectPort) {
+function projectBuildCacheDir(project) {
+  const hash = crypto.createHash('sha1').update(normalizePath(project?.path || ROOT_DIR)).digest('hex').slice(0, 10);
+  return path.join(MANAGER_DIR, 'cargo-targets', hash);
+}
+
+function buildChildEnv(project) {
+  const projectPort = normalizePort(project?.port ?? project);
+  const cargoTargetDir = projectBuildCacheDir(project);
+  ensureDir(cargoTargetDir);
+
   const env = {
     ...process.env,
     HOST: '0.0.0.0',
@@ -2290,6 +2593,7 @@ function buildChildEnv(projectPort) {
     NEXT_TELEMETRY_DISABLED: '1',
     VITE_HOST: '0.0.0.0',
     npm_config_host: '0.0.0.0',
+    CARGO_TARGET_DIR: cargoTargetDir,
   };
 
   if (process.platform === 'win32' && env.Path && env.PATH) {
@@ -2317,6 +2621,48 @@ function updateProjectEntry(project, patch) {
   return nextEntry;
 }
 
+function mergeProjectModeOptions(options = {}, existing = null) {
+  return {
+    lanMode: Boolean(existing?.lanMode || options.lanMode),
+    lanIp: options.lanIp || existing?.lanIpAtStart || null,
+    tailscaleMode: Boolean(existing?.tailscaleMode || options.tailscaleMode),
+    tailscaleIp: options.tailscaleIp || existing?.tailscaleIpAtStart || null,
+  };
+}
+
+function adoptExternalProjectServer(project, options = {}, probe = null) {
+  const state = getState();
+  const now = new Date().toISOString();
+  const entry = {
+    name: project.name,
+    path: project.path,
+    framework: project.framework,
+    port: project.port,
+    pid: null,
+    startedAt: now,
+    command: `External server already running at ${buildUrl('127.0.0.1', project.port)}`,
+    stdout: '',
+    stderr: '',
+    external: true,
+    adoptedAt: now,
+    lanMode: Boolean(options.lanMode),
+    lanIpAtStart: options.lanIp || null,
+    tailscaleMode: Boolean(options.tailscaleMode),
+    tailscaleIpAtStart: options.tailscaleIp || null,
+    healthFailures: 0,
+    lastHealthAt: probe?.checkedAt || now,
+    lastHealthOk: Boolean(probe?.ok ?? true),
+    lastHealthError: probe?.ok === false ? probe.error || `HTTP ${probe.statusCode || 'unreachable'}` : '',
+    lastRestartAt: null,
+    restartCount: 0,
+  };
+
+  removeStateEntry(state, project.path);
+  setStateEntry(state, entry);
+  saveState(state);
+  return entry;
+}
+
 async function startProject(project, options = {}) {
   if (!projectCanStart(project)) {
     throw createHttpError(`${project.name} does not have a managed web dev command. Open its terminal to run project-specific commands.`, 400);
@@ -2324,7 +2670,17 @@ async function startProject(project, options = {}) {
 
   const state = getState();
   const existing = getStateEntryByPath(state, project.path);
-  if (existing && processIsRunning(existing.pid)) {
+  const existingRunning = Boolean(existing?.pid && processIsRunning(existing.pid));
+  if (existingRunning) {
+    const activeExternal = await findActiveProjectServer(project, { entry: existing, excludeManaged: true });
+    if (activeExternal) {
+      const modeOptions = mergeProjectModeOptions(options, existing);
+      const activeProject = { ...project, port: activeExternal.port };
+      await stopProject(project);
+      syncProjectPort(project.path, activeExternal.port);
+      return adoptExternalProjectServer(activeProject, modeOptions, activeExternal.probe);
+    }
+
     if (options.tailscaleMode || options.lanMode) {
       return updateProjectEntry(project, {
         lanMode: Boolean(existing.lanMode || options.lanMode),
@@ -2335,6 +2691,13 @@ async function startProject(project, options = {}) {
     }
 
     return existing;
+  }
+
+  const activeExternal = await findActiveProjectServer(project, { entry: existing });
+  if (activeExternal) {
+    const activeProject = { ...project, port: activeExternal.port };
+    syncProjectPort(project.path, activeExternal.port);
+    return adoptExternalProjectServer(activeProject, mergeProjectModeOptions(options, existing), activeExternal.probe);
   }
 
   project = await ensureProjectPort(project);
@@ -2353,7 +2716,7 @@ async function startProject(project, options = {}) {
 
   const child = spawn(npm, args, {
     cwd: project.path,
-    env: buildChildEnv(project.port),
+    env: buildChildEnv(project),
     shell: process.platform === 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -2457,6 +2820,14 @@ async function stopProject(project) {
   }
   removeStateEntry(state, project.path);
   saveState(state);
+  return { stopped: true };
+}
+
+async function stopProjectAndBranches(project) {
+  await stopProject(project);
+  for (const branch of Array.isArray(project?.branches) ? project.branches : []) {
+    await stopProject(branch);
+  }
   return { stopped: true };
 }
 
@@ -4170,6 +4541,55 @@ function buildUrl(ipAddress, projectPort) {
   return ipAddress && portNumber ? `http://${ipAddress}:${portNumber}` : '';
 }
 
+function getTailscaleServeRoutes() {
+  if (Date.now() - tailscaleServeCache.checkedAt < TAILSCALE_SERVE_SCAN_TTL_MS) {
+    return tailscaleServeCache.routes;
+  }
+
+  const routes = [];
+  try {
+    const output = execFileSync('tailscale', ['serve', 'status'], {
+      encoding: 'utf8',
+      timeout: 700,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let origin = '';
+
+    for (const line of output.split(/\r?\n/)) {
+      const originMatch = line.match(/^\s*(https?:\/\/\S+)/i);
+      if (originMatch) {
+        origin = originMatch[1].replace(/\/+$/, '');
+        continue;
+      }
+
+      const proxyMatch = line.match(/\bproxy\s+https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})(?:[/?#\s]|$)/i);
+      const proxyPort = normalizePort(proxyMatch?.[1]);
+      if (origin && proxyPort) {
+        routes.push({ port: proxyPort, url: origin });
+      }
+    }
+  } catch (error) {
+    // Tailscale Serve is optional; direct Tailscale IP URLs remain the fallback.
+  }
+
+  tailscaleServeCache = { checkedAt: Date.now(), routes };
+  return routes;
+}
+
+function getTailscaleServeUrlForPort(projectPort) {
+  const portNumber = normalizePort(projectPort);
+  if (!portNumber) {
+    return '';
+  }
+
+  return getTailscaleServeRoutes().find((route) => route.port === portNumber)?.url || '';
+}
+
+function buildProjectTailscaleUrl(projectPort, tailscaleIp) {
+  return getTailscaleServeUrlForPort(projectPort) || buildUrl(tailscaleIp, projectPort);
+}
+
 function quotePowerShellArgument(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
@@ -4393,7 +4813,8 @@ async function getStatusPayload(request = null) {
   });
 
   const rows = await Promise.all(
-    resolvedProjects.map(async (project) => {
+    resolvedProjects.map(async (initialProject) => {
+      let project = initialProject;
       let entry = getStateEntryByPath(state, project.path);
       let running = Boolean(entry?.pid && processIsRunning(entry.pid));
       const webTarget = projectHasWebTarget(project);
@@ -4401,7 +4822,7 @@ async function getStatusPayload(request = null) {
         ? []
         : await resolveChildWebTargets(project, state, { lanIp, tailscaleIp });
       const homeChildWebTarget = childWebTargets[0] || null;
-      const probe = webTarget
+      let probe = webTarget
         ? await probeLocalPort(project.port)
         : homeChildWebTarget?.probe || {
             ok: false,
@@ -4409,6 +4830,23 @@ async function getStatusPayload(request = null) {
             latencyMs: 0,
             checkedAt: new Date().toISOString(),
           };
+
+      if (webTarget && !probe.ok) {
+        const activeServer = await findActiveProjectServer(project, { entry });
+        if (activeServer) {
+          if (Number(activeServer.port) !== Number(project.port)) {
+            syncProjectPort(project.path, activeServer.port);
+          }
+          project = {
+            ...project,
+            port: activeServer.port,
+          };
+          entry = getStateEntryByPath(getState(), project.path);
+          running = Boolean(entry?.pid && processIsRunning(entry.pid));
+          probe = activeServer.probe;
+        }
+      }
+
       const healthResult = webTarget
         ? await applyHealthPolicy(project, entry, running, probe, config, { lanIp, tailscaleIp })
         : { entry, autoRestarted: false };
@@ -4427,15 +4865,19 @@ async function getStatusPayload(request = null) {
                 ? 'stale'
                 : 'stopped'
         : homeChildWebTarget
-          ? homeChildWebTarget.probe.ok
-            ? 'external'
-            : homeChildWebTarget.entry
-              ? 'stale'
-              : 'stopped'
+          ? homeChildWebTarget.running
+            ? probe.ok
+              ? 'running'
+              : 'unhealthy'
+            : probe.ok
+              ? 'external'
+              : homeChildWebTarget.entry
+                ? 'stale'
+                : 'stopped'
           : 'stopped';
       const localUrl = webTarget ? buildUrl('127.0.0.1', project.port) : homeChildWebTarget?.localUrl || '';
       const lanUrl = webTarget ? buildUrl(lanIp, project.port) : homeChildWebTarget?.lanUrl || '';
-      const tailscaleUrl = webTarget ? buildUrl(tailscaleIp, project.port) : homeChildWebTarget?.tailscaleUrl || '';
+      const tailscaleUrl = webTarget ? buildProjectTailscaleUrl(project.port, tailscaleIp) : homeChildWebTarget?.tailscaleUrl || '';
       const mobileInstall = getMobileInstallSummary(project);
       const pages = homeChildWebTarget && !webTarget
         ? derivedPagesFromChildTargets(childWebTargets, homeChildWebTarget)
@@ -4445,27 +4887,31 @@ async function getStatusPayload(request = null) {
             lanUrl: page.pattern ? '' : buildPageUrl(lanUrl, page.path),
             tailscaleUrl: page.pattern ? '' : buildPageUrl(tailscaleUrl, page.path),
           }));
+      const rowEntry = webTarget ? entry : homeChildWebTarget?.entry || entry;
+      const rowRunning = webTarget ? running : Boolean(homeChildWebTarget?.running);
+      const actionProject = webTarget ? project : homeChildWebTarget?.project || getProjectActionTarget(project);
 
       return {
         ...project,
+        canStart: Boolean(projectCanStart(actionProject)),
         port: webTarget ? project.port : project.port || homeChildWebTarget?.project.port || null,
         status,
-        running,
-        pid: running ? entry.pid : entry?.pid || null,
-        startedAt: entry?.startedAt || null,
-        command: entry?.command || '',
-        stdout: entry?.stdout || '',
-        stderr: entry?.stderr || '',
-        lanMode: Boolean(entry?.lanMode && lanIp),
-        lanReady: webTarget ? Boolean(running && lanIp) : Boolean(homeChildWebTarget?.lanUrl && homeChildWebTarget.probe.ok),
-        lanIpAtStart: entry?.lanIpAtStart || null,
-        tailscaleMode: Boolean(entry?.tailscaleMode && tailscaleIp),
-        tailscaleReady: webTarget ? Boolean(running && tailscaleIp) : Boolean(homeChildWebTarget?.tailscaleUrl && homeChildWebTarget.probe.ok),
-        tailscaleIpAtStart: entry?.tailscaleIpAtStart || null,
+        running: rowRunning,
+        pid: rowRunning ? rowEntry?.pid || null : rowEntry?.pid || null,
+        startedAt: rowEntry?.startedAt || null,
+        command: rowEntry?.command || '',
+        stdout: rowEntry?.stdout || '',
+        stderr: rowEntry?.stderr || '',
+        lanMode: Boolean(rowEntry?.lanMode && lanIp),
+        lanReady: webTarget ? Boolean(lanIp && (running || probe.ok)) : Boolean(homeChildWebTarget?.lanUrl && homeChildWebTarget.probe.ok),
+        lanIpAtStart: rowEntry?.lanIpAtStart || null,
+        tailscaleMode: Boolean(rowEntry?.tailscaleMode && tailscaleIp),
+        tailscaleReady: webTarget ? Boolean(tailscaleUrl && (running || probe.ok)) : Boolean(homeChildWebTarget?.tailscaleUrl && homeChildWebTarget.probe.ok),
+        tailscaleIpAtStart: rowEntry?.tailscaleIpAtStart || null,
         localUrl,
         lanUrl,
         tailscaleUrl,
-        firewallSupported: webTarget,
+        firewallSupported: Boolean(webTarget || homeChildWebTarget),
         derivedHome: homeChildWebTarget
           ? {
               name: homeChildWebTarget.project.name,
@@ -4478,12 +4924,12 @@ async function getStatusPayload(request = null) {
         pages,
         hasDetectedPages: pages.length > 0,
         probe,
-        healthFailures: Number(entry?.healthFailures || 0),
-        lastHealthAt: entry?.lastHealthAt || probe.checkedAt,
-        lastHealthOk: entry?.lastHealthOk ?? probe.ok,
-        lastHealthError: entry?.lastHealthError || '',
-        lastRestartAt: entry?.lastRestartAt || null,
-        restartCount: Number(entry?.restartCount || 0),
+        healthFailures: Number(rowEntry?.healthFailures || 0),
+        lastHealthAt: rowEntry?.lastHealthAt || probe.checkedAt,
+        lastHealthOk: rowEntry?.lastHealthOk ?? probe.ok,
+        lastHealthError: rowEntry?.lastHealthError || '',
+        lastRestartAt: rowEntry?.lastRestartAt || null,
+        restartCount: Number(rowEntry?.restartCount || 0),
         autoRestarted: healthResult.autoRestarted,
       };
     }),
@@ -4538,9 +4984,17 @@ async function restoreEnabledProjectsOnStartup() {
       continue;
     }
 
-    const probe = await probeLocalPort(project.port);
-    if (probe.ok) {
-      console.log(`Auto restore skipped ${project.name}; port ${project.port} is already responding.`);
+    const activeServer = await findActiveProjectServer(project, { entry });
+    if (activeServer) {
+      const activeProject = { ...project, port: activeServer.port };
+      syncProjectPort(project.path, activeServer.port);
+      adoptExternalProjectServer(activeProject, {
+        lanMode: Boolean(entry.lanMode && lanIp),
+        lanIp: entry.lanMode ? lanIp : null,
+        tailscaleMode: Boolean(entry.tailscaleMode && tailscaleIp),
+        tailscaleIp: entry.tailscaleMode ? tailscaleIp : null,
+      }, activeServer.probe);
+      console.log(`Auto restore adopted external ${project.name} on port ${activeServer.port}.`);
       continue;
     }
 
@@ -4622,14 +5076,15 @@ async function runProfileAction(profile, projects, action) {
     .filter(Boolean);
 
   for (const project of selectedProjects) {
+    const actionProject = getProjectActionTarget(project);
     if (action === 'stop') {
-      await stopProject(project);
-    } else if (!projectCanStart(project)) {
+      await stopProjectAndBranches(project);
+    } else if (!projectCanStart(actionProject)) {
       continue;
     } else if (action === 'restart') {
-      await restartProject(project);
+      await restartProject(actionProject);
     } else {
-      await startProject(project);
+      await startProject(actionProject);
     }
   }
 
@@ -4699,23 +5154,24 @@ async function handleApi(request, response, url) {
       sendError(response, 404, 'Project not found.');
       return;
     }
-    if (!projectHasWebTarget(project)) {
+    const actionProject = getProjectActionTarget(project);
+    if (!projectHasWebTarget(actionProject)) {
       sendError(response, 400, 'Project does not have a web port configured.');
       return;
     }
 
     const lanIp = getLanIp();
     sendJson(response, 200, {
-      name: project.name,
-      port: project.port,
-      lanUrl: buildUrl(lanIp, project.port),
-      command: getLanFirewallCommand(project),
+      name: actionProject.name,
+      port: actionProject.port,
+      lanUrl: buildUrl(lanIp, actionProject.port),
+      command: getLanFirewallCommand(actionProject),
       requiresAdmin: true,
       scope: {
         remoteAddress: 'LocalSubnet',
         profile: 'Private',
         protocol: 'TCP',
-        localPort: project.port,
+        localPort: actionProject.port,
       },
     });
     return;
@@ -4740,16 +5196,17 @@ async function handleApi(request, response, url) {
       sendError(response, 404, 'Project not found.');
       return;
     }
-    if (!projectHasWebTarget(project)) {
+    const actionProject = getProjectActionTarget(project);
+    if (!projectHasWebTarget(actionProject)) {
       sendError(response, 400, 'Project does not have a web port configured.');
       return;
     }
 
-    openElevatedLanFirewall(project);
+    openElevatedLanFirewall(actionProject);
     sendJson(response, 202, {
       opened: true,
-      name: project.name,
-      port: project.port,
+      name: actionProject.name,
+      port: actionProject.port,
       message: 'Windows should show a UAC prompt for elevated PowerShell.',
     });
     return;
@@ -5075,7 +5532,7 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await startProject(project);
+    await startProject(getProjectActionTarget(project));
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -5093,7 +5550,7 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await startProject(project, { lanMode: true, lanIp });
+    await startProject(getProjectActionTarget(project), { lanMode: true, lanIp });
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -5111,7 +5568,7 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await startProject(project, { tailscaleMode: true, tailscaleIp });
+    await startProject(getProjectActionTarget(project), { tailscaleMode: true, tailscaleIp });
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -5123,7 +5580,7 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await stopProject(project);
+    await stopProjectAndBranches(project);
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -5135,7 +5592,7 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await restartProject(project);
+    await restartProject(getProjectActionTarget(project));
     sendJson(response, 200, await getStatusPayload());
     return;
   }

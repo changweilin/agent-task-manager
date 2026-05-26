@@ -987,12 +987,12 @@ function renderProjectPowerAction(project, context = {}) {
   const action = projectIsManagedRunning(project) ? 'stop' : 'start';
   const label = action === 'stop' ? '停止' : '啟動';
   const noStartCommand = action === 'start' && project.canStart === false;
-  const disabled = DEMO_MODE || context.busy || noStartCommand || (action === 'start' && project.status === 'external');
+  const disabled = DEMO_MODE || context.busy || noStartCommand;
   const disabledAttr = disabled ? 'disabled' : '';
   const title = noStartCommand
     ? '開啟終端後手動執行此專案'
     : project.status === 'external' && action === 'start'
-      ? '此 port 已有外部服務回應'
+      ? '接管已開啟的 server'
       : label;
 
   return `<button class="row-action ${action}" data-action="${action}" data-name="${escapeHtml(project.name)}" ${disabledAttr} type="button" title="${escapeHtml(title)}" aria-label="${label} ${escapeHtml(project.name)}">${icons[action]}</button>`;
