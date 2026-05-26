@@ -675,6 +675,7 @@ const state = {
   suppressNextTableClick: false,
   rootPaths: [],
   rootEditorDirty: false,
+  discoverLoading: false,
   selectedName: null,
   selectedProfileId: '',
   profileEditorDirty: false,
@@ -771,7 +772,6 @@ const elements = {
   themeToggleButton: document.querySelector('#themeToggleButton'),
   refreshButton: document.querySelector('#refreshButton'),
   quotaMonitorButton: document.querySelector('#quotaMonitorButton'),
-  discoverButton: document.querySelector('#discoverButton'),
   rootsInput: document.querySelector('#rootsInput'),
   addRootButton: document.querySelector('#addRootButton'),
   rootList: document.querySelector('#rootList'),
@@ -2130,10 +2130,9 @@ function render() {
   if (document.activeElement !== elements.healthThresholdInput) {
     elements.healthThresholdInput.value = payload.config.health?.failureThreshold || 3;
   }
-  elements.discoverButton.disabled = DEMO_MODE;
-  elements.rootsInput.disabled = DEMO_MODE;
-  elements.addRootButton.disabled = DEMO_MODE;
-  elements.basePortInput.disabled = DEMO_MODE;
+  elements.rootsInput.disabled = DEMO_MODE || state.discoverLoading;
+  elements.addRootButton.disabled = DEMO_MODE || state.discoverLoading;
+  elements.basePortInput.disabled = DEMO_MODE || state.discoverLoading;
   elements.copyManagerLocal.disabled = DEMO_MODE;
   elements.copyManagerLan.disabled = DEMO_MODE;
   elements.copyManagerTail.disabled = DEMO_MODE;
@@ -2330,15 +2329,22 @@ async function openProjectFolder(name) {
   }
 }
 
-async function discover() {
+async function discover({ commitDraft = true } = {}) {
   if (DEMO_MODE) {
     showDemoNotice();
     return;
   }
 
-  elements.discoverButton.disabled = true;
+  if (state.discoverLoading) {
+    return;
+  }
+
+  state.discoverLoading = true;
+  render();
   try {
-    commitRootInput();
+    if (commitDraft) {
+      commitRootInput();
+    }
     const roots = readRootPathsForDiscover();
     const basePort = Number(elements.basePortInput.value || state.payload?.config?.basePort || 5173);
     state.payload = await api('/api/discover', {
@@ -2356,7 +2362,8 @@ async function discover() {
   } catch (error) {
     showToast(error.message);
   } finally {
-    elements.discoverButton.disabled = false;
+    state.discoverLoading = false;
+    render();
   }
 }
 
@@ -6621,11 +6628,12 @@ elements.themeToggleButton.addEventListener('click', () => {
   applyTheme(nextTheme, { persist: true });
   showToast(nextTheme === 'dark' ? '已切換深色主題' : '已切換淺色主題');
 });
-elements.discoverButton.addEventListener('click', discover);
 elements.addRootButton.addEventListener('click', () => {
   if (!commitRootInput()) {
     showToast('請輸入專案位置');
+    return;
   }
+  discover({ commitDraft: false });
 });
 elements.rootsInput.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter') {
@@ -6633,7 +6641,11 @@ elements.rootsInput.addEventListener('keydown', (event) => {
   }
 
   event.preventDefault();
-  commitRootInput();
+  if (!commitRootInput()) {
+    showToast('請輸入專案位置');
+    return;
+  }
+  discover({ commitDraft: false });
 });
 elements.rootList.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-root-index]');
@@ -6642,7 +6654,9 @@ elements.rootList.addEventListener('click', (event) => {
   }
 
   removeRootPath(Number(button.dataset.rootIndex));
+  discover({ commitDraft: false });
 });
+elements.basePortInput.addEventListener('change', () => discover());
 elements.searchInput.addEventListener('input', (event) => {
   state.search = event.target.value;
   render();

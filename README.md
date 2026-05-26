@@ -88,8 +88,8 @@ npm.cmd run dev -- --host 0.0.0.0 --port 8787
 ### 使用 Web UI
 
 1. 啟動 Agent Task Manager (ATM) 管理台。
-2. 在左側「專案來源」輸入要掃描的專案根目錄，或使用既有的 `dev-projects.json` 設定。
-3. 按下「掃描」，Agent Task Manager (ATM) 會找出可執行 `npm run dev` 的專案。
+2. 在左側「專案來源」輸入要掃描的專案根目錄後按 Enter 或「加入」，或使用既有的 `dev-projects.json` 設定。
+3. Agent Task Manager (ATM) 會自動找出可執行 `npm run dev` 的專案；重啟管理台時也會依既有來源自動掃描。
 4. 在專案列表中按啟動按鈕，即可啟動對應專案。
 5. 複製 Local、LAN 或 Tailscale URL，在本機或其他裝置開啟測試。
 6. 需要批次管理時，可將目前篩選出的專案套用成 Profile，再一次啟動、停止或重啟。

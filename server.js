@@ -1618,6 +1618,28 @@ function discoverProjects(roots) {
   return [...projectsByPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
+async function refreshDiscoveredProjects({ roots = null, basePort = null, config = getConfig() } = {}) {
+  const nextRoots = Array.isArray(roots) && roots.length
+    ? roots.map((root) => normalizePath(root))
+    : config.defaultRoots;
+  const nextBasePort = Number(basePort || config.basePort || DEFAULT_BASE_PORT);
+  const discovered = discoverProjects(nextRoots);
+  const projects = await allocateAvailablePorts(
+    mergeDiscoveredWithExisting(discovered, config.projects, nextBasePort),
+    nextBasePort,
+  );
+
+  clearStaleStateForProjects(projects);
+  const nextConfig = {
+    ...config,
+    defaultRoots: nextRoots,
+    basePort: nextBasePort,
+    projects,
+  };
+  saveConfig(nextConfig);
+  return buildConfigForWrite(nextConfig);
+}
+
 function collapseProjectsToRoots(projects, roots) {
   const rootPaths = (Array.isArray(roots) ? roots : [])
     .map((root) => normalizePath(root))
@@ -5416,10 +5438,7 @@ async function handleApi(request, response, url) {
       ? body.roots.map((root) => normalizePath(root))
       : currentConfig.defaultRoots;
     const basePort = Number(body.basePort || currentConfig.basePort || DEFAULT_BASE_PORT);
-    const discovered = discoverProjects(roots);
-    const projects = await allocateAvailablePorts(mergeDiscoveredWithExisting(discovered, currentConfig.projects, basePort), basePort);
-    clearStaleStateForProjects(projects);
-    saveConfig({ defaultRoots: roots, basePort, projects });
+    await refreshDiscoveredProjects({ roots, basePort, config: currentConfig });
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -6314,7 +6333,18 @@ server.listen(port, host, () => {
       console.log(`Tailscale startup detail: ${tailscale.error}`);
     }
   }
-  restoreEnabledProjectsOnStartup().catch((error) => {
-    console.error(`Auto restore failed: ${error.message}`);
-  });
+  (async () => {
+    try {
+      const refreshedConfig = await refreshDiscoveredProjects();
+      console.log(`Project scan complete: ${refreshedConfig.projects.length} project sources loaded.`);
+    } catch (error) {
+      console.error(`Auto scan failed: ${error.message}`);
+    }
+
+    try {
+      await restoreEnabledProjectsOnStartup();
+    } catch (error) {
+      console.error(`Auto restore failed: ${error.message}`);
+    }
+  })();
 });
