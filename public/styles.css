@@ -1269,6 +1269,15 @@ tbody tr.project-pages-row td {
   min-width: 0;
 }
 
+.project-branch-main strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .page-route > span:last-child,
 .page-meta {
   color: var(--muted);

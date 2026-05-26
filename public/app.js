@@ -685,6 +685,7 @@ const state = {
   mobileInstallLogHoldUntil: 0,
   profileBusy: false,
   expandedPageNames: new Set(),
+  expandedBranchNames: new Set(),
   expandedProjectNames: new Set(),
   projectPanelExpansionInitialized: false,
   mobileProjectTopAligned: false,
@@ -934,7 +935,7 @@ const tableColumns = [
         <div class="row-actions">
           ${renderProjectPowerAction(project, context)}
           <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
-          <button class="row-action firewall" data-action="firewall" data-name="${escapeHtml(project.name)}" ${!project.lanUrl || DEMO_MODE ? 'disabled' : ''} type="button" title="LAN 防火牆" aria-label="設定 ${escapeHtml(project.name)} 的 LAN 防火牆">${icons.firewall}</button>
+          <button class="row-action firewall" data-action="firewall" data-name="${escapeHtml(project.name)}" ${!project.lanUrl || DEMO_MODE || project.firewallSupported === false ? 'disabled' : ''} type="button" title="LAN 防火牆" aria-label="設定 ${escapeHtml(project.name)} 的 LAN 防火牆">${icons.firewall}</button>
           ${renderMobileInstallAction(project, context)}
           <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
         </div>
@@ -1087,11 +1088,12 @@ function renderUrlLink(value, label) {
 }
 
 function renderProjectActionUrls(project) {
-  if (project.hasWebTarget === false) {
+  const pages = getProjectPages(project);
+  const hasAnyUrl = PAGE_LINK_TARGETS.some((target) => project[target.urlKey]);
+  if (project.hasWebTarget === false && !hasAnyUrl && pages.length === 0) {
     return '';
   }
 
-  const pages = getProjectPages(project);
   const hasPages = pages.length > 0;
   const selectedTarget = getProjectPageTarget(project);
 
@@ -1212,6 +1214,10 @@ function getProjectPages(project) {
   return Array.isArray(project?.pages) ? project.pages : [];
 }
 
+function getProjectBranches(project) {
+  return Array.isArray(project?.branches) ? project.branches : [];
+}
+
 function getPageTargetDefinition(targetId) {
   return PAGE_LINK_TARGETS.find((target) => target.id === targetId) || PAGE_LINK_TARGETS[0];
 }
@@ -1246,10 +1252,14 @@ function getProjectHomeLink(project) {
 
 function renderProjectName(project, context = {}) {
   const pages = getProjectPages(project);
+  const branches = getProjectBranches(project);
   const pageCount = pages.length;
+  const branchCount = branches.length;
   const expanded = Boolean(context.pagesExpanded && pageCount > 0);
+  const branchesExpanded = Boolean(context.branchesExpanded && branchCount > 0);
   const projectExpanded = context.projectPanelExpanded !== false;
   const pageLabel = pageCount === 1 ? '1 page' : `${pageCount} pages`;
+  const branchLabel = branchCount === 1 ? '1 分支' : `${branchCount} 分支`;
   const homeLink = getProjectHomeLink(project);
   const pageCountControl = pageCount > 0
     ? `
@@ -1264,6 +1274,19 @@ function renderProjectName(project, context = {}) {
       >${escapeHtml(pageLabel)}</button>
     `
     : `<span class="page-count is-empty">${escapeHtml(pageLabel)}</span>`;
+  const branchCountControl = branchCount > 0
+    ? `
+      <button
+        class="page-count page-count-button ${branchesExpanded ? 'is-expanded' : ''}"
+        data-branch-toggle
+        data-name="${escapeHtml(project.name)}"
+        type="button"
+        title="${branchesExpanded ? '收合分支' : '展開分支'}"
+        aria-label="${branchesExpanded ? '收合' : '展開'} ${escapeHtml(project.name)} 分支"
+        aria-expanded="${branchesExpanded ? 'true' : 'false'}"
+      >${escapeHtml(branchLabel)}</button>
+    `
+    : '';
   const homeControl = homeLink.url
     ? `<a class="project-home-link" href="${escapeHtml(homeLink.url)}" target="_blank" rel="noreferrer" title="${escapeHtml(homeLink.url)}">Home</a>`
     : '<span class="project-home-link is-disabled">Home</span>';
@@ -1285,11 +1308,53 @@ function renderProjectName(project, context = {}) {
         </div>
         <button class="project-path-button" data-open-folder data-name="${escapeHtml(project.name)}" type="button" title="開啟資料夾：${escapeHtml(project.path)}" ${DEMO_MODE ? 'disabled' : ''}>${escapeHtml(compactPath(project.path))}</button>
         <div class="project-name-links">
+          ${branchCountControl}
           ${pageCountControl}
           ${homeControl}
         </div>
       </div>
     </div>
+  `;
+}
+
+function renderProjectBranches(project, columnCount, expanded, selectedClass) {
+  if (!expanded) {
+    return '';
+  }
+
+  const branches = getProjectBranches(project);
+  if (!branches.length) {
+    return '';
+  }
+
+  const branchItems = branches
+    .map((branch) => {
+      const relativePath = branch.relativePath || compactPath(branch.path);
+      const command = projectCommandLabel(branch);
+      const title = [branch.path, command].filter(Boolean).join('\n');
+
+      return `
+        <div class="page-branch-item project-branch-item">
+          <span class="page-branch-marker" aria-hidden="true"></span>
+          <div class="page-route project-branch-main">
+            <strong title="${escapeHtml(title)}">${escapeHtml(branch.name)}</strong>
+            <span>${escapeHtml(relativePath)}</span>
+          </div>
+          <span class="page-link-mode">${escapeHtml(frameworkLabel(branch.framework))}</span>
+          <span class="page-meta" title="${escapeHtml(command)}">${escapeHtml(command)}</span>
+        </div>
+      `;
+    })
+    .join('');
+
+  return `
+    <tr class="project-pages-row project-branches-row ${selectedClass}" data-branches-for="${escapeHtml(project.name)}">
+      <td colspan="${columnCount}">
+        <div class="project-pages-branch project-branches">
+          ${branchItems}
+        </div>
+      </td>
+    </tr>
   `;
 }
 
@@ -1473,7 +1538,10 @@ function filteredProjects() {
     const pageHaystack = getProjectPages(project)
       .map((page) => `${page.path || ''} ${page.title || ''} ${page.file || ''}`)
       .join(' ');
-    const haystack = `${project.name} ${project.framework} ${project.sourceType || ''} ${project.path} ${project.port || ''} ${pageHaystack}`.toLowerCase();
+    const branchHaystack = getProjectBranches(project)
+      .map((branch) => `${branch.name || ''} ${branch.framework || ''} ${branch.sourceType || ''} ${branch.relativePath || ''} ${branch.path || ''} ${branch.port || ''} ${branch.devScript || ''}`)
+      .join(' ');
+    const haystack = `${project.name} ${project.framework} ${project.sourceType || ''} ${project.path} ${project.port || ''} ${pageHaystack} ${branchHaystack}`.toLowerCase();
     return matchesFilter && haystack.includes(state.search.toLowerCase());
   });
 }
@@ -1981,6 +2049,16 @@ function syncProjectPanelState(projects) {
       state.expandedProjectNames.delete(projectName);
     }
   });
+  state.expandedBranchNames.forEach((projectName) => {
+    if (!projectNames.has(projectName)) {
+      state.expandedBranchNames.delete(projectName);
+    }
+  });
+  state.expandedPageNames.forEach((projectName) => {
+    if (!projectNames.has(projectName)) {
+      state.expandedPageNames.delete(projectName);
+    }
+  });
 
   if (!isMobileLayout() || state.projectPanelExpansionInitialized) {
     return;
@@ -2145,6 +2223,7 @@ function renderRows(projects) {
       const isSelected = project.name === state.selectedName;
       const projectPanelExpanded = !mobileLayout || state.expandedProjectNames.has(project.name);
       const panelClass = projectPanelExpanded ? 'is-panel-expanded' : 'is-panel-collapsed';
+      const branchesExpanded = projectPanelExpanded && state.expandedBranchNames.has(project.name) && getProjectBranches(project).length > 0;
       const pagesExpanded = projectPanelExpanded && state.expandedPageNames.has(project.name) && getProjectPages(project).length > 0;
       const cells = columns
         .map((column) => {
@@ -2152,12 +2231,13 @@ function renderRows(projects) {
           const className = [column.className || '', frozen ? 'is-frozen-column' : '']
             .filter(Boolean)
             .join(' ');
-          return `<td class="${escapeHtml(className)}" data-column="${escapeHtml(column.id)}">${column.render(project, { busy, pagesExpanded, projectPanelExpanded })}</td>`;
+          return `<td class="${escapeHtml(className)}" data-column="${escapeHtml(column.id)}">${column.render(project, { busy, branchesExpanded, pagesExpanded, projectPanelExpanded })}</td>`;
         })
         .join('');
       const selectedClass = isSelected ? 'is-selected' : '';
       return `
         <tr class="project-data-row ${selectedClass} ${panelClass}" data-name="${escapeHtml(project.name)}">${cells}</tr>
+        ${renderProjectBranches(project, columns.length, branchesExpanded, selectedClass)}
         ${renderProjectPages(project, columns.length, pagesExpanded, selectedClass)}
         <tr class="project-actions-row ${selectedClass} ${panelClass}" data-actions-for="${escapeHtml(project.name)}">
           <td colspan="${columns.length}">
@@ -6686,6 +6766,22 @@ elements.projectRows.addEventListener('click', (event) => {
       state.expandedPageNames.delete(projectName);
     } else {
       state.expandedPageNames.add(projectName);
+      if (isMobileLayout()) {
+        state.expandedProjectNames.add(projectName);
+      }
+    }
+    render();
+    return;
+  }
+
+  const branchToggleButton = event.target.closest('button[data-branch-toggle]');
+  if (branchToggleButton) {
+    event.stopPropagation();
+    const projectName = branchToggleButton.dataset.name;
+    if (state.expandedBranchNames.has(projectName)) {
+      state.expandedBranchNames.delete(projectName);
+    } else {
+      state.expandedBranchNames.add(projectName);
       if (isMobileLayout()) {
         state.expandedProjectNames.add(projectName);
       }

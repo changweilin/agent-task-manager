@@ -42,6 +42,7 @@ const IGNORED_DIRS = new Set([
   '.uv-cache',
   '.hf-cache',
   '.ultralytics',
+  'target',
   'dist',
   'build',
   'coverage',
@@ -392,13 +393,15 @@ function getConfig() {
   }
 
   const basePort = Number(config.basePort || DEFAULT_BASE_PORT);
+  const defaultRoots = Array.isArray(config.defaultRoots) && config.defaultRoots.length ? config.defaultRoots : [ROOT_DIR];
   const projects = Array.isArray(config.projects) ? config.projects : [];
-  const normalizedProjects = normalizeProjects(projects, basePort);
+  const collapsedProjects = collapseProjectsToRoots(projects, defaultRoots);
+  const normalizedProjects = normalizeProjects(collapsedProjects, basePort);
 
   return {
-    defaultRoots: Array.isArray(config.defaultRoots) && config.defaultRoots.length ? config.defaultRoots : [ROOT_DIR],
+    defaultRoots,
     basePort,
-    projects,
+    projects: collapsedProjects,
     profiles: normalizeProfiles(config.profiles, normalizedProjects),
     autoRestoreOnStartup: config.autoRestoreOnStartup !== false,
     health: normalizeHealthSettings(config.health),
@@ -407,10 +410,11 @@ function getConfig() {
 
 function saveConfig(config) {
   const basePort = Number(config.basePort || DEFAULT_BASE_PORT);
-  const projects = normalizeProjects(config.projects || [], basePort);
+  const defaultRoots = config.defaultRoots || [ROOT_DIR];
+  const projects = normalizeProjects(collapseProjectsToRoots(config.projects || [], defaultRoots), basePort);
 
   writeJson(CONFIG_PATH, {
-    defaultRoots: config.defaultRoots || [ROOT_DIR],
+    defaultRoots,
     basePort,
     autoRestoreOnStartup: config.autoRestoreOnStartup !== false,
     health: normalizeHealthSettings(config.health),
@@ -1385,6 +1389,60 @@ function projectFromDirectory(projectPath) {
   };
 }
 
+function isSamePath(leftPath, rightPath) {
+  return normalizePath(leftPath).toLowerCase() === normalizePath(rightPath).toLowerCase();
+}
+
+function isPathWithin(parentPath, childPath) {
+  const relative = path.relative(normalizePath(parentPath), normalizePath(childPath));
+  return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function branchFromProject(project, rootPath) {
+  const branchPath = normalizePath(project.path);
+  const relativePath = path.relative(normalizePath(rootPath), branchPath).replace(/\\/g, '/');
+  return {
+    ...project,
+    path: branchPath,
+    relativePath: relativePath || path.basename(branchPath),
+  };
+}
+
+function mergeProjectBranches(branches = [], rootPath) {
+  const branchesByPath = new Map();
+
+  for (const branch of branches) {
+    if (!branch?.path) {
+      continue;
+    }
+
+    const branchPath = normalizePath(branch.path);
+    if (shouldIgnore(branchPath) || isSamePath(rootPath, branchPath)) {
+      continue;
+    }
+
+    const normalized = branchFromProject({ ...branch, path: branchPath }, rootPath);
+    const key = normalized.path.toLowerCase();
+    const existing = branchesByPath.get(key);
+    if (!existing) {
+      branchesByPath.set(key, normalized);
+      continue;
+    }
+
+    const merged = { ...existing, ...normalized };
+    if (projectHasStartCommand(existing) && !projectHasStartCommand(normalized)) {
+      merged.framework = existing.framework;
+      merged.devScript = existing.devScript;
+      merged.port = existing.port;
+      merged.canStart = existing.canStart;
+      merged.hasWebTarget = existing.hasWebTarget;
+    }
+    branchesByPath.set(key, merged);
+  }
+
+  return [...branchesByPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
 function discoverProjects(roots) {
   const projectsByPath = new Map();
 
@@ -1394,23 +1452,143 @@ function discoverProjects(roots) {
       continue;
     }
 
-    for (const projectPath of discoverProjectDirs(rootPath)) {
-      const project = projectFromDirectory(projectPath);
-      const key = normalizePath(project.path).toLowerCase();
-      const existing = projectsByPath.get(key);
-      if (!existing || (!projectHasStartCommand(existing) && projectHasStartCommand(project))) {
-        projectsByPath.set(key, project);
-      }
-    }
+    const projectDirs = discoverProjectDirs(rootPath);
+    const rootProject = projectFromDirectory(rootPath);
+    const branches = projectDirs
+      .filter((projectPath) => !isSamePath(projectPath, rootPath))
+      .map((projectPath) => branchFromProject(projectFromDirectory(projectPath), rootPath));
+    const key = rootPath.toLowerCase();
+    const existing = projectsByPath.get(key);
+    const nextProject = {
+      ...rootProject,
+      branches: mergeProjectBranches([...(existing?.branches || []), ...branches], rootPath),
+    };
+    projectsByPath.set(key, existing ? { ...existing, ...nextProject } : nextProject);
   }
 
   return [...projectsByPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function collapseProjectsToRoots(projects, roots) {
+  const rootPaths = (Array.isArray(roots) ? roots : [])
+    .map((root) => normalizePath(root))
+    .filter(Boolean);
+  if (!rootPaths.length) {
+    return projects;
+  }
+
+  const inputProjects = Array.isArray(projects) ? projects.filter(Boolean) : [];
+  const projectsByPath = new Map(inputProjects
+    .filter((project) => project?.path)
+    .map((project) => [normalizePath(project.path).toLowerCase(), project]));
+  const assignedPaths = new Set();
+  const collapsed = [];
+
+  for (const rootPath of rootPaths) {
+    const rootKey = rootPath.toLowerCase();
+    const existingRoot = projectsByPath.get(rootKey);
+    const fallbackRoot = fs.existsSync(rootPath)
+      ? projectFromDirectory(rootPath)
+      : {
+          name: safeName(path.basename(rootPath)),
+          path: rootPath,
+          framework: 'folder',
+          devScript: '',
+          port: null,
+          canStart: false,
+          hasWebTarget: false,
+          sourceType: 'root',
+        };
+    const rootProject = existingRoot || fallbackRoot;
+    const discoveredBranches = inputProjects
+      .filter((project) => project?.path && !shouldIgnore(project.path) && !isSamePath(project.path, rootPath) && isPathWithin(rootPath, project.path))
+      .flatMap((project) => [project, ...(Array.isArray(project.branches) ? project.branches : [])]);
+    const branches = mergeProjectBranches([
+      ...(Array.isArray(rootProject.branches) ? rootProject.branches : []),
+      ...discoveredBranches,
+    ], rootPath);
+
+    assignedPaths.add(rootKey);
+    for (const branch of branches) {
+      assignedPaths.add(normalizePath(branch.path).toLowerCase());
+    }
+
+    collapsed.push({
+      ...rootProject,
+      path: rootPath,
+      branches,
+    });
+  }
+
+  for (const project of inputProjects) {
+    if (!project?.path) {
+      continue;
+    }
+
+    const key = normalizePath(project.path).toLowerCase();
+    if (!assignedPaths.has(key) && !shouldIgnore(project.path)) {
+      collapsed.push(project);
+    }
+  }
+
+  return collapsed.sort((a, b) => String(a.path || '').localeCompare(String(b.path || '')));
+}
+
+function normalizeProjectBranches(branches, rootPath, assignPort = null) {
+  const seenNames = new Map();
+  return mergeProjectBranches(branches, rootPath)
+    .map((branch) => {
+      const branchPath = normalizePath(branch.path);
+      const baseName = safeName(branch.name || path.basename(branchPath));
+      const count = (seenNames.get(baseName) || 0) + 1;
+      seenNames.set(baseName, count);
+      const name = count > 1 ? `${baseName}-${count}` : baseName;
+      const devScript = typeof branch.devScript === 'string' ? branch.devScript.trim() : '';
+      const rawHasWebTarget = objectValue(branch, 'hasWebTarget');
+      const wantsWebTarget = Boolean(devScript) || rawHasWebTarget === true;
+      const preferredPort = wantsWebTarget
+        ? normalizePort(branch.port) || detectPortFromDevScript(devScript) || null
+        : null;
+      const projectPort = wantsWebTarget && assignPort
+        ? assignPort(preferredPort)
+        : preferredPort;
+      const hasWebTarget = wantsWebTarget && Boolean(projectPort);
+
+      return {
+        name,
+        path: branchPath,
+        relativePath: branch.relativePath || path.relative(normalizePath(rootPath), branchPath).replace(/\\/g, '/'),
+        framework: branch.framework || 'folder',
+        devScript,
+        port: projectPort,
+        canStart: Boolean(devScript && hasWebTarget),
+        hasWebTarget,
+        sourceType: branch.sourceType || 'branch',
+      };
+    })
+    .filter((branch) => projectHasWebTarget(branch));
 }
 
 function normalizeProjects(projects, basePort) {
   const seenNames = new Map();
   const usedPorts = new Set();
   let nextPort = Number(basePort || DEFAULT_BASE_PORT);
+  const assignPort = (preferredPort = null) => {
+    const normalizedPreferred = normalizePort(preferredPort);
+    if (normalizedPreferred && !usedPorts.has(normalizedPreferred)) {
+      usedPorts.add(normalizedPreferred);
+      return normalizedPreferred;
+    }
+
+    while (usedPorts.has(nextPort)) {
+      nextPort += 1;
+    }
+
+    const assignedPort = nextPort;
+    usedPorts.add(assignedPort);
+    nextPort += 1;
+    return assignedPort;
+  };
 
   return projects
     .filter(Boolean)
@@ -1429,14 +1607,9 @@ function normalizeProjects(projects, basePort) {
         ? normalizePort(project.port) || detectPortFromDevScript(devScript) || 0
         : null;
       if (hasWebTarget && !projectPort) {
-        while (usedPorts.has(nextPort)) {
-          nextPort += 1;
-        }
-        projectPort = nextPort;
-        nextPort += 1;
-      }
-      if (projectPort) {
-        usedPorts.add(projectPort);
+        projectPort = assignPort();
+      } else if (projectPort) {
+        projectPort = assignPort(projectPort);
       }
 
       return {
@@ -1448,6 +1621,7 @@ function normalizeProjects(projects, basePort) {
         canStart: Boolean(devScript && hasWebTarget && projectPort),
         hasWebTarget: Boolean(hasWebTarget && projectPort),
         sourceType: project.sourceType || 'configured',
+        branches: normalizeProjectBranches(project.branches || [], projectPath, assignPort),
       };
     });
 }
@@ -1469,6 +1643,10 @@ function mergeDiscoveredWithExisting(discovered, existingProjects, basePort) {
       port: normalizePort(existing?.port) || project.port,
       hasWebTarget,
       sourceType: existing?.sourceType || project.sourceType,
+      branches: mergeProjectBranches([
+        ...(Array.isArray(project.branches) ? project.branches : []),
+        ...(Array.isArray(existing?.branches) ? existing.branches : []),
+      ], project.path),
     };
   });
 
@@ -1614,6 +1792,7 @@ function detectPortFromLogText(text) {
     return null;
   }
 
+  text = String(text).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
   const urlPattern = /(?:Local|Network|Tailscale|LAN):\s*https?:\/\/(?:\[[^\]]+\]|[^:\s/]+):(\d{1,5})(?:[/?#\s]|$)/gi;
   let match;
   let portNumber = null;
@@ -1673,6 +1852,163 @@ function resolveProjectPort(project, entry, running) {
     ...project,
     port: portNumber,
   };
+}
+
+function historicalLogEntryForProject(project) {
+  const prefix = logPrefix(project);
+  return {
+    stdout: path.join(LOG_DIR, `${prefix}.out.log`),
+    stderr: path.join(LOG_DIR, `${prefix}.err.log`),
+  };
+}
+
+async function resolveWebTargetProject(project, state) {
+  const entry = getStateEntryByPath(state, project.path);
+  const running = Boolean(entry?.pid && processIsRunning(entry.pid));
+  let resolvedProject = resolveProjectPort(project, entry, running);
+  let probe = projectHasWebTarget(resolvedProject)
+    ? await probeLocalPort(resolvedProject.port)
+    : {
+        ok: false,
+        error: 'no-web-target',
+        latencyMs: 0,
+        checkedAt: new Date().toISOString(),
+      };
+
+  if (!probe.ok) {
+    const logPort = detectPortFromProjectLogs(entry || historicalLogEntryForProject(resolvedProject));
+    if (logPort && Number(logPort) !== Number(resolvedProject.port)) {
+      const logProbe = await probeLocalPort(logPort);
+      if (logProbe.ok) {
+        resolvedProject = {
+          ...resolvedProject,
+          port: logPort,
+        };
+        probe = logProbe;
+      }
+    }
+  }
+
+  return {
+    project: resolvedProject,
+    entry,
+    running,
+    probe,
+  };
+}
+
+function childWebTargetScore(target) {
+  const relativePath = String(target.project.relativePath || '');
+  const text = `${target.project.name || ''} ${relativePath}`.toLowerCase();
+  const depth = relativePath ? relativePath.split('/').filter(Boolean).length : 0;
+  let score = depth * 10;
+
+  if (target.probe.ok) {
+    score -= 1000;
+  }
+  if (target.running) {
+    score -= 100;
+  }
+  if (/(^|[-_/])(home|web|app|frontend|site|demo)([-_/]|$)/.test(text)) {
+    score -= 20;
+  }
+
+  return score;
+}
+
+function targetUrlsForProject(project, lanIp, tailscaleIp) {
+  return {
+    localUrl: buildUrl('127.0.0.1', project.port),
+    lanUrl: buildUrl(lanIp, project.port),
+    tailscaleUrl: buildUrl(tailscaleIp, project.port),
+  };
+}
+
+async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp }) {
+  const branches = Array.isArray(project.branches) ? project.branches : [];
+  const targets = [];
+
+  for (const branch of branches) {
+    if (!projectHasWebTarget(branch)) {
+      continue;
+    }
+
+    const resolved = await resolveWebTargetProject(branch, state);
+    targets.push({
+      ...resolved,
+      ...targetUrlsForProject(resolved.project, lanIp, tailscaleIp),
+    });
+  }
+
+  return targets.sort((left, right) => {
+    const score = childWebTargetScore(left) - childWebTargetScore(right);
+    if (score !== 0) {
+      return score;
+    }
+    return String(left.project.relativePath || left.project.path).localeCompare(String(right.project.relativePath || right.project.path));
+  });
+}
+
+function routePathForChildTarget(target) {
+  return normalizeUrlPath(target.project.relativePath || target.project.name || '/');
+}
+
+function childTargetRootPage(target) {
+  const routePath = routePathForChildTarget(target);
+  return {
+    path: routePath,
+    title: target.project.name || pageTitleFromPath(routePath),
+    source: 'subproject',
+    file: target.project.relativePath || '',
+    pattern: false,
+    localUrl: target.localUrl,
+    lanUrl: target.lanUrl,
+    tailscaleUrl: target.tailscaleUrl,
+  };
+}
+
+function pageFromChildTarget(target, page) {
+  const childPath = routePathForChildTarget(target);
+  const suffix = page.path === '/' ? '' : page.path;
+  const displayPath = normalizeUrlPath(`${childPath.replace(/\/$/, '')}${suffix}`);
+  const file = [target.project.relativePath, page.file].filter(Boolean).join('/');
+  return {
+    ...page,
+    path: displayPath,
+    title: page.title || target.project.name || pageTitleFromPath(displayPath),
+    source: page.source ? `${target.project.name}:${page.source}` : 'subproject',
+    file,
+    localUrl: page.pattern ? '' : buildPageUrl(target.localUrl, page.path),
+    lanUrl: page.pattern ? '' : buildPageUrl(target.lanUrl, page.path),
+    tailscaleUrl: page.pattern ? '' : buildPageUrl(target.tailscaleUrl, page.path),
+  };
+}
+
+function derivedPagesFromChildTargets(targets, homeTarget) {
+  const pagesByPath = new Map();
+
+  const addPage = (page) => {
+    const key = String(page.path || '').toLowerCase();
+    if (!key || pagesByPath.has(key) || pagesByPath.size >= PAGE_SCAN_MAX_PAGES) {
+      return;
+    }
+    pagesByPath.set(key, page);
+  };
+
+  for (const target of targets) {
+    if (target !== homeTarget) {
+      addPage(childTargetRootPage(target));
+    }
+
+    for (const page of discoverProjectPages(target.project)) {
+      if (target === homeTarget && page.path === '/') {
+        continue;
+      }
+      addPage(pageFromChildTarget(target, page));
+    }
+  }
+
+  return [...pagesByPath.values()].slice(0, PAGE_SCAN_MAX_PAGES);
 }
 
 async function allocateAvailablePorts(projects, basePort) {
@@ -3926,9 +4262,13 @@ async function getStatusPayload(request = null) {
       let entry = getStateEntryByPath(state, project.path);
       let running = Boolean(entry?.pid && processIsRunning(entry.pid));
       const webTarget = projectHasWebTarget(project);
+      const childWebTargets = webTarget
+        ? []
+        : await resolveChildWebTargets(project, state, { lanIp, tailscaleIp });
+      const homeChildWebTarget = childWebTargets[0] || null;
       const probe = webTarget
         ? await probeLocalPort(project.port)
-        : {
+        : homeChildWebTarget?.probe || {
             ok: false,
             error: 'no-web-target',
             latencyMs: 0,
@@ -3951,20 +4291,29 @@ async function getStatusPayload(request = null) {
               : entry
                 ? 'stale'
                 : 'stopped'
-        : 'stopped';
-      const localUrl = webTarget ? buildUrl('127.0.0.1', project.port) : '';
-      const lanUrl = webTarget ? buildUrl(lanIp, project.port) : '';
-      const tailscaleUrl = webTarget ? buildUrl(tailscaleIp, project.port) : '';
+        : homeChildWebTarget
+          ? homeChildWebTarget.probe.ok
+            ? 'external'
+            : homeChildWebTarget.entry
+              ? 'stale'
+              : 'stopped'
+          : 'stopped';
+      const localUrl = webTarget ? buildUrl('127.0.0.1', project.port) : homeChildWebTarget?.localUrl || '';
+      const lanUrl = webTarget ? buildUrl(lanIp, project.port) : homeChildWebTarget?.lanUrl || '';
+      const tailscaleUrl = webTarget ? buildUrl(tailscaleIp, project.port) : homeChildWebTarget?.tailscaleUrl || '';
       const mobileInstall = getMobileInstallSummary(project);
-      const pages = discoverProjectPages(project).map((page) => ({
-        ...page,
-        localUrl: page.pattern ? '' : buildPageUrl(localUrl, page.path),
-        lanUrl: page.pattern ? '' : buildPageUrl(lanUrl, page.path),
-        tailscaleUrl: page.pattern ? '' : buildPageUrl(tailscaleUrl, page.path),
-      }));
+      const pages = homeChildWebTarget && !webTarget
+        ? derivedPagesFromChildTargets(childWebTargets, homeChildWebTarget)
+        : discoverProjectPages(project).map((page) => ({
+            ...page,
+            localUrl: page.pattern ? '' : buildPageUrl(localUrl, page.path),
+            lanUrl: page.pattern ? '' : buildPageUrl(lanUrl, page.path),
+            tailscaleUrl: page.pattern ? '' : buildPageUrl(tailscaleUrl, page.path),
+          }));
 
       return {
         ...project,
+        port: webTarget ? project.port : project.port || homeChildWebTarget?.project.port || null,
         status,
         running,
         pid: running ? entry.pid : entry?.pid || null,
@@ -3973,14 +4322,23 @@ async function getStatusPayload(request = null) {
         stdout: entry?.stdout || '',
         stderr: entry?.stderr || '',
         lanMode: Boolean(entry?.lanMode && lanIp),
-        lanReady: Boolean(running && lanIp),
+        lanReady: webTarget ? Boolean(running && lanIp) : Boolean(homeChildWebTarget?.lanUrl && homeChildWebTarget.probe.ok),
         lanIpAtStart: entry?.lanIpAtStart || null,
         tailscaleMode: Boolean(entry?.tailscaleMode && tailscaleIp),
-        tailscaleReady: Boolean(running && tailscaleIp),
+        tailscaleReady: webTarget ? Boolean(running && tailscaleIp) : Boolean(homeChildWebTarget?.tailscaleUrl && homeChildWebTarget.probe.ok),
         tailscaleIpAtStart: entry?.tailscaleIpAtStart || null,
         localUrl,
         lanUrl,
         tailscaleUrl,
+        firewallSupported: webTarget,
+        derivedHome: homeChildWebTarget
+          ? {
+              name: homeChildWebTarget.project.name,
+              path: homeChildWebTarget.project.path,
+              relativePath: homeChildWebTarget.project.relativePath || '',
+              port: homeChildWebTarget.project.port,
+            }
+          : null,
         mobileInstall,
         pages,
         hasDetectedPages: pages.length > 0,
