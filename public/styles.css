@@ -1214,6 +1214,47 @@ tbody tr.project-actions-row td {
   white-space: nowrap;
 }
 
+.port-input {
+  width: 100%;
+  max-width: 88px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 7px;
+  color: var(--text);
+  background: var(--surface-muted);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+  -moz-appearance: textfield;
+}
+
+.port-input::-webkit-outer-spin-button,
+.port-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.port-input:hover:not(:disabled) {
+  border-color: var(--border);
+}
+
+.port-input:focus {
+  outline: none;
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--teal-border);
+  box-shadow: 0 0 0 2px var(--row-hover-bg);
+}
+
+.port-input:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.project-quick-actions {
+  display: none;
+}
+
 .project-path-text {
   display: block;
   max-width: 100%;
@@ -3747,6 +3788,18 @@ button:disabled {
 
   .project-name strong {
     font-size: 15px;
+  }
+
+  tbody tr.project-data-row.is-panel-collapsed .project-quick-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .project-quick-actions .row-action {
+    width: 100%;
+    height: 34px;
   }
 
   .project-panel-toggle {

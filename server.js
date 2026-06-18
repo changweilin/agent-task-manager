@@ -26,6 +26,7 @@ const STATE_PATH = path.join(MANAGER_DIR, 'state.json');
 const TERMINAL_PREFERENCES_PATH = path.join(MANAGER_DIR, 'terminal-preferences.json');
 const DEFAULT_BASE_PORT = 5173;
 const DEFAULT_MANAGER_PORT = 8787;
+const LOG_START_MARKER = '[Agent Task Manager (ATM)]';
 const DEFAULT_HEALTH_FAILURE_THRESHOLD = 3;
 const PAGE_SCAN_TTL_MS = 30000;
 const TAILSCALE_SERVE_SCAN_TTL_MS = 30000;
@@ -843,6 +844,26 @@ function detectPortFromDevScript(devScript) {
   }
 
   return null;
+}
+
+function replaceDevScriptPort(devScript, newPort) {
+  const port = normalizePort(newPort);
+  if (!devScript || typeof devScript !== 'string' || !port) {
+    return devScript;
+  }
+
+  const portTokenPatterns = [
+    /((?:^|\s)--port(?:=|\s+))(\d{1,5})(?=\s|$)/i,
+    /((?:^|\s)-Port(?:=|\s+))(\d{1,5})(?=\s|$)/i,
+    /((?:^|\s)-p(?:=|\s+))(\d{1,5})(?=\s|$)/i,
+    /((?:^|\s)(?:[A-Z][A-Z0-9_]*_)?PORT=)(\d{1,5})(?=\s|$)/i,
+    /(\$env:(?:[A-Z][A-Z0-9_]*_)?PORT\s*=\s*['"]?)(\d{1,5})/i,
+  ];
+
+  return portTokenPatterns.reduce(
+    (result, pattern) => result.replace(pattern, (match, prefix) => `${prefix}${port}`),
+    devScript,
+  );
 }
 
 function scriptHasNamedPortParameter(devScript) {
@@ -1986,6 +2007,52 @@ function saveProjectPort(projectPath, projectPort) {
   saveConfig({ ...config, projects });
 }
 
+function applyPortToProjectTree(project, targetPath, port) {
+  if (!project) {
+    return project;
+  }
+
+  if (isSamePath(project.path, targetPath)) {
+    return {
+      ...project,
+      port,
+      devScript: replaceDevScriptPort(project.devScript, port),
+    };
+  }
+
+  if (Array.isArray(project.branches) && project.branches.length) {
+    return {
+      ...project,
+      branches: project.branches.map((branch) => applyPortToProjectTree(branch, targetPath, port)),
+    };
+  }
+
+  return project;
+}
+
+function setProjectPort(projectPath, requestedPort) {
+  const port = normalizePort(requestedPort);
+  if (!port) {
+    throw createHttpError('Enter a port between 1 and 65535.', 400);
+  }
+
+  const config = getConfig();
+  const overridePath = normalizePath(projectPath);
+  const rewrittenProjects = config.projects.map((project) => applyPortToProjectTree(project, overridePath, port));
+  const projects = applyProjectPortOverride(rewrittenProjects, overridePath, port, config.basePort);
+
+  saveConfig({ ...config, projects });
+
+  // Keep the recorded port aligned for stopped projects so URLs/health use the new value.
+  // Running projects keep serving on their current port until the next restart.
+  const state = getState();
+  const entry = getStateEntryByPath(state, overridePath);
+  if (entry && !processIsRunning(entry.pid) && Number(entry.port) !== port) {
+    setStateEntry(state, { ...entry, port });
+    saveState(state);
+  }
+}
+
 async function reassignProjectPort(project, startPort = null) {
   const config = getConfig();
   const currentPort = normalizePort(project.port);
@@ -2039,23 +2106,59 @@ function detectPortFromLogText(text) {
   }
 
   text = String(text).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-  const urlPattern = /(?:Local|Network|Tailscale|LAN):\s*https?:\/\/(?:\[[^\]]+\]|[^:\s/]+):(\d{1,5})(?:[/?#\s]|$)/gi;
-  let match;
-  let portNumber = null;
 
-  while ((match = urlPattern.exec(text)) !== null) {
-    portNumber = normalizePort(match[1]) || portNumber;
+  const isLocalHost = (host) => {
+    const value = String(host || '').toLowerCase();
+    return value === 'localhost' || value === '127.0.0.1' || value === '[::1]' || value === '::1';
+  };
+  const candidates = [];
+  const pushCandidate = (scheme, host, rawPort, labeled) => {
+    const portNumber = normalizePort(rawPort);
+    if (portNumber) {
+      candidates.push({ port: portNumber, scheme: String(scheme || '').toLowerCase(), host, labeled });
+    }
+  };
+
+  let match;
+  // Explicitly labelled URLs (vite/next style "Local:"/"Network:") rank highest.
+  const labeledPattern = /(?:Local|Network|Tailscale|LAN):\s*(https?):\/\/(\[[^\]]+\]|[^:\s/]+):(\d{1,5})(?:[/?#\s]|$)/gi;
+  while ((match = labeledPattern.exec(text)) !== null) {
+    pushCandidate(match[1], match[2], match[3], true);
   }
 
-  const fallbackPatterns = [
-    /https?:\/\/(?:\[[^\]]+\]|[^:\s/]+):(\d{1,5})(?:[/?#\s]|$)/gi,
-    /address\s*\(\s*['"][^'"]+['"]\s*,\s*(\d{1,5})\s*\)/gi,
-  ];
+  // Any other URL in the log.
+  const urlPattern = /(https?):\/\/(\[[^\]]+\]|[^:\s/]+):(\d{1,5})(?:[/?#\s]|$)/gi;
+  while ((match = urlPattern.exec(text)) !== null) {
+    pushCandidate(match[1], match[2], match[3], false);
+  }
 
-  for (const pattern of fallbackPatterns) {
-    while ((match = pattern.exec(text)) !== null) {
-      portNumber = normalizePort(match[1]) || portNumber;
+  if (candidates.length) {
+    // Prefer the primary HTTP port the manager probes over an HTTPS sub-port
+    // (some servers also bind https on PORT+1, which must not be mistaken for the main port).
+    const score = (candidate) =>
+      (candidate.labeled ? 8 : 0) +
+      (candidate.scheme === 'http' ? 4 : 0) +
+      (isLocalHost(candidate.host) ? 2 : 0);
+
+    // Highest score wins; on ties prefer the *latest* match so the most recent
+    // banner (the current run) beats stale banners left in the log window.
+    let best = candidates[0];
+    let bestScore = score(best);
+    for (let index = 1; index < candidates.length; index += 1) {
+      const currentScore = score(candidates[index]);
+      if (currentScore >= bestScore) {
+        best = candidates[index];
+        bestScore = currentScore;
+      }
     }
+    return best.port;
+  }
+
+  // Non-URL fallback, e.g. address('0.0.0.0', 8000).
+  const addressPattern = /address\s*\(\s*['"][^'"]+['"]\s*,\s*(\d{1,5})\s*\)/gi;
+  let portNumber = null;
+  while ((match = addressPattern.exec(text)) !== null) {
+    portNumber = normalizePort(match[1]) || portNumber;
   }
 
   return portNumber;
@@ -2063,6 +2166,47 @@ function detectPortFromLogText(text) {
 
 function detectPortFromProjectLogs(entry) {
   return detectPortFromLogText(readRecentFile(entry?.stdout)) || detectPortFromLogText(readRecentFile(entry?.stderr));
+}
+
+// Only the output after the last ATM start marker reflects the current run, so we
+// ignore stale banners from earlier launches still sitting in the log window.
+function latestProjectLogSegment(text) {
+  if (!text) {
+    return '';
+  }
+  const markerIndex = text.lastIndexOf(LOG_START_MARKER);
+  return markerIndex >= 0 ? text.slice(markerIndex) : text;
+}
+
+function detectAllPortsFromLogText(text) {
+  const ports = new Set();
+  if (!text) {
+    return ports;
+  }
+
+  const clean = String(text).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+  const urlPattern = /https?:\/\/(?:\[[^\]]+\]|[^:\s/]+):(\d{1,5})(?:[/?#\s]|$)/gi;
+  let match;
+  while ((match = urlPattern.exec(clean)) !== null) {
+    const portNumber = normalizePort(match[1]);
+    if (portNumber) {
+      ports.add(portNumber);
+    }
+  }
+
+  return ports;
+}
+
+// Every port a project's server actually bound this run, e.g. an HTTP port plus an
+// HTTPS sidecar on PORT+1. Used so other projects never get packed onto those ports.
+function detectBoundPortsFromProjectLogs(logEntry) {
+  const ports = new Set();
+  for (const file of [logEntry?.stdout, logEntry?.stderr]) {
+    for (const portNumber of detectAllPortsFromLogText(latestProjectLogSegment(readRecentFile(file)))) {
+      ports.add(portNumber);
+    }
+  }
+  return ports;
 }
 
 function addProjectPortCandidate(candidates, seenPorts, portValue, source) {
@@ -2096,7 +2240,14 @@ function projectActiveServerPortCandidates(project, entry = null) {
 function otherManagedProjectPorts(projectPath) {
   const ports = new Set();
   for (const entry of getState().projects) {
-    if (!entry?.pid || isSamePath(entry.path, projectPath) || !processIsRunning(entry.pid)) {
+    if (isSamePath(entry.path, projectPath)) {
+      continue;
+    }
+
+    // Count managed (live pid) and adopted external servers — both occupy real ports.
+    const running = Boolean(entry?.pid && processIsRunning(entry.pid));
+    const external = entry?.external === true;
+    if (!running && !external) {
       continue;
     }
 
@@ -2105,9 +2256,10 @@ function otherManagedProjectPorts(projectPath) {
       ports.add(entryPort);
     }
 
-    const logPort = detectPortFromProjectLogs(entry);
-    if (logPort) {
-      ports.add(logPort);
+    // External entries store empty log paths, so rebuild them from name+path to read the log.
+    const logEntry = (entry?.stdout || entry?.stderr) ? entry : historicalLogEntryForProject(entry);
+    for (const portNumber of detectBoundPortsFromProjectLogs(logEntry)) {
+      ports.add(portNumber);
     }
   }
 
@@ -2909,7 +3061,7 @@ async function startProject(project, options = {}) {
   const stderrPath = path.join(LOG_DIR, `${prefix}.err.log`);
   const stdout = fs.createWriteStream(stdoutPath, { flags: 'a' });
   const stderr = fs.createWriteStream(stderrPath, { flags: 'a' });
-  const heading = `\n\n[Agent Task Manager (ATM)] ${new Date().toISOString()} starting ${project.name} on port ${project.port}\n`;
+  const heading = `\n\n${LOG_START_MARKER} ${new Date().toISOString()} starting ${project.name} on port ${project.port}\n`;
 
   stdout.write(heading);
   stderr.write(heading);
@@ -4904,12 +5056,14 @@ function startTailscaleServeForPort(projectPort) {
   }
 
   try {
-    const child = spawn('tailscale', ['serve', '--bg', '--yes', '--https', String(portNumber), String(portNumber)], {
-      detached: true,
-      stdio: 'ignore',
+    // `--bg` registers the route and returns; run it synchronously so the route is
+    // live before we rebuild status, then drop the cache so the new route shows up.
+    execFileSync('tailscale', ['serve', '--bg', '--yes', '--https', String(portNumber), String(portNumber)], {
+      timeout: 5000,
       windowsHide: true,
+      stdio: 'ignore',
     });
-    child.unref();
+    refreshTailscaleServeRoutes();
     return true;
   } catch (error) {
     return false;
@@ -4969,20 +5123,38 @@ function getTailscaleServeUrlForPort(projectPort) {
   return matchingRoutes[0]?.url || '';
 }
 
-function buildProjectTailscaleUrl(projectPort, tailscaleIp, options = {}) {
-  const httpsUrl = buildHttpsUrl(options.tailscaleHost || '', projectPort);
-  if (httpsUrl) {
-    return httpsUrl;
+function projectHasTailscaleServeRoute(projectPort) {
+  const portNumber = normalizePort(projectPort);
+  if (!portNumber) {
+    return false;
   }
 
-  if (options.allowServeStatusLookup) {
-    const serveUrl = getTailscaleServeUrlForPort(projectPort);
+  return getTailscaleServeRoutes().some((route) => route.port === portNumber);
+}
+
+function buildProjectTailscaleUrl(projectPort, tailscaleIp, options = {}) {
+  const portNumber = normalizePort(projectPort);
+  if (!portNumber) {
+    return '';
+  }
+
+  // A trusted-cert HTTPS hostname only resolves when a `tailscale serve` route backs
+  // this exact port. Projects change ports, so advertising the hostname blindly leaves
+  // a dead link — only use it when the route really exists.
+  if (projectHasTailscaleServeRoute(portNumber)) {
+    const serveUrl = getTailscaleServeUrlForPort(portNumber);
     if (serveUrl) {
       return serveUrl;
     }
+    const httpsUrl = buildHttpsUrl(options.tailscaleHost || '', portNumber);
+    if (httpsUrl) {
+      return httpsUrl;
+    }
   }
 
-  return buildUrl(tailscaleIp, projectPort);
+  // No serve route: fall back to the raw tailnet IP, reachable from any tailnet device
+  // (including a phone running the Tailscale app), instead of a hostname that 404s.
+  return tailscaleIp ? buildUrl(tailscaleIp, portNumber) : '';
 }
 
 function quotePowerShellArgument(value) {
@@ -5306,7 +5478,9 @@ async function getStatusPayload(request = null) {
         lanReady: webTarget ? Boolean(lanIp && (running || probe.ok)) : Boolean(homeChildWebTarget?.lanUrl && homeChildWebTarget.probe.ok),
         lanIpAtStart: rowEntry?.lanIpAtStart || null,
         tailscaleMode: Boolean(rowEntry?.tailscaleMode && tailscaleIp),
-        tailscaleReady: webTarget ? Boolean(tailscaleUrl && (running || probe.ok)) : Boolean(homeChildWebTarget?.tailscaleUrl && homeChildWebTarget.probe.ok),
+        tailscaleReady: webTarget
+          ? Boolean(tailscaleUrl && (running || probe.ok) && projectHasTailscaleServeRoute(project.port))
+          : Boolean(homeChildWebTarget?.tailscaleUrl && homeChildWebTarget.probe.ok && projectHasTailscaleServeRoute(homeChildWebTarget.project.port)),
         tailscaleIpAtStart: rowEntry?.tailscaleIpAtStart || null,
         localUrl,
         lanUrl,
@@ -5843,6 +6017,11 @@ async function handleApi(request, response, url) {
       ? body.roots.map((root) => normalizePath(root))
       : currentConfig.defaultRoots;
     const basePort = Number(body.basePort || currentConfig.basePort || DEFAULT_BASE_PORT);
+    if (body.clean === true) {
+      // Clear cached discovery info so the whole folder is re-scanned from scratch.
+      pageScanCache.clear();
+      tailscaleServeCache = { checkedAt: 0, routes: [] };
+    }
     await refreshDiscoveredProjects({ roots, basePort, config: currentConfig });
     sendJson(response, 200, await getStatusPayload());
     return;
@@ -6019,6 +6198,30 @@ async function handleApi(request, response, url) {
     }
 
     await restartProject(getProjectActionTarget(project));
+    sendJson(response, 200, await getStatusPayload());
+    return;
+  }
+
+  if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/port$/.test(url.pathname)) {
+    const { project } = selectedProjectFromUrl(url);
+    if (!project) {
+      sendError(response, 404, 'Project not found.');
+      return;
+    }
+
+    if (project.hasWebTarget === false) {
+      sendError(response, 400, 'This project has no web port to change.');
+      return;
+    }
+
+    const body = await readRequestBody(request);
+    const port = normalizePort(body.port);
+    if (!port) {
+      sendError(response, 400, 'Enter a port between 1 and 65535.');
+      return;
+    }
+
+    setProjectPort(project.path, port);
     sendJson(response, 200, await getStatusPayload());
     return;
   }

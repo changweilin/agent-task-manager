@@ -643,6 +643,7 @@ const MAX_COLUMN_WIDTH = 520;
 const MIN_TABLE_WIDTH = 1460;
 const COLUMN_REORDER_MOVE_THRESHOLD = 6;
 const ROOT_REORDER_MOVE_THRESHOLD = 6;
+const ROOT_REORDER_FLIP_MS = 200;
 const SOURCE_ORDER_SORT_ID = 'sourceOrder';
 const STATUS_SORT_ORDER = {
   running: 0,
@@ -871,7 +872,7 @@ const tableColumns = [
     label: 'Port',
     sortable: true,
     getSortValue: (project) => Number(project.port) || 0,
-    render: (project) => `<span class="mono-muted">${project.port || '--'}</span>`,
+    render: (project) => renderPortCell(project),
   },
   {
     id: 'health',
@@ -1005,6 +1006,28 @@ function projectCommandLabel(project) {
 
 function projectIsManagedRunning(project) {
   return Boolean(project.running || ['running', 'restarting', 'unhealthy'].includes(project.status));
+}
+
+function renderPortCell(project) {
+  if (project.hasWebTarget === false || !project.port) {
+    return '<span class="mono-muted">--</span>';
+  }
+
+  const disabledAttr = DEMO_MODE ? 'disabled' : '';
+  return `<input
+    class="port-input mono-muted"
+    type="number"
+    inputmode="numeric"
+    min="1"
+    max="65535"
+    step="1"
+    value="${escapeHtml(String(project.port))}"
+    data-port-input
+    data-name="${escapeHtml(project.name)}"
+    aria-label="${escapeHtml(project.name)} port"
+    title="修改 port（按 Enter 套用）"
+    ${disabledAttr}
+  />`;
 }
 
 function renderProjectPowerAction(project, context = {}) {
@@ -1313,6 +1336,19 @@ function getProjectHomeLink(project) {
   return { label: fallback.label, url: project[fallback.urlKey] || '' };
 }
 
+function renderProjectQuickActions(project, context = {}) {
+  const refreshDisabled = context.busy || state.discoverLoading || DEMO_MODE ? 'disabled' : '';
+  const restartDisabled = context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : '';
+
+  return `
+    <div class="project-quick-actions" aria-label="${escapeHtml(project.name)} 快速操作">
+      ${renderProjectPowerAction(project, context)}
+      <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled} type="button" title="重新整理" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
+      <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${restartDisabled} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
+    </div>
+  `;
+}
+
 function renderProjectName(project, context = {}) {
   const pages = getProjectPages(project);
   const branches = getProjectBranches(project);
@@ -1375,6 +1411,7 @@ function renderProjectName(project, context = {}) {
           ${pageCountControl}
           ${homeControl}
         </div>
+        ${renderProjectQuickActions(project, context)}
       </div>
     </div>
   `;
@@ -1780,6 +1817,77 @@ function finishRootReorder({ suppressClick = false } = {}) {
   }
 }
 
+function formatRootLabel(root) {
+  const value = String(root || '').trim();
+  if (!value) {
+    return '';
+  }
+
+  // Paths under the user's Documents folder show only the part after Documents;
+  // anything outside Documents keeps its full path so it stays unambiguous.
+  const afterDocuments = value.match(/[\\/]?Documents[\\/]+(.+)$/i);
+  if (afterDocuments && afterDocuments[1]) {
+    return afterDocuments[1];
+  }
+  if (/[\\/]?Documents[\\/]?$/i.test(value)) {
+    return 'Documents';
+  }
+
+  return value;
+}
+
+function captureRootItemRects() {
+  const rects = new Map();
+  if (!elements.rootList) {
+    return rects;
+  }
+
+  elements.rootList.querySelectorAll('.root-list-item[data-root]').forEach((item) => {
+    rects.set(item.dataset.root, item.getBoundingClientRect());
+  });
+  return rects;
+}
+
+function animateRootReorder(previousRects) {
+  if (!previousRects || !previousRects.size || !elements.rootList) {
+    return;
+  }
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    return;
+  }
+
+  elements.rootList.querySelectorAll('.root-list-item[data-root]').forEach((item) => {
+    const previous = previousRects.get(item.dataset.root);
+    if (!previous) {
+      return;
+    }
+
+    const next = item.getBoundingClientRect();
+    const deltaX = previous.left - next.left;
+    const deltaY = previous.top - next.top;
+    if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1) {
+      return;
+    }
+
+    // FLIP: snap the item back to its previous spot, then transition to the new one.
+    item.style.transition = 'none';
+    item.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
+    void item.offsetWidth;
+    window.requestAnimationFrame(() => {
+      item.style.transition = `transform ${ROOT_REORDER_FLIP_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1)`;
+      item.style.transform = '';
+    });
+    item.addEventListener(
+      'transitionend',
+      () => {
+        item.style.transition = '';
+        item.style.transform = '';
+      },
+      { once: true },
+    );
+  });
+}
+
 function renderRootList() {
   if (!elements.rootList) {
     return;
@@ -1790,16 +1898,18 @@ function renderRootList() {
     return;
   }
 
+  const previousRects = captureRootItemRects();
   elements.rootList.innerHTML = state.rootPaths
     .map((root, index) => {
       const dragging = state.rootDrag?.active && state.rootDrag.root === root;
       const disabled = DEMO_MODE || state.discoverLoading ? 'disabled' : '';
+      const label = formatRootLabel(root);
       return `
-      <div class="root-list-item ${dragging ? 'is-dragging' : ''}" data-root-index="${index}">
+      <div class="root-list-item ${dragging ? 'is-dragging' : ''}" data-root-index="${index}" data-root="${escapeHtml(root)}">
         <button class="root-path-button" data-open-root data-root-index="${index}" type="button" title="\u958b\u555f\u5c08\u6848\u4f86\u6e90\uff1a${escapeHtml(root)}" aria-label="\u958b\u555f ${escapeHtml(root)}" ${disabled}>
           <span class="root-drag-handle" aria-hidden="true">${icons.grip}</span>
           <span class="root-path-marquee" title="${escapeHtml(root)}">
-            <span class="root-path-text">${escapeHtml(root)}</span>
+            <span class="root-path-text">${escapeHtml(label)}</span>
           </span>
         </button>
         <button class="root-remove-button" data-remove-root data-root-index="${index}" type="button" title="移除來源" aria-label="移除 ${escapeHtml(root)}" ${disabled}>${icons.remove}</button>
@@ -1807,6 +1917,7 @@ function renderRootList() {
     `;
     })
     .join('');
+  animateRootReorder(previousRects);
   window.requestAnimationFrame(updateRootPathMarquees);
 }
 
@@ -2435,6 +2546,14 @@ function renderRows(projects) {
   const actionsColumn = columnsById.get('actions');
   const mobileLayout = isMobileLayout();
 
+  const activeElement = document.activeElement;
+  const editingPort = activeElement && activeElement.matches?.('[data-port-input]')
+    ? {
+        name: activeElement.dataset.name,
+        value: activeElement.value,
+      }
+    : null;
+
   elements.projectRows.innerHTML = projects
     .map((project) => {
       const busy = state.busy.has(project.name) || state.mobileInstallBusyProject === project.name;
@@ -2468,6 +2587,14 @@ function renderRows(projects) {
       `;
     })
     .join('');
+
+  if (editingPort?.name) {
+    const restored = elements.projectRows.querySelector(`input[data-port-input][data-name="${cssAttrValue(editingPort.name)}"]`);
+    if (restored) {
+      restored.value = editingPort.value;
+      restored.focus();
+    }
+  }
 
   elements.emptyState.hidden = projects.length > 0;
 }
@@ -2523,6 +2650,39 @@ async function runAction(name, action) {
   }
 }
 
+async function commitProjectPort(name, rawValue) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
+  const project = state.payload?.projects.find((item) => item.name === name);
+  const port = Number(rawValue);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    showToast('Port 需介於 1-65535');
+    render();
+    return;
+  }
+
+  if (project && Number(project.port) === port) {
+    return;
+  }
+
+  try {
+    state.payload = await api(`/api/projects/${encodeURIComponent(name)}/port`, {
+      method: 'POST',
+      body: JSON.stringify({ port }),
+    });
+    state.selectedName = name;
+    const updated = state.payload?.projects.find((item) => item.name === name);
+    showToast(projectIsManagedRunning(updated) ? '已更新 port（重啟後生效）' : '已更新 port');
+    render();
+  } catch (error) {
+    showToast(error.message);
+    loadStatus({ silent: true });
+  }
+}
+
 function actionMessage(action) {
   const messages = {
     start: '已送出啟動',
@@ -2558,7 +2718,7 @@ async function openRootFolder(rootPath) {
   }
 }
 
-async function discover({ commitDraft = true, includeDraft = true, showToastOnSuccess = true } = {}) {
+async function discover({ commitDraft = true, includeDraft = true, showToastOnSuccess = true, clean = false } = {}) {
   if (DEMO_MODE) {
     showDemoNotice();
     return false;
@@ -2578,7 +2738,7 @@ async function discover({ commitDraft = true, includeDraft = true, showToastOnSu
     const basePort = Number(elements.basePortInput.value || state.payload?.config?.basePort || 5173);
     state.payload = await api('/api/discover', {
       method: 'POST',
-      body: JSON.stringify({ roots, basePort }),
+      body: JSON.stringify({ roots, basePort, clean }),
     });
     state.rootPaths = normalizeRootPaths(state.payload.config.defaultRoots || roots);
     state.rootEditorDirty = false;
@@ -2600,6 +2760,27 @@ async function discover({ commitDraft = true, includeDraft = true, showToastOnSu
   }
 }
 
+async function forceRescan() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return false;
+  }
+
+  const scanned = await discover({
+    commitDraft: false,
+    includeDraft: false,
+    showToastOnSuccess: false,
+    clean: true,
+  });
+  if (!scanned) {
+    return false;
+  }
+
+  await loadStatus({ silent: true });
+  showToast('已清理並重新掃描整個資料夾');
+  return true;
+}
+
 async function refreshProject(name) {
   if (DEMO_MODE) {
     showDemoNotice();
@@ -2615,6 +2796,7 @@ async function refreshProject(name) {
       commitDraft: false,
       includeDraft: false,
       showToastOnSuccess: false,
+      clean: true,
     });
     if (!scanned) {
       return false;
@@ -6887,7 +7069,11 @@ function escapeHtml(value) {
     .replace(/'/g, '&#039;');
 }
 
-elements.refreshButton.addEventListener('click', () => loadStatus());
+function cssAttrValue(value) {
+  return String(value ?? '').replace(/(["\\])/g, '\\$1');
+}
+
+elements.refreshButton.addEventListener('click', () => forceRescan());
 elements.quotaMonitorButton.addEventListener('click', () => openQuotaMonitor());
 elements.themeToggleButton.addEventListener('click', () => {
   const nextTheme = state.theme === 'dark' ? 'light' : 'dark';
@@ -7055,6 +7241,10 @@ elements.filterButtons.addEventListener('click', (event) => {
 });
 
 elements.projectRows.addEventListener('click', (event) => {
+  if (event.target.closest('[data-port-input]')) {
+    return;
+  }
+
   const panelToggleButton = event.target.closest('button[data-panel-toggle]');
   if (panelToggleButton) {
     event.stopPropagation();
@@ -7138,6 +7328,32 @@ elements.projectRows.addEventListener('click', (event) => {
     render();
   }
   loadLogs();
+});
+
+elements.projectRows.addEventListener('keydown', (event) => {
+  const portInput = event.target.closest('[data-port-input]');
+  if (!portInput) {
+    return;
+  }
+
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    portInput.blur();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    const project = state.payload?.projects.find((item) => item.name === portInput.dataset.name);
+    portInput.value = project?.port != null ? String(project.port) : '';
+    portInput.blur();
+  }
+});
+
+elements.projectRows.addEventListener('change', (event) => {
+  const portInput = event.target.closest('[data-port-input]');
+  if (!portInput) {
+    return;
+  }
+
+  commitProjectPort(portInput.dataset.name, portInput.value);
 });
 
 elements.profileSelect.addEventListener('change', (event) => {
