@@ -2392,18 +2392,16 @@ async function resolveWebTargetProject(project, state) {
     const logPort = detectPortFromProjectLogs(entry || historicalLogEntryForProject(resolvedProject));
     if (logPort && Number(logPort) !== Number(resolvedProject.port)) {
       const logProbe = await probeLocalPort(logPort);
-      syncProjectPort(resolvedProject.path, logPort);
+      // Only adopt a port found in logs when a server is actually live there. A stale
+      // historical log must not clobber a deliberate port edit with a dead port, or
+      // manual port changes get reverted on the next status refresh.
       if (logProbe.ok) {
+        syncProjectPort(resolvedProject.path, logPort);
         resolvedProject = {
           ...resolvedProject,
           port: logPort,
         };
         probe = logProbe;
-      } else {
-        resolvedProject = {
-          ...resolvedProject,
-          port: logPort,
-        };
       }
     }
   }
@@ -2694,6 +2692,33 @@ function getProjectActionTarget(project) {
       const rightHome = /(^|[-_/])(home|web|app|frontend|site|demo)([-_/]|$)/.test(rightText) ? 0 : 1;
       return (leftHome - rightHome) || String(left.relativePath || left.path).localeCompare(String(right.relativePath || right.path));
     })[0] || project;
+}
+
+// Resolve which project actually owns the editable web port for a row. A marker
+// project (e.g. a Rust repo) serves its web target through a branch promoted as the
+// row's home, so a port edit on that row must land on the branch, not the parent.
+// `requestedTargetPath` lets the client pin the exact branch shown as the home.
+function resolveProjectPortEditTarget(project, requestedTargetPath = '') {
+  if (projectHasWebTarget(project)) {
+    return project;
+  }
+
+  const webBranches = (Array.isArray(project?.branches) ? project.branches : []).filter(projectHasWebTarget);
+  if (!webBranches.length) {
+    return null;
+  }
+
+  if (requestedTargetPath) {
+    const pinned = webBranches.find((branch) => isSamePath(branch.path, requestedTargetPath));
+    if (pinned) {
+      return pinned;
+    }
+  }
+
+  const actionTarget = getProjectActionTarget(project);
+  return actionTarget && projectHasWebTarget(actionTarget) && !isSamePath(actionTarget.path, project.path)
+    ? actionTarget
+    : null;
 }
 
 function getStateEntryByPath(state, projectPath) {
@@ -6209,11 +6234,6 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    if (project.hasWebTarget === false) {
-      sendError(response, 400, 'This project has no web port to change.');
-      return;
-    }
-
     const body = await readRequestBody(request);
     const port = normalizePort(body.port);
     if (!port) {
@@ -6221,7 +6241,13 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    setProjectPort(project.path, port);
+    const portTarget = resolveProjectPortEditTarget(project, body.targetPath);
+    if (!portTarget) {
+      sendError(response, 400, 'This project has no web port to change.');
+      return;
+    }
+
+    setProjectPort(portTarget.path, port);
     sendJson(response, 200, await getStatusPayload());
     return;
   }

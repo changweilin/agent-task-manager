@@ -1009,11 +1009,17 @@ function projectIsManagedRunning(project) {
 }
 
 function renderPortCell(project) {
-  if (project.hasWebTarget === false || !project.port) {
+  // A marker project (hasWebTarget === false) still exposes an editable port when a
+  // branch is promoted as its web root (derivedHome): the port belongs to that branch.
+  const derivedHome = project.hasWebTarget === false ? project.derivedHome : null;
+  if ((project.hasWebTarget === false && !derivedHome) || !project.port) {
     return '<span class="mono-muted">--</span>';
   }
 
   const disabledAttr = DEMO_MODE ? 'disabled' : '';
+  const title = derivedHome
+    ? `修改 ${derivedHome.name} 分支 port（按 Enter 套用）`
+    : '修改 port（按 Enter 套用）';
   return `<input
     class="port-input mono-muted"
     type="number"
@@ -1025,7 +1031,7 @@ function renderPortCell(project) {
     data-port-input
     data-name="${escapeHtml(project.name)}"
     aria-label="${escapeHtml(project.name)} port"
-    title="修改 port（按 Enter 套用）"
+    title="${escapeHtml(title)}"
     ${disabledAttr}
   />`;
 }
@@ -1063,7 +1069,7 @@ function renderMobileInstallAction(project, context = {}) {
 }
 
 function renderHealth(project) {
-  if (project.hasWebTarget === false) {
+  if (project.hasWebTarget === false && !project.derivedHome) {
     return '<span class="mono-muted">--</span>';
   }
 
@@ -2669,9 +2675,12 @@ async function commitProjectPort(name, rawValue) {
   }
 
   try {
+    // For a marker row the port belongs to its promoted web branch; pin the edit to
+    // that branch so the server updates the right project even with multiple branches.
+    const targetPath = project?.hasWebTarget === false ? project?.derivedHome?.path || '' : '';
     state.payload = await api(`/api/projects/${encodeURIComponent(name)}/port`, {
       method: 'POST',
-      body: JSON.stringify({ port }),
+      body: JSON.stringify(targetPath ? { port, targetPath } : { port }),
     });
     state.selectedName = name;
     const updated = state.payload?.projects.find((item) => item.name === name);
