@@ -4345,6 +4345,33 @@ async function collectAiQuotaPayload(signal = null) {
   };
 }
 
+async function getSingleAiQuotaPayload(agentId) {
+  const agent = AI_QUOTA_AGENTS.find((item) => item.id === agentId);
+  if (!agent) {
+    return {
+      checkedAt: new Date().toISOString(),
+      safeMode: {
+        tokenSafe: true,
+        summary: '安全模式：只執行登入/狀態查詢與 CLI slash 指令，沒有送出自然語言 prompt。',
+      },
+      agents: [],
+    };
+  }
+
+  // Single-agent probes run on a fresh controller so a pipeline gate check does
+  // not collide with (or get canceled by) a full multi-agent probe in flight.
+  const controller = new AbortController();
+  const probed = await probeAiQuotaAgent(agent, controller.signal);
+  return {
+    checkedAt: new Date().toISOString(),
+    safeMode: {
+      tokenSafe: true,
+      summary: '安全模式：只執行登入/狀態查詢與 CLI slash 指令，沒有送出自然語言 prompt。',
+    },
+    agents: [probed],
+  };
+}
+
 async function getAiQuotaPayload() {
   if (!aiQuotaProbeInFlight) {
     const controller = new AbortController();
@@ -4838,6 +4865,17 @@ async function closeTerminalSession(id) {
   }
   terminalSessions.delete(session.id);
   return true;
+}
+
+async function closeProjectTerminalSessions(projectName) {
+  const name = String(projectName || '');
+  const ids = [...terminalSessions.values()]
+    .filter((session) => session.projectName === name)
+    .map((session) => session.id);
+  for (const id of ids) {
+    await closeTerminalSession(id);
+  }
+  return ids;
 }
 
 function isTailscaleIpv4(ip) {
@@ -5702,6 +5740,12 @@ async function handleApi(request, response, url) {
       return;
     }
 
+    const requestedAgent = (url.searchParams.get('agent') || '').trim().toLowerCase();
+    if (requestedAgent) {
+      sendJson(response, 200, await getSingleAiQuotaPayload(requestedAgent));
+      return;
+    }
+
     sendJson(response, 200, await getAiQuotaPayload());
     return;
   }
@@ -6033,6 +6077,18 @@ async function handleApi(request, response, url) {
       sendJson(response, 200, { closed: true, id });
       return;
     }
+  }
+
+  if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/terminals\/close$/.test(url.pathname)) {
+    if (!isLocalRequest(request)) {
+      sendError(response, 403, 'For safety, terminal commands are only allowed from http://127.0.0.1 on this computer.');
+      return;
+    }
+
+    const projectName = decodeURIComponent(url.pathname.split('/')[3] || '');
+    const closed = await closeProjectTerminalSessions(projectName);
+    sendJson(response, 200, { closed: closed.length, ids: closed });
+    return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/discover') {

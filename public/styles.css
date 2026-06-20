@@ -3220,6 +3220,454 @@ a.page-link:hover {
   margin-top: 10px;
 }
 
+/* Collapsible terminal panels --------------------------------------------- */
+.terminal-foldable {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  overflow: hidden;
+}
+
+.terminal-foldable-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.terminal-foldable-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 720;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.terminal-foldable-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  transition: transform 0.15s ease;
+  transform: rotate(90deg);
+}
+
+.terminal-foldable.is-collapsed .terminal-foldable-chevron {
+  transform: rotate(0deg);
+}
+
+.terminal-foldable-chevron svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.terminal-foldable-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-foldable-badge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.terminal-foldable-body {
+  padding: 0 8px 8px;
+}
+
+.terminal-foldable-body > .terminal-setup,
+.terminal-foldable-body > .terminal-claude-launcher,
+.terminal-foldable-body > .terminal-favorites,
+.terminal-foldable-body > .terminal-agent-tabs {
+  margin-top: 0;
+}
+
+/* Pipeline prompting ------------------------------------------------------- */
+.terminal-pipeline-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.terminal-pipeline-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.terminal-pipeline-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 760;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.terminal-pipeline-badge.is-running {
+  background: var(--teal-soft);
+  border-color: var(--teal-border);
+  color: var(--teal);
+}
+
+.terminal-pipeline-badge.is-done {
+  background: var(--teal-soft);
+  border-color: var(--teal-border);
+  color: var(--teal);
+}
+
+.terminal-pipeline-badge.is-warn {
+  background: var(--amber-soft);
+  border-color: var(--amber-border);
+  color: var(--amber);
+}
+
+.terminal-pipeline-badge.is-error {
+  background: var(--coral-soft);
+  border-color: var(--coral);
+  color: var(--coral);
+}
+
+.terminal-pipeline-progress {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.terminal-pipeline-message {
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.terminal-pipeline-run,
+.terminal-pipeline-stop,
+.terminal-pipeline-add {
+  width: auto;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+}
+
+.terminal-pipeline-run svg,
+.terminal-pipeline-stop svg,
+.terminal-pipeline-add svg {
+  width: 13px;
+  height: 13px;
+}
+
+.terminal-pipeline-hint {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.terminal-pipeline-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.terminal-pipeline-step {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 7px;
+}
+
+.terminal-pipeline-step.is-active {
+  border-color: var(--teal-border);
+  box-shadow: 0 0 0 1px var(--teal-border);
+}
+
+.terminal-pipeline-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.terminal-pipeline-step-index {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 760;
+  color: var(--text);
+}
+
+.terminal-pipeline-conversation {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.terminal-pipeline-conv-button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 680;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.terminal-pipeline-conv-button.is-active {
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
+.terminal-pipeline-conv-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.terminal-pipeline-step-delete {
+  margin-left: auto;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.terminal-pipeline-step-delete:hover:not(:disabled) {
+  color: var(--coral);
+  border-color: var(--coral);
+}
+
+.terminal-pipeline-step-delete:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.terminal-pipeline-step-delete svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.terminal-pipeline-prompt {
+  width: 100%;
+  resize: vertical;
+  min-height: 56px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 6px 8px;
+}
+
+.terminal-pipeline-add {
+  margin-top: 8px;
+}
+
+.terminal-pipeline-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.terminal-pipeline-field {
+  display: grid;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.terminal-pipeline-field input,
+.terminal-pipeline-field select {
+  width: 100%;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 0 8px;
+}
+
+.terminal-pipeline-quota {
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  display: grid;
+  gap: 8px;
+}
+
+.terminal-pipeline-quota-toggle,
+.terminal-pipeline-quota-strict {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.terminal-pipeline-quota-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  align-items: end;
+  gap: 8px;
+}
+
+.terminal-pipeline-quota-options.is-disabled {
+  opacity: 0.5;
+}
+
+.terminal-pipeline-quota-strict {
+  grid-column: 1 / -1;
+}
+
+.terminal-pipeline-log-controls {
+  margin-top: 8px;
+}
+
+.terminal-pipeline-log-toggle {
+  border: none;
+  background: transparent;
+  color: var(--teal);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 680;
+  cursor: pointer;
+  padding: 0;
+}
+
+.terminal-pipeline-log {
+  margin-top: 6px;
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--log-bg);
+  padding: 6px 8px;
+  display: grid;
+  gap: 2px;
+}
+
+.terminal-pipeline-log-empty {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.terminal-pipeline-log-entry {
+  display: flex;
+  gap: 8px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--log-text);
+}
+
+.terminal-pipeline-log-time {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.terminal-pipeline-log-entry.is-warn .terminal-pipeline-log-text {
+  color: var(--amber);
+}
+
+.terminal-pipeline-log-entry.is-error .terminal-pipeline-log-text {
+  color: var(--coral);
+}
+
+/* Focus / maximise mode --------------------------------------------------- */
+.terminal-focus-button {
+  width: auto;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+}
+
+.terminal-focus-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.terminal-focus-button[aria-pressed="true"] {
+  background: var(--teal-soft);
+  border-color: var(--teal-border);
+  color: var(--teal);
+}
+
+.terminal-modal-panel.is-focus-mode {
+  width: min(1400px, 100%);
+  max-height: calc(100dvh - 12px);
+}
+
+.terminal-modal-panel.is-focus-mode .terminal-foldable {
+  margin-top: 6px;
+}
+
+.terminal-modal-panel.is-focus-mode .terminal-output {
+  height: clamp(320px, 60vh, 900px);
+}
+
 .terminal-touch-viewport {
   --terminal-touch-scale: 1;
   --terminal-touch-width: 100%;

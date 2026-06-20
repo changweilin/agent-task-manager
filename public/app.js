@@ -330,6 +330,21 @@ const TERMINAL_AGENT_TABS = [
 ];
 const DEFAULT_TERMINAL_AGENT_ID = 'claude';
 const terminalAgentIds = new Set(TERMINAL_AGENT_TABS.map((agent) => agent.id));
+const TERMINAL_PIPELINE_KEY = 'agentTaskManager.terminalPipeline.v1';
+// Slash command each agent uses to start a fresh conversation while the same
+// CLI process keeps running. Used when a pipeline step is set to 「開新對話」.
+const TERMINAL_PIPELINE_AGENT_RESET = {
+  claude: '/clear',
+  codex: '/new',
+  antigravity: '/clear',
+};
+const TERMINAL_PIPELINE_CONVERSATIONS = new Set(['same', 'new']);
+const TERMINAL_PIPELINE_IDLE_MIN = 3;
+const TERMINAL_PIPELINE_IDLE_MAX = 120;
+const TERMINAL_PIPELINE_MAXWAIT_MIN = 30;
+const TERMINAL_PIPELINE_MAXWAIT_MAX = 7200;
+const TERMINAL_PIPELINE_PROMPT_LIMIT = 16000;
+const TERMINAL_FOLD_SECTIONS = ['setup', 'agent', 'pipeline', 'favorites'];
 const AI_QUOTA_MONITOR_AGENTS = [
   {
     id: 'claude',
@@ -729,7 +744,26 @@ const state = {
   quotaLoading: false,
   quotaError: '',
   quotaRequestId: 0,
+  terminalPipeline: null,
+  terminalPipelineRun: {
+    active: false,
+    sessionLocalId: null,
+    stepIndex: -1,
+    activeStepId: null,
+    total: 0,
+    status: 'idle',
+    message: '',
+    log: [],
+  },
+  // Per-section collapse state for the terminal workspace. true = collapsed.
+  terminalFold: { setup: false, agent: false, pipeline: false, favorites: true },
+  // Tracks the session we already auto-collapsed for once a run started, so we
+  // don't fight the user re-expanding a section while a process keeps running.
+  terminalFocusAppliedSessionId: null,
+  terminalPipelineLogExpanded: false,
 };
+
+let terminalPipelineToken = 0;
 
 let terminalPollTimer = null;
 let terminalPreferencesSaveTimer = null;
@@ -830,6 +864,7 @@ const elements = {
   terminalModal: document.querySelector('#terminalModal'),
   terminalTitle: document.querySelector('#terminalTitle'),
   backToHomeFromTerminal: document.querySelector('#backToHomeFromTerminal'),
+  terminalFocusToggle: document.querySelector('#terminalFocusToggle'),
   closeTerminalModal: document.querySelector('#closeTerminalModal'),
   addTerminalSession: document.querySelector('#addTerminalSession'),
   terminalProjectBar: document.querySelector('#terminalProjectBar'),
@@ -2801,6 +2836,9 @@ async function refreshProject(name) {
   render();
 
   try {
+    // Tear down old terminal/agent processes for this project before re-reading it.
+    const closed = await closeProjectTerminalSessions(name);
+
     const scanned = await discover({
       commitDraft: false,
       includeDraft: false,
@@ -2815,7 +2853,7 @@ async function refreshProject(name) {
     if (state.payload?.projects.some((project) => project.name === name)) {
       state.selectedName = name;
     }
-    showToast('已掃描並重新整理');
+    showToast(closed ? `已關閉 ${closed} 個終端並重新整理` : '已掃描並重新整理');
     render();
     return true;
   } finally {
@@ -3901,6 +3939,91 @@ function terminalAntigravityLaunchPayload() {
     command: settings.command,
     activeFlags: settings.activeFlags,
   };
+}
+
+function terminalPipelineStepId() {
+  return `pstep-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function normalizeTerminalPipelineStep(step) {
+  const source = step && typeof step === 'object' ? step : {};
+  const prompt = String(source.prompt ?? '')
+    .replace(/\0/g, '')
+    .slice(0, TERMINAL_PIPELINE_PROMPT_LIMIT);
+  const conversation = TERMINAL_PIPELINE_CONVERSATIONS.has(source.conversation)
+    ? source.conversation
+    : 'same';
+  return {
+    id: typeof source.id === 'string' && source.id ? source.id : terminalPipelineStepId(),
+    prompt,
+    conversation,
+  };
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(number)));
+}
+
+function defaultTerminalPipeline() {
+  return {
+    steps: [{ id: terminalPipelineStepId(), prompt: '', conversation: 'new' }],
+    idleSeconds: 12,
+    maxWaitSeconds: 900,
+    resetCommand: '',
+    quotaGate: {
+      enabled: false,
+      agent: DEFAULT_TERMINAL_AGENT_ID,
+      minRemaining: 15,
+      stopOnUnknown: false,
+    },
+  };
+}
+
+function normalizeTerminalPipeline(pipeline) {
+  const fallback = defaultTerminalPipeline();
+  const source = pipeline && typeof pipeline === 'object' ? pipeline : {};
+  const steps = Array.isArray(source.steps) && source.steps.length
+    ? source.steps.map((step) => normalizeTerminalPipelineStep(step))
+    : fallback.steps;
+  const quotaSource = source.quotaGate && typeof source.quotaGate === 'object' ? source.quotaGate : {};
+  const quotaAgent = terminalAgentIds.has(quotaSource.agent) ? quotaSource.agent : fallback.quotaGate.agent;
+  return {
+    steps,
+    idleSeconds: clampNumber(source.idleSeconds, TERMINAL_PIPELINE_IDLE_MIN, TERMINAL_PIPELINE_IDLE_MAX, fallback.idleSeconds),
+    maxWaitSeconds: clampNumber(source.maxWaitSeconds, TERMINAL_PIPELINE_MAXWAIT_MIN, TERMINAL_PIPELINE_MAXWAIT_MAX, fallback.maxWaitSeconds),
+    resetCommand: String(source.resetCommand ?? '').replace(/\0/g, '').replace(/[\r\n]+/g, ' ').trim().slice(0, 120),
+    quotaGate: {
+      enabled: quotaSource.enabled === true,
+      agent: quotaAgent,
+      minRemaining: clampNumber(quotaSource.minRemaining, 0, 100, fallback.quotaGate.minRemaining),
+      stopOnUnknown: quotaSource.stopOnUnknown === true,
+    },
+  };
+}
+
+function getTerminalPipeline() {
+  state.terminalPipeline = normalizeTerminalPipeline(state.terminalPipeline);
+  return state.terminalPipeline;
+}
+
+function readTerminalPipeline() {
+  try {
+    return normalizeTerminalPipeline(JSON.parse(readLocalPreference(TERMINAL_PIPELINE_KEY) || 'null'));
+  } catch {
+    return defaultTerminalPipeline();
+  }
+}
+
+function saveTerminalPipeline() {
+  try {
+    writeLocalPreference(TERMINAL_PIPELINE_KEY, JSON.stringify(normalizeTerminalPipeline(state.terminalPipeline)));
+  } catch {
+    // The pipeline stays usable for this session even if localStorage is blocked.
+  }
 }
 
 function syncTerminalClaudePreview() {
@@ -5654,6 +5777,207 @@ function renderTerminalScrollControls(session) {
   `;
 }
 
+function renderTerminalFoldable(key, { title, badge = '', headerExtra = '', body }) {
+  const collapsed = state.terminalFold[key] === true;
+  return `
+    <section class="terminal-foldable ${collapsed ? 'is-collapsed' : ''}" data-terminal-fold-section="${escapeHtml(key)}">
+      <div class="terminal-foldable-header">
+        <button class="terminal-foldable-toggle" data-terminal-fold="${escapeHtml(key)}" type="button" aria-expanded="${collapsed ? 'false' : 'true'}">
+          <span class="terminal-foldable-chevron">${icons.chevron}</span>
+          <span class="terminal-foldable-title">${escapeHtml(title)}</span>
+          ${badge ? `<span class="terminal-foldable-badge">${badge}</span>` : ''}
+        </button>
+        ${headerExtra}
+      </div>
+      <div class="terminal-foldable-body" ${collapsed ? 'hidden' : ''}>
+        ${body}
+      </div>
+    </section>
+  `;
+}
+
+function terminalFocusActive(session) {
+  if (!session) {
+    return false;
+  }
+  if (state.terminalPipelineRun.active && state.terminalPipelineRun.sessionLocalId === session.localId) {
+    return true;
+  }
+  return Boolean(session.id && session.running && session.interactive);
+}
+
+// When a process starts running we collapse the non-essential panels once so the
+// terminal gets the most room. The user can re-open any panel afterwards.
+function applyTerminalFocusAuto(session) {
+  if (terminalFocusActive(session)) {
+    if (state.terminalFocusAppliedSessionId !== session.localId) {
+      state.terminalFold = { setup: true, agent: true, pipeline: true, favorites: true };
+      state.terminalFocusAppliedSessionId = session.localId;
+    }
+  } else if (state.terminalFocusAppliedSessionId === session.localId) {
+    state.terminalFocusAppliedSessionId = null;
+  }
+}
+
+function pipelineStatusMeta() {
+  const map = {
+    idle: { label: '待命', cls: 'is-idle' },
+    running: { label: '執行中', cls: 'is-running' },
+    quota: { label: '檢查配額', cls: 'is-running' },
+    'quota-stopped': { label: '配額不足', cls: 'is-warn' },
+    done: { label: '完成', cls: 'is-done' },
+    stopped: { label: '已停止', cls: 'is-warn' },
+    error: { label: '錯誤', cls: 'is-error' },
+  };
+  return map[state.terminalPipelineRun.status] || map.idle;
+}
+
+function renderPipelineStatusBadge() {
+  const run = state.terminalPipelineRun;
+  const meta = pipelineStatusMeta();
+  const progress = run.total ? `${Math.max(0, run.stepIndex + 1)}/${run.total}` : '';
+  return `
+    <div class="terminal-pipeline-status">
+      <span class="terminal-pipeline-badge ${meta.cls}" data-pipeline-status-badge>${escapeHtml(meta.label)}</span>
+      <span class="terminal-pipeline-progress" data-pipeline-progress>${escapeHtml(progress)}</span>
+      <span class="terminal-pipeline-message" data-pipeline-status-message>${escapeHtml(run.message || '')}</span>
+    </div>
+  `;
+}
+
+function renderPipelineLogEntries() {
+  const log = state.terminalPipelineRun.log;
+  if (!log.length) {
+    return '<div class="terminal-pipeline-log-empty">尚無執行紀錄</div>';
+  }
+  return log
+    .map((entry) => `
+      <div class="terminal-pipeline-log-entry is-${escapeHtml(entry.level)}">
+        <span class="terminal-pipeline-log-time">${escapeHtml(entry.time)}</span>
+        <span class="terminal-pipeline-log-text">${escapeHtml(entry.text)}</span>
+      </div>
+    `)
+    .join('');
+}
+
+// Lightweight DOM refresh for the pipeline header/log that avoids rebuilding the
+// terminal surface (which would re-mount xterm and reconnect the socket).
+function renderPipelineRunState() {
+  if (!state.terminalModalOpen) {
+    return;
+  }
+  const run = state.terminalPipelineRun;
+  const meta = pipelineStatusMeta();
+  const badge = elements.terminalWorkspace.querySelector('[data-pipeline-status-badge]');
+  if (badge) {
+    badge.textContent = meta.label;
+    badge.className = `terminal-pipeline-badge ${meta.cls}`;
+  }
+  const progress = elements.terminalWorkspace.querySelector('[data-pipeline-progress]');
+  if (progress) {
+    progress.textContent = run.total ? `${Math.max(0, run.stepIndex + 1)}/${run.total}` : '';
+  }
+  const message = elements.terminalWorkspace.querySelector('[data-pipeline-status-message]');
+  if (message) {
+    message.textContent = run.message || '';
+  }
+  const log = elements.terminalWorkspace.querySelector('[data-pipeline-log]');
+  if (log) {
+    log.innerHTML = renderPipelineLogEntries();
+    log.scrollTop = log.scrollHeight;
+  }
+  elements.terminalWorkspace.querySelectorAll('[data-pipeline-step]').forEach((node) => {
+    node.classList.toggle('is-active', run.active && node.dataset.pipelineStep === run.activeStepId);
+  });
+}
+
+function renderTerminalPipeline(session) {
+  const config = getTerminalPipeline();
+  const run = state.terminalPipelineRun;
+  const running = run.active;
+  const agentId = terminalFavoriteAgentId();
+  const agentLabel = terminalAgentLabel(agentId);
+  const quota = config.quotaGate;
+
+  const stepsHtml = config.steps.map((step, index) => {
+    const isActive = running && run.sessionLocalId === session.localId && run.activeStepId === step.id;
+    return `
+      <div class="terminal-pipeline-step ${isActive ? 'is-active' : ''}" data-pipeline-step="${escapeHtml(step.id)}">
+        <div class="terminal-pipeline-step-head">
+          <span class="terminal-pipeline-step-index">${index + 1}</span>
+          <div class="terminal-pipeline-conversation" role="group" aria-label="第 ${index + 1} 段對話模式">
+            <button class="terminal-pipeline-conv-button ${step.conversation === 'same' ? 'is-active' : ''}" data-pipeline-conversation="${escapeHtml(step.id)}" data-pipeline-conversation-mode="same" type="button" aria-pressed="${step.conversation === 'same'}" ${running ? 'disabled' : ''}>延續對話</button>
+            <button class="terminal-pipeline-conv-button ${step.conversation === 'new' ? 'is-active' : ''}" data-pipeline-conversation="${escapeHtml(step.id)}" data-pipeline-conversation-mode="new" type="button" aria-pressed="${step.conversation === 'new'}" ${running ? 'disabled' : ''}>開新對話</button>
+          </div>
+          <button class="terminal-pipeline-step-delete" data-pipeline-delete="${escapeHtml(step.id)}" type="button" title="刪除這段" aria-label="刪除第 ${index + 1} 段" ${running || config.steps.length <= 1 ? 'disabled' : ''}>${icons.remove}</button>
+        </div>
+        <textarea class="terminal-pipeline-prompt" data-pipeline-prompt="${escapeHtml(step.id)}" rows="3" spellcheck="false" placeholder="第 ${index + 1} 段 prompt…" ${running ? 'disabled' : ''}>${escapeHtml(step.prompt)}</textarea>
+      </div>
+    `;
+  }).join('');
+
+  const headerExtra = `
+    <div class="terminal-pipeline-controls">
+      ${renderPipelineStatusBadge()}
+      ${running
+        ? `<button class="copy-url danger-action terminal-pipeline-stop" data-pipeline-stop type="button">${icons.stop}<span>停止</span></button>`
+        : `<button class="copy-url primary-action terminal-pipeline-run" data-pipeline-run type="button" ${session.readOnly ? 'disabled' : ''}>${icons.start}<span>執行</span></button>`}
+    </div>
+  `;
+
+  const body = `
+    <p class="terminal-pipeline-hint">每段 prompt 會依序送給目前的 ${escapeHtml(agentLabel)}；可逐段設定延續同一對話或切換新對話，並依剩餘配額自動停止。</p>
+    <div class="terminal-pipeline-steps">${stepsHtml}</div>
+    <button class="copy-url terminal-pipeline-add" data-pipeline-add type="button" ${running ? 'disabled' : ''}>${icons.add}<span>新增一段</span></button>
+    <div class="terminal-pipeline-settings">
+      <label class="terminal-pipeline-field">
+        <span>完成判定閒置秒數</span>
+        <input data-pipeline-idle type="number" min="${TERMINAL_PIPELINE_IDLE_MIN}" max="${TERMINAL_PIPELINE_IDLE_MAX}" step="1" value="${config.idleSeconds}" ${running ? 'disabled' : ''} />
+      </label>
+      <label class="terminal-pipeline-field">
+        <span>單段逾時秒數</span>
+        <input data-pipeline-maxwait type="number" min="${TERMINAL_PIPELINE_MAXWAIT_MIN}" max="${TERMINAL_PIPELINE_MAXWAIT_MAX}" step="10" value="${config.maxWaitSeconds}" ${running ? 'disabled' : ''} />
+      </label>
+      <label class="terminal-pipeline-field">
+        <span>開新對話指令</span>
+        <input data-pipeline-reset type="text" spellcheck="false" value="${escapeHtml(config.resetCommand)}" placeholder="${escapeHtml(TERMINAL_PIPELINE_AGENT_RESET[agentId] || '/clear')}" ${running ? 'disabled' : ''} />
+      </label>
+    </div>
+    <div class="terminal-pipeline-quota">
+      <label class="terminal-pipeline-quota-toggle">
+        <input type="checkbox" data-pipeline-quota-enabled ${quota.enabled ? 'checked' : ''} ${running ? 'disabled' : ''} />
+        <span>依剩餘配額自動停止</span>
+      </label>
+      <div class="terminal-pipeline-quota-options ${quota.enabled ? '' : 'is-disabled'}">
+        <label class="terminal-pipeline-field">
+          <span>檢查對象</span>
+          <select data-pipeline-quota-agent ${running || !quota.enabled ? 'disabled' : ''}>
+            ${AI_QUOTA_MONITOR_AGENTS.map((agent) => `<option value="${escapeHtml(agent.id)}" ${quota.agent === agent.id ? 'selected' : ''}>${escapeHtml(agent.label)}</option>`).join('')}
+          </select>
+        </label>
+        <label class="terminal-pipeline-field">
+          <span>剩餘門檻 %</span>
+          <input data-pipeline-quota-threshold type="number" min="0" max="100" step="1" value="${quota.minRemaining}" ${running || !quota.enabled ? 'disabled' : ''} />
+        </label>
+        <label class="terminal-pipeline-quota-strict">
+          <input type="checkbox" data-pipeline-quota-strict ${quota.stopOnUnknown ? 'checked' : ''} ${running || !quota.enabled ? 'disabled' : ''} />
+          <span>無法判斷配額時也停止</span>
+        </label>
+      </div>
+    </div>
+    <div class="terminal-pipeline-log-controls">
+      <button class="terminal-pipeline-log-toggle" data-pipeline-log-toggle type="button">${state.terminalPipelineLogExpanded ? '隱藏執行紀錄' : '顯示執行紀錄'}</button>
+    </div>
+    ${state.terminalPipelineLogExpanded ? `<div class="terminal-pipeline-log" data-pipeline-log>${renderPipelineLogEntries()}</div>` : ''}
+  `;
+
+  return renderTerminalFoldable('pipeline', {
+    title: 'Pipeline 連續提示',
+    headerExtra,
+    body,
+  });
+}
+
 function renderTerminalModal() {
   if (!state.terminalModalOpen) {
     return;
@@ -5672,10 +5996,22 @@ function renderTerminalModal() {
   renderTerminalProjectBar();
   renderTerminalTabs();
 
+  const focusActive = terminalFocusActive(activeSession);
+  const terminalPanelEl = elements.terminalModal.querySelector('.terminal-modal-panel');
+  if (terminalPanelEl) {
+    terminalPanelEl.classList.toggle('is-focus-mode', focusActive);
+  }
+  if (elements.terminalFocusToggle) {
+    const maximized = TERMINAL_FOLD_SECTIONS.every((key) => state.terminalFold[key]);
+    elements.terminalFocusToggle.setAttribute('aria-pressed', maximized ? 'true' : 'false');
+  }
+
   if (!activeSession) {
     elements.terminalWorkspace.innerHTML = '';
     return;
   }
+
+  applyTerminalFocusAuto(activeSession);
 
   const editingTitle = state.terminalTitleEditingId === activeSession.localId;
   const sessionTitleControl = editingTitle
@@ -5704,12 +6040,31 @@ function renderTerminalModal() {
       : 'Optional command, e.g. claude';
   const commandButtonLabel = activeSession.readOnly ? (agentLaunchOnly ? 'Launch only' : 'Read-only') : activeSession.id ? 'Send' : 'Start';
 
-  elements.terminalWorkspace.innerHTML = `
-    <section class="terminal-session" data-terminal-panel="${escapeHtml(activeSession.localId)}">
-      ${renderTerminalSetup(activeSession, options, project, sessionTitleControl, projectPort)}
+  const setupFoldable = renderTerminalFoldable('setup', {
+    title: '終端設定',
+    badge: escapeHtml(String(projectPort)),
+    body: renderTerminalSetup(activeSession, options, project, sessionTitleControl, projectPort),
+  });
+  const agentFoldable = renderTerminalFoldable('agent', {
+    title: 'Agent 啟動器',
+    badge: escapeHtml(terminalAgentLabel(terminalFavoriteAgentId())),
+    body: `
       ${renderTerminalAgentTabs()}
       ${renderTerminalActiveAgentLauncher(activeSession, options)}
-      ${renderTerminalFavorites(activeSession)}
+    `,
+  });
+  const pipelineFoldable = renderTerminalPipeline(activeSession);
+  const favoritesFoldable = renderTerminalFoldable('favorites', {
+    title: '我的最愛指令',
+    body: renderTerminalFavorites(activeSession),
+  });
+
+  elements.terminalWorkspace.innerHTML = `
+    <section class="terminal-session ${focusActive ? 'is-focus-mode' : ''}" data-terminal-panel="${escapeHtml(activeSession.localId)}">
+      ${setupFoldable}
+      ${agentFoldable}
+      ${pipelineFoldable}
+      ${favoritesFoldable}
       ${renderTerminalScrollControls(activeSession)}
       ${terminalSurface}
       <div class="terminal-command-row">
@@ -5790,6 +6145,7 @@ function applyTerminalPayload(session, payload) {
   session.exitSignal = payload.exitSignal ?? null;
   if (outputToAppend) {
     session.output += outputToAppend;
+    session.lastOutputAt = Date.now();
   }
   if (session.id && !session.readOnly) {
     state.terminalWorkspaceMetaBySessionId.set(session.id, terminalSessionMetadata(session));
@@ -5824,6 +6180,9 @@ function appendTerminalSessionOutput(session, text, cursor) {
     session.output = session.output.slice(session.output.length - TERMINAL_CLIENT_OUTPUT_LIMIT);
   }
   session.cursor = nextCursor;
+  if (outputToAppend) {
+    session.lastOutputAt = Date.now();
+  }
   return outputToAppend;
 }
 
@@ -6680,6 +7039,505 @@ async function runTerminalCommand(localId) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pipeline prompting
+//
+// A pipeline drives the active interactive agent session through a sequence of
+// prompts. Each step declares whether it should continue the running
+// conversation (「延續對話」) or reset to a new one (「開新對話」). Between steps the
+// orchestrator detects completion by watching for the terminal output going
+// idle, and optionally checks the agent's remaining quota before continuing.
+// ---------------------------------------------------------------------------
+
+function pipelineSleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function pipelineIsCurrent(token) {
+  return token === terminalPipelineToken && state.terminalPipelineRun.active;
+}
+
+function pipelineLog(level, text) {
+  const entry = {
+    time: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+    level,
+    text: String(text || ''),
+  };
+  const log = state.terminalPipelineRun.log;
+  log.push(entry);
+  if (log.length > 200) {
+    log.splice(0, log.length - 200);
+  }
+}
+
+function setPipelineStatus(status, message) {
+  state.terminalPipelineRun.status = status;
+  if (message !== undefined) {
+    state.terminalPipelineRun.message = message;
+  }
+  renderPipelineRunState();
+}
+
+function pipelineActiveSession() {
+  return findTerminalSession(state.terminalPipelineRun.sessionLocalId)
+    || findTerminalSession(state.terminalActiveSessionId);
+}
+
+async function pipelineWaitForSocket(localId, token, timeoutMs = 20000) {
+  const start = Date.now();
+  while (pipelineIsCurrent(token)) {
+    const session = findTerminalSession(localId);
+    if (session && hasLiveTerminalSocket(session)) {
+      return true;
+    }
+    if (Date.now() - start >= timeoutMs) {
+      return false;
+    }
+    await pipelineSleep(300);
+  }
+  return false;
+}
+
+// Resolves once output has stayed quiet for idleMs (after waiting at least
+// minMs and giving up after maxMs). Returns 'idle' | 'timeout' | 'exited'.
+async function pipelineWaitForCompletion(localId, token, { idleMs, minMs, maxMs }) {
+  const start = Date.now();
+  const session = findTerminalSession(localId);
+  if (session) {
+    session.lastOutputAt = Date.now();
+  }
+  await pipelineSleep(Math.min(minMs, maxMs));
+
+  while (pipelineIsCurrent(token)) {
+    const live = findTerminalSession(localId);
+    if (!live || live.exitedAt) {
+      return 'exited';
+    }
+    const now = Date.now();
+    if (now - start >= maxMs) {
+      return 'timeout';
+    }
+    const idleFor = now - (live.lastOutputAt || start);
+    if (idleFor >= idleMs) {
+      return 'idle';
+    }
+    await pipelineSleep(500);
+  }
+  return 'cancelled';
+}
+
+async function pipelineSendLine(localId, text, token) {
+  const session = findTerminalSession(localId);
+  if (!session || session.exitedAt) {
+    throw new Error('終端對話已關閉');
+  }
+  const normalized = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const multiline = normalized.includes('\n');
+
+  if (session.id && hasLiveTerminalSocket(session)) {
+    if (multiline) {
+      // Bracketed paste keeps embedded newlines as newlines instead of
+      // submitting after every line, then a trailing Enter sends the prompt.
+      sendTerminalSocketMessage(session, { type: 'input', data: `[200~${normalized}[201~` });
+      await pipelineSleep(150);
+      if (!pipelineIsCurrent(token)) {
+        return false;
+      }
+      sendTerminalSocketMessage(session, { type: 'input', data: '\r' });
+    } else {
+      sendTerminalSocketMessage(session, { type: 'input', data: `${normalized}\r` });
+    }
+    session.lastOutputAt = Date.now();
+    return true;
+  }
+
+  // No live socket yet: fall back to the REST input path used elsewhere.
+  if (session.id) {
+    await api(`/api/terminals/${encodeURIComponent(session.id)}`, {
+      method: 'POST',
+      body: JSON.stringify({ input: normalized, cursor: session.cursor }),
+    });
+    session.lastOutputAt = Date.now();
+    return true;
+  }
+  throw new Error('終端尚未啟動');
+}
+
+function pipelineLaunchAgentCommand() {
+  const agentId = terminalFavoriteAgentId();
+  if (agentId === 'codex') {
+    applyTerminalCodexCommand({ run: true });
+    return buildTerminalCodexCommand();
+  }
+  if (agentId === 'antigravity') {
+    applyTerminalAntigravityCommand({ run: true });
+    return buildTerminalAntigravityCommand();
+  }
+  applyTerminalClaudeCommand({ run: true });
+  return buildTerminalClaudeCommand();
+}
+
+async function pipelineCheckQuota(agentId) {
+  try {
+    const payload = await api(`/api/ai-quotas?agent=${encodeURIComponent(agentId)}`);
+    const agent = (payload.agents || []).find((item) => item.id === agentId) || (payload.agents || [])[0];
+    if (!agent || agent.status !== 'ok') {
+      return { remaining: null, status: agent?.status || 'error' };
+    }
+    const used = Number(agent.usedPercent);
+    if (Number.isFinite(used)) {
+      return { remaining: Math.round(100 - used), status: 'ok' };
+    }
+    const display = Number(agent.percent);
+    if (agent.direction === 'remaining' && Number.isFinite(display)) {
+      return { remaining: Math.round(display), status: 'ok' };
+    }
+    return { remaining: null, status: 'unknown' };
+  } catch (error) {
+    return { remaining: null, status: 'error', error: error.message };
+  }
+}
+
+async function runTerminalPipeline() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+  if (state.terminalPipelineRun.active) {
+    return;
+  }
+
+  const session = findTerminalSession(state.terminalActiveSessionId);
+  if (!session) {
+    showToast('請先選擇或新增一個終端對話');
+    return;
+  }
+  if (session.readOnly) {
+    showToast('Terminal is read-only from LAN/Tailscale.');
+    return;
+  }
+
+  const config = getTerminalPipeline();
+  const steps = config.steps.filter((step) => step.prompt.trim());
+  if (!steps.length) {
+    showToast('請先輸入至少一段 prompt');
+    return;
+  }
+
+  const token = ++terminalPipelineToken;
+  state.terminalPipelineRun = {
+    active: true,
+    sessionLocalId: session.localId,
+    stepIndex: -1,
+    activeStepId: null,
+    total: steps.length,
+    status: 'running',
+    message: '準備中…',
+    log: [],
+  };
+  const agentId = terminalFavoriteAgentId();
+  const agentLabel = terminalAgentLabel(agentId);
+  const resetCommand = config.resetCommand || TERMINAL_PIPELINE_AGENT_RESET[agentId] || '/clear';
+  const idleMs = config.idleSeconds * 1000;
+  const maxMs = config.maxWaitSeconds * 1000;
+  pipelineLog('info', `Pipeline 啟動（${agentLabel}），共 ${steps.length} 段`);
+  // Maximise the terminal view for the run.
+  state.terminalFocusAppliedSessionId = null;
+  renderTerminalModal();
+
+  let agentStarted = Boolean(session.id && session.running && session.interactive);
+
+  try {
+    for (let i = 0; i < steps.length; i += 1) {
+      if (!pipelineIsCurrent(token)) {
+        break;
+      }
+      const step = steps[i];
+      state.terminalPipelineRun.stepIndex = i;
+      state.terminalPipelineRun.activeStepId = step.id;
+      setPipelineStatus('running', `執行第 ${i + 1}/${steps.length} 段`);
+
+      if (config.quotaGate.enabled) {
+        setPipelineStatus('quota', `檢查 ${terminalAgentLabel(config.quotaGate.agent)} 配額中…`);
+        pipelineLog('info', '查詢剩餘配額（安全模式，不送出 prompt）');
+        const quota = await pipelineCheckQuota(config.quotaGate.agent);
+        if (!pipelineIsCurrent(token)) {
+          break;
+        }
+        if (quota.remaining != null) {
+          pipelineLog('info', `剩餘配額 ${quota.remaining}%（門檻 ${config.quotaGate.minRemaining}%）`);
+          if (quota.remaining < config.quotaGate.minRemaining) {
+            pipelineLog('warn', '剩餘配額低於門檻，停止 pipeline');
+            setPipelineStatus('quota-stopped', `配額不足：剩餘 ${quota.remaining}% < ${config.quotaGate.minRemaining}%`);
+            return;
+          }
+        } else {
+          pipelineLog('warn', `無法判斷配額（${quota.status}）`);
+          if (config.quotaGate.stopOnUnknown) {
+            setPipelineStatus('quota-stopped', `無法判斷配額（${quota.status}），依設定停止`);
+            return;
+          }
+        }
+      }
+
+      let live = findTerminalSession(state.terminalPipelineRun.sessionLocalId);
+      if (!live || live.exitedAt) {
+        agentStarted = false;
+      }
+
+      if (!agentStarted) {
+        pipelineLog('info', `啟動 ${agentLabel}…`);
+        const launched = pipelineLaunchAgentCommand();
+        pipelineLog('info', launched);
+        const ready = await pipelineWaitForSocket(state.terminalPipelineRun.sessionLocalId, token, 25000);
+        if (!pipelineIsCurrent(token)) {
+          break;
+        }
+        if (!ready) {
+          // The session id may exist even if the socket is slow; keep going but warn.
+          pipelineLog('warn', '終端連線較慢，仍嘗試送出 prompt');
+        }
+        // Wait for the agent banner / prompt to settle before the first message.
+        await pipelineWaitForCompletion(state.terminalPipelineRun.sessionLocalId, token, {
+          idleMs: Math.max(2500, Math.min(idleMs, 6000)),
+          minMs: 2000,
+          maxMs: 60000,
+        });
+        agentStarted = true;
+      } else if (step.conversation === 'new') {
+        pipelineLog('info', `開新對話：送出 ${resetCommand}`);
+        await pipelineSendLine(state.terminalPipelineRun.sessionLocalId, resetCommand, token);
+        await pipelineWaitForCompletion(state.terminalPipelineRun.sessionLocalId, token, {
+          idleMs: 2500,
+          minMs: 1200,
+          maxMs: 30000,
+        });
+      } else {
+        pipelineLog('info', '延續目前對話');
+      }
+
+      if (!pipelineIsCurrent(token)) {
+        break;
+      }
+
+      pipelineLog('info', `送出第 ${i + 1} 段 prompt`);
+      await pipelineSendLine(state.terminalPipelineRun.sessionLocalId, step.prompt, token);
+      setPipelineStatus('running', `等待第 ${i + 1}/${steps.length} 段完成…`);
+      const result = await pipelineWaitForCompletion(state.terminalPipelineRun.sessionLocalId, token, {
+        idleMs,
+        minMs: 2500,
+        maxMs,
+      });
+      if (!pipelineIsCurrent(token)) {
+        break;
+      }
+      if (result === 'exited') {
+        pipelineLog('warn', 'Agent 已結束，停止 pipeline');
+        setPipelineStatus('error', 'Agent 已結束');
+        return;
+      }
+      pipelineLog(result === 'timeout' ? 'warn' : 'info', `第 ${i + 1} 段完成（${result === 'timeout' ? '逾時' : '偵測到閒置'}）`);
+    }
+
+    if (pipelineIsCurrent(token)) {
+      pipelineLog('info', '全部 prompt 已送出完成');
+      setPipelineStatus('done', '全部完成');
+    }
+  } catch (error) {
+    if (token === terminalPipelineToken) {
+      pipelineLog('error', error.message);
+      setPipelineStatus('error', error.message);
+    }
+  } finally {
+    if (token === terminalPipelineToken) {
+      state.terminalPipelineRun.active = false;
+      renderTerminalModal();
+    }
+  }
+}
+
+function stopTerminalPipeline() {
+  if (!state.terminalPipelineRun.active) {
+    return;
+  }
+  terminalPipelineToken += 1;
+  state.terminalPipelineRun.active = false;
+  pipelineLog('warn', '使用者已停止 pipeline');
+  setPipelineStatus('stopped', '已停止');
+  renderTerminalModal();
+}
+
+function toggleTerminalFoldSection(key) {
+  if (!TERMINAL_FOLD_SECTIONS.includes(key)) {
+    return;
+  }
+  state.terminalFold[key] = !state.terminalFold[key];
+  // Keep the auto-collapse logic from immediately undoing a manual toggle.
+  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  renderTerminalModal();
+}
+
+function toggleTerminalFocusMode() {
+  const anyOpen = TERMINAL_FOLD_SECTIONS.some((key) => !state.terminalFold[key]);
+  TERMINAL_FOLD_SECTIONS.forEach((key) => {
+    state.terminalFold[key] = anyOpen;
+  });
+  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  renderTerminalModal();
+}
+
+function addTerminalPipelineStep() {
+  if (state.terminalPipelineRun.active) {
+    return;
+  }
+  const config = getTerminalPipeline();
+  config.steps.push(normalizeTerminalPipelineStep({ conversation: 'same' }));
+  saveTerminalPipeline();
+  // Keep the pipeline panel open while editing steps.
+  state.terminalFold.pipeline = false;
+  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  renderTerminalModal();
+}
+
+function deleteTerminalPipelineStep(id) {
+  if (state.terminalPipelineRun.active) {
+    return;
+  }
+  const config = getTerminalPipeline();
+  if (config.steps.length <= 1) {
+    return;
+  }
+  config.steps = config.steps.filter((step) => step.id !== id);
+  saveTerminalPipeline();
+  state.terminalFold.pipeline = false;
+  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  renderTerminalModal();
+}
+
+function setTerminalPipelineConversation(id, mode) {
+  if (state.terminalPipelineRun.active || !TERMINAL_PIPELINE_CONVERSATIONS.has(mode)) {
+    return;
+  }
+  const config = getTerminalPipeline();
+  const step = config.steps.find((item) => item.id === id);
+  if (!step || step.conversation === mode) {
+    return;
+  }
+  step.conversation = mode;
+  saveTerminalPipeline();
+  state.terminalFold.pipeline = false;
+  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  renderTerminalModal();
+}
+
+// Save edits from the pipeline prompt/settings controls without re-rendering, so
+// the field the user is typing in keeps focus.
+function updateTerminalPipelineFromInput(target) {
+  const config = getTerminalPipeline();
+  if (target.dataset.pipelinePrompt !== undefined) {
+    const step = config.steps.find((item) => item.id === target.dataset.pipelinePrompt);
+    if (step) {
+      step.prompt = String(target.value || '').slice(0, TERMINAL_PIPELINE_PROMPT_LIMIT);
+      saveTerminalPipeline();
+    }
+    return true;
+  }
+  if (target.dataset.pipelineIdle !== undefined) {
+    config.idleSeconds = clampNumber(target.value, TERMINAL_PIPELINE_IDLE_MIN, TERMINAL_PIPELINE_IDLE_MAX, config.idleSeconds);
+    saveTerminalPipeline();
+    return true;
+  }
+  if (target.dataset.pipelineMaxwait !== undefined) {
+    config.maxWaitSeconds = clampNumber(target.value, TERMINAL_PIPELINE_MAXWAIT_MIN, TERMINAL_PIPELINE_MAXWAIT_MAX, config.maxWaitSeconds);
+    saveTerminalPipeline();
+    return true;
+  }
+  if (target.dataset.pipelineReset !== undefined) {
+    config.resetCommand = String(target.value || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 120);
+    saveTerminalPipeline();
+    return true;
+  }
+  if (target.dataset.pipelineQuotaThreshold !== undefined) {
+    config.quotaGate.minRemaining = clampNumber(target.value, 0, 100, config.quotaGate.minRemaining);
+    saveTerminalPipeline();
+    return true;
+  }
+  return false;
+}
+
+// Toggle-style controls re-render so dependent fields enable/disable correctly.
+function updateTerminalPipelineFromChange(target) {
+  const config = getTerminalPipeline();
+  if (target.dataset.pipelineQuotaEnabled !== undefined) {
+    config.quotaGate.enabled = target.checked === true;
+    saveTerminalPipeline();
+    renderTerminalModal();
+    return true;
+  }
+  if (target.dataset.pipelineQuotaStrict !== undefined) {
+    config.quotaGate.stopOnUnknown = target.checked === true;
+    saveTerminalPipeline();
+    return true;
+  }
+  if (target.dataset.pipelineQuotaAgent !== undefined) {
+    config.quotaGate.agent = terminalAgentIds.has(target.value) ? target.value : config.quotaGate.agent;
+    saveTerminalPipeline();
+    return true;
+  }
+  return false;
+}
+
+// Closes every terminal session that belongs to a project (and stops a pipeline
+// running against it). Used when a project is refreshed so stale agent/dev
+// processes are torn down before the project is re-read.
+async function closeProjectTerminalSessions(projectName) {
+  if (DEMO_MODE || !projectName) {
+    return 0;
+  }
+
+  if (state.terminalPipelineRun.active) {
+    const runSession = findTerminalSession(state.terminalPipelineRun.sessionLocalId);
+    if (runSession && runSession.projectName === projectName) {
+      stopTerminalPipeline();
+    }
+  }
+
+  const sessions = state.terminalSessions.filter((session) => session.projectName === projectName);
+  sessions.forEach((session) => disposeTerminalView(session.localId));
+
+  try {
+    await api(`/api/projects/${encodeURIComponent(projectName)}/terminals/close`, {
+      method: 'POST',
+      body: '{}',
+    });
+  } catch (error) {
+    // Best-effort: even if the server call fails we still drop local references.
+  }
+
+  const localIds = new Set(sessions.map((session) => session.localId));
+  sessions.forEach((session) => {
+    if (session.id) {
+      state.terminalWorkspaceMetaBySessionId.delete(session.id);
+    }
+  });
+  state.terminalSessions = state.terminalSessions.filter((session) => !localIds.has(session.localId));
+
+  if (localIds.has(state.terminalActiveSessionId)) {
+    const remaining = terminalSessionsForProject(state.terminalProjectName);
+    state.terminalActiveSessionId = remaining[0]?.localId || null;
+    rememberTerminalActiveSession();
+  }
+  if (state.terminalFocusAppliedSessionId && localIds.has(state.terminalFocusAppliedSessionId)) {
+    state.terminalFocusAppliedSessionId = null;
+  }
+
+  saveTerminalWorkspaceState();
+  if (state.terminalModalOpen) {
+    renderTerminalModal();
+  }
+  return sessions.length;
+}
+
 async function closeTerminalDialog(localId) {
   const session = findTerminalSession(localId);
   if (!session) {
@@ -7407,6 +8265,7 @@ elements.quotaModal.addEventListener('click', (event) => {
 });
 elements.closeTerminalModal.addEventListener('click', hideTerminalManager);
 elements.backToHomeFromTerminal.addEventListener('click', hideTerminalManager);
+elements.terminalFocusToggle?.addEventListener('click', toggleTerminalFocusMode);
 elements.addTerminalSession.addEventListener('click', () => {
   if (!terminalCanAddSession()) {
     showToast('Terminal is read-only from LAN/Tailscale.');
@@ -7548,6 +8407,10 @@ elements.terminalTabs.addEventListener('pointercancel', () => {
   clearTerminalTabDragClasses();
 });
 elements.terminalWorkspace.addEventListener('change', (event) => {
+  if (updateTerminalPipelineFromChange(event.target)) {
+    return;
+  }
+
   const shellSelect = event.target.closest('select[data-terminal-shell]');
   if (shellSelect) {
     const session = findTerminalSession(shellSelect.dataset.terminalShell);
@@ -7624,6 +8487,10 @@ elements.terminalWorkspace.addEventListener('change', (event) => {
 
 });
 elements.terminalWorkspace.addEventListener('input', (event) => {
+  if (updateTerminalPipelineFromInput(event.target)) {
+    return;
+  }
+
   const claudeCustomModelInput = event.target.closest('[data-terminal-claude-custom-model]');
   if (claudeCustomModelInput) {
     state.terminalClaude = normalizeTerminalClaudeSettings({
@@ -7708,6 +8575,52 @@ elements.terminalWorkspace.addEventListener('focusout', (event) => {
   }
 });
 elements.terminalWorkspace.addEventListener('click', (event) => {
+  const foldToggle = event.target.closest('button[data-terminal-fold]');
+  if (foldToggle) {
+    toggleTerminalFoldSection(foldToggle.dataset.terminalFold);
+    return;
+  }
+
+  const pipelineRunButton = event.target.closest('button[data-pipeline-run]');
+  if (pipelineRunButton) {
+    runTerminalPipeline();
+    return;
+  }
+
+  const pipelineStopButton = event.target.closest('button[data-pipeline-stop]');
+  if (pipelineStopButton) {
+    stopTerminalPipeline();
+    return;
+  }
+
+  const pipelineAddButton = event.target.closest('button[data-pipeline-add]');
+  if (pipelineAddButton) {
+    addTerminalPipelineStep();
+    return;
+  }
+
+  const pipelineDeleteButton = event.target.closest('button[data-pipeline-delete]');
+  if (pipelineDeleteButton) {
+    deleteTerminalPipelineStep(pipelineDeleteButton.dataset.pipelineDelete);
+    return;
+  }
+
+  const pipelineConversationButton = event.target.closest('button[data-pipeline-conversation]');
+  if (pipelineConversationButton) {
+    setTerminalPipelineConversation(
+      pipelineConversationButton.dataset.pipelineConversation,
+      pipelineConversationButton.dataset.pipelineConversationMode,
+    );
+    return;
+  }
+
+  const pipelineLogToggle = event.target.closest('button[data-pipeline-log-toggle]');
+  if (pipelineLogToggle) {
+    state.terminalPipelineLogExpanded = !state.terminalPipelineLogExpanded;
+    renderTerminalModal();
+    return;
+  }
+
   const agentTabButton = event.target.closest('button[data-terminal-agent-tab]');
   if (agentTabButton) {
     switchTerminalFavoriteAgent(agentTabButton.dataset.terminalAgentTab);
@@ -7914,6 +8827,15 @@ elements.terminalWorkspace.addEventListener('click', (event) => {
   }
 });
 elements.terminalWorkspace.addEventListener('keydown', (event) => {
+  const pipelinePrompt = event.target.closest('[data-pipeline-prompt]');
+  if (pipelinePrompt) {
+    if (event.key === 'Enter' && event.ctrlKey && !state.terminalPipelineRun.active) {
+      event.preventDefault();
+      runTerminalPipeline();
+    }
+    return;
+  }
+
   const claudeFlagDraftInput = event.target.closest('[data-terminal-claude-flag-draft]');
   if (claudeFlagDraftInput) {
     if (event.key === 'Enter') {
@@ -8013,6 +8935,7 @@ syncTerminalFavoritesFromActiveAgent();
 state.terminalClaude = readTerminalClaudeSettings();
 state.terminalCodex = readTerminalCodexSettings();
 state.terminalAntigravity = readTerminalAntigravitySettings();
+state.terminalPipeline = readTerminalPipeline();
 restoreTerminalWorkspaceState();
 const terminalPreferencesReady = loadTerminalPreferences({ silent: true });
 applyTheme(readThemePreference());
