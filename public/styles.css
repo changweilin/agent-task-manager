@@ -289,6 +289,27 @@ h1 {
     transform 150ms ease;
 }
 
+.app-tooltip {
+  position: fixed;
+  z-index: 60;
+  max-width: 280px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: #0b0f0e;
+  color: #f1f5f3;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.app-tooltip[hidden] {
+  display: none;
+}
+
 .primary-button {
   height: 42px;
   display: inline-flex;
@@ -1715,13 +1736,17 @@ a.page-link:hover {
   font-weight: 760;
 }
 
+#terminalModal {
+  padding: 8px;
+}
+
 .terminal-modal-panel {
-  width: min(1080px, 100%);
-  max-height: calc(100dvh - 28px);
+  width: min(1600px, 100%);
+  max-height: calc(100dvh - 16px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 14px;
+  padding: 10px 12px;
 }
 
 .terminal-heading {
@@ -1770,12 +1795,12 @@ a.page-link:hover {
 }
 
 .terminal-project-bar {
-  min-height: 34px;
+  min-height: 30px;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
-  padding: 6px;
+  margin-top: 6px;
+  padding: 5px 6px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1864,7 +1889,7 @@ a.page-link:hover {
   display: flex;
   flex: 0 0 auto;
   gap: 4px;
-  margin-top: 10px;
+  margin-top: 6px;
   overflow-x: auto;
   padding-bottom: 3px;
 }
@@ -2065,12 +2090,15 @@ a.page-link:hover {
 .terminal-workspace {
   flex: 1 1 auto;
   min-height: 0;
-  margin-top: 10px;
-  overflow: auto;
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding-right: 2px;
 }
 
 .terminal-session {
+  flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -3179,7 +3207,8 @@ a.page-link:hover {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px;
-  margin-top: 10px;
+  flex: 0 0 auto;
+  margin-top: 6px;
 }
 
 .terminal-command-input {
@@ -3220,86 +3249,83 @@ a.page-link:hover {
   margin-top: 10px;
 }
 
-/* Collapsible terminal panels --------------------------------------------- */
-.terminal-foldable {
-  margin-top: 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-muted);
-  overflow: hidden;
-}
-
-.terminal-foldable-header {
+/* Content tabs (終端 / 啟動 / Pipeline / 設定 / 指令) ---------------------- */
+.terminal-content-tabs {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-}
-
-.terminal-foldable-toggle {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 4px;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-weight: 720;
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.terminal-foldable-chevron {
-  display: inline-flex;
+  gap: 4px;
   flex: 0 0 auto;
-  transition: transform 0.15s ease;
-  transform: rotate(90deg);
+  margin-top: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
 }
 
-.terminal-foldable.is-collapsed .terminal-foldable-chevron {
-  transform: rotate(0deg);
-}
-
-.terminal-foldable-chevron svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: var(--muted);
-  stroke-width: 2.4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.terminal-foldable-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.terminal-content-tab {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  border-radius: 7px 7px 0 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  padding: 6px 12px;
+  cursor: pointer;
   white-space: nowrap;
 }
 
-.terminal-foldable-badge {
-  flex: 0 0 auto;
-  padding: 1px 7px;
+.terminal-content-tab:hover {
+  color: var(--text);
+  background: var(--surface-muted);
+}
+
+.terminal-content-tab.is-active {
+  color: var(--teal);
+  background: var(--surface-muted);
+  border-color: var(--border);
+  border-bottom-color: var(--surface-muted);
+}
+
+.terminal-content-tab-dot {
+  width: 7px;
+  height: 7px;
   border-radius: 999px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 700;
+  background: var(--teal);
+  box-shadow: 0 0 0 2px var(--teal-soft);
 }
 
-.terminal-foldable-body {
-  padding: 0 8px 8px;
+.terminal-tab-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding-top: 8px;
 }
 
-.terminal-foldable-body > .terminal-setup,
-.terminal-foldable-body > .terminal-claude-launcher,
-.terminal-foldable-body > .terminal-favorites,
-.terminal-foldable-body > .terminal-agent-tabs {
+.terminal-tab-content.terminal-tab-terminal {
+  overflow: hidden;
+}
+
+.terminal-tab-content > .terminal-setup,
+.terminal-tab-content > .terminal-claude-launcher,
+.terminal-tab-content > .terminal-favorites,
+.terminal-tab-content > .terminal-agent-tabs,
+.terminal-tab-content > .terminal-pipeline {
   margin-top: 0;
+}
+
+.terminal-pipeline-runbar {
+  flex: 0 0 auto;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-muted);
 }
 
 /* Pipeline prompting ------------------------------------------------------- */
@@ -3656,16 +3682,33 @@ a.page-link:hover {
 }
 
 .terminal-modal-panel.is-focus-mode {
-  width: min(1400px, 100%);
+  width: 100%;
   max-height: calc(100dvh - 12px);
 }
 
-.terminal-modal-panel.is-focus-mode .terminal-foldable {
+/* In the 終端 tab the surface fills all remaining height so almost no vertical
+   space is wasted. */
+.terminal-tab-terminal .terminal-touch-viewport {
+  flex: 1 1 auto;
+  min-height: 0;
   margin-top: 6px;
 }
 
-.terminal-modal-panel.is-focus-mode .terminal-output {
-  height: clamp(320px, 60vh, 900px);
+.terminal-tab-terminal .terminal-touch-canvas {
+  height: 100%;
+}
+
+.terminal-tab-terminal .terminal-xterm {
+  height: 100%;
+  min-height: 160px;
+  margin-top: 0;
+}
+
+.terminal-tab-terminal .terminal-output {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  margin-top: 6px;
 }
 
 .terminal-touch-viewport {
@@ -3721,7 +3764,8 @@ a.page-link:hover {
 }
 
 .terminal-session-footer {
-  margin-top: 8px;
+  flex: 0 0 auto;
+  margin-top: 6px;
   color: var(--muted);
   font-size: 11px;
 }

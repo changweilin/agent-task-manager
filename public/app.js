@@ -344,7 +344,14 @@ const TERMINAL_PIPELINE_IDLE_MAX = 120;
 const TERMINAL_PIPELINE_MAXWAIT_MIN = 30;
 const TERMINAL_PIPELINE_MAXWAIT_MAX = 7200;
 const TERMINAL_PIPELINE_PROMPT_LIMIT = 16000;
-const TERMINAL_FOLD_SECTIONS = ['setup', 'agent', 'pipeline', 'favorites'];
+const TERMINAL_CONTENT_TABS = [
+  { id: 'terminal', label: '終端' },
+  { id: 'agent', label: '啟動' },
+  { id: 'pipeline', label: 'Pipeline' },
+  { id: 'setup', label: '設定' },
+  { id: 'favorites', label: '指令' },
+];
+const TERMINAL_CONTENT_TAB_IDS = new Set(TERMINAL_CONTENT_TABS.map((tab) => tab.id));
 const AI_QUOTA_MONITOR_AGENTS = [
   {
     id: 'claude',
@@ -755,11 +762,14 @@ const state = {
     message: '',
     log: [],
   },
-  // Per-section collapse state for the terminal workspace. true = collapsed.
-  terminalFold: { setup: false, agent: false, pipeline: false, favorites: true },
-  // Tracks the session we already auto-collapsed for once a run started, so we
-  // don't fight the user re-expanding a section while a process keeps running.
+  // Which content tab (終端 / 啟動 / Pipeline / 設定 / 指令) is showing. null = derive
+  // from the session (launcher before a CLI is live, terminal once it is).
+  terminalContentTab: null,
+  // Tracks the session we already auto-switched to the 終端 tab for, so we don't
+  // keep yanking the user back while a process stays live.
   terminalFocusAppliedSessionId: null,
+  // Manual full-width toggle (放大), independent of the live auto full-width.
+  terminalManualFocus: false,
   terminalPipelineLogExpanded: false,
 };
 
@@ -5777,26 +5787,38 @@ function renderTerminalScrollControls(session) {
   `;
 }
 
-function renderTerminalFoldable(key, { title, badge = '', headerExtra = '', body }) {
-  const collapsed = state.terminalFold[key] === true;
+function effectiveTerminalContentTab(session) {
+  if (state.terminalContentTab && TERMINAL_CONTENT_TAB_IDS.has(state.terminalContentTab)) {
+    return state.terminalContentTab;
+  }
+  const isLive = Boolean(session?.id && session.running && session.interactive);
+  return isLive || session?.id ? 'terminal' : 'agent';
+}
+
+function renderTerminalContentTabBar(activeTab) {
   return `
-    <section class="terminal-foldable ${collapsed ? 'is-collapsed' : ''}" data-terminal-fold-section="${escapeHtml(key)}">
-      <div class="terminal-foldable-header">
-        <button class="terminal-foldable-toggle" data-terminal-fold="${escapeHtml(key)}" type="button" aria-expanded="${collapsed ? 'false' : 'true'}">
-          <span class="terminal-foldable-chevron">${icons.chevron}</span>
-          <span class="terminal-foldable-title">${escapeHtml(title)}</span>
-          ${badge ? `<span class="terminal-foldable-badge">${badge}</span>` : ''}
-        </button>
-        ${headerExtra}
-      </div>
-      <div class="terminal-foldable-body" ${collapsed ? 'hidden' : ''}>
-        ${body}
-      </div>
-    </section>
+    <div class="terminal-content-tabs" role="tablist" aria-label="終端內容分頁">
+      ${TERMINAL_CONTENT_TABS.map((tab) => {
+        const active = tab.id === activeTab;
+        const running = tab.id === 'pipeline' && state.terminalPipelineRun.active;
+        return `
+          <button
+            class="terminal-content-tab ${active ? 'is-active' : ''}"
+            data-terminal-content-tab-button="${escapeHtml(tab.id)}"
+            type="button"
+            role="tab"
+            aria-selected="${active ? 'true' : 'false'}"
+          >${escapeHtml(tab.label)}${running ? '<span class="terminal-content-tab-dot" aria-hidden="true"></span>' : ''}</button>
+        `;
+      }).join('')}
+    </div>
   `;
 }
 
 function terminalFocusActive(session) {
+  if (state.terminalManualFocus) {
+    return true;
+  }
   if (!session) {
     return false;
   }
@@ -5806,12 +5828,15 @@ function terminalFocusActive(session) {
   return Boolean(session.id && session.running && session.interactive);
 }
 
-// When a process starts running we collapse the non-essential panels once so the
-// terminal gets the most room. The user can re-open any panel afterwards.
+// When a process becomes live we switch to the 終端 tab once (unless a pipeline
+// is driving the run, where the user likely wants the Pipeline tab).
 function applyTerminalFocusAuto(session) {
-  if (terminalFocusActive(session)) {
+  const live = Boolean(session?.id && session.running && session.interactive);
+  if (live) {
     if (state.terminalFocusAppliedSessionId !== session.localId) {
-      state.terminalFold = { setup: true, agent: true, pipeline: true, favorites: true };
+      if (!state.terminalPipelineRun.active) {
+        state.terminalContentTab = 'terminal';
+      }
       state.terminalFocusAppliedSessionId = session.localId;
     }
   } else if (state.terminalFocusAppliedSessionId === session.localId) {
@@ -5868,19 +5893,19 @@ function renderPipelineRunState() {
   }
   const run = state.terminalPipelineRun;
   const meta = pipelineStatusMeta();
-  const badge = elements.terminalWorkspace.querySelector('[data-pipeline-status-badge]');
-  if (badge) {
+  const progressText = run.total ? `${Math.max(0, run.stepIndex + 1)}/${run.total}` : '';
+  // The status badge/progress/message can appear both in the Pipeline tab and in
+  // the persistent run bar, so update every matching node.
+  elements.terminalWorkspace.querySelectorAll('[data-pipeline-status-badge]').forEach((badge) => {
     badge.textContent = meta.label;
     badge.className = `terminal-pipeline-badge ${meta.cls}`;
-  }
-  const progress = elements.terminalWorkspace.querySelector('[data-pipeline-progress]');
-  if (progress) {
-    progress.textContent = run.total ? `${Math.max(0, run.stepIndex + 1)}/${run.total}` : '';
-  }
-  const message = elements.terminalWorkspace.querySelector('[data-pipeline-status-message]');
-  if (message) {
+  });
+  elements.terminalWorkspace.querySelectorAll('[data-pipeline-progress]').forEach((progress) => {
+    progress.textContent = progressText;
+  });
+  elements.terminalWorkspace.querySelectorAll('[data-pipeline-status-message]').forEach((message) => {
     message.textContent = run.message || '';
-  }
+  });
   const log = elements.terminalWorkspace.querySelector('[data-pipeline-log]');
   if (log) {
     log.innerHTML = renderPipelineLogEntries();
@@ -5889,6 +5914,30 @@ function renderPipelineRunState() {
   elements.terminalWorkspace.querySelectorAll('[data-pipeline-step]').forEach((node) => {
     node.classList.toggle('is-active', run.active && node.dataset.pipelineStep === run.activeStepId);
   });
+  // Keep the Pipeline tab's running dot in sync.
+  const pipelineTabButton = elements.terminalWorkspace.querySelector('[data-terminal-content-tab-button="pipeline"]');
+  if (pipelineTabButton) {
+    const hasDot = Boolean(pipelineTabButton.querySelector('.terminal-content-tab-dot'));
+    if (run.active && !hasDot) {
+      pipelineTabButton.insertAdjacentHTML('beforeend', '<span class="terminal-content-tab-dot" aria-hidden="true"></span>');
+    } else if (!run.active && hasDot) {
+      pipelineTabButton.querySelector('.terminal-content-tab-dot')?.remove();
+    }
+  }
+}
+
+function renderPipelineControls(session, { compact = false } = {}) {
+  const running = state.terminalPipelineRun.active;
+  return `
+    <div class="terminal-pipeline-controls ${compact ? 'is-compact' : ''}">
+      ${renderPipelineStatusBadge()}
+      ${running
+        ? `<button class="copy-url danger-action terminal-pipeline-stop" data-pipeline-stop type="button">${icons.stop}<span>停止</span></button>`
+        : (compact
+          ? ''
+          : `<button class="copy-url primary-action terminal-pipeline-run" data-pipeline-run type="button" ${session.readOnly ? 'disabled' : ''}>${icons.start}<span>執行</span></button>`)}
+    </div>
+  `;
 }
 
 function renderTerminalPipeline(session) {
@@ -5916,18 +5965,11 @@ function renderTerminalPipeline(session) {
     `;
   }).join('');
 
-  const headerExtra = `
-    <div class="terminal-pipeline-controls">
-      ${renderPipelineStatusBadge()}
-      ${running
-        ? `<button class="copy-url danger-action terminal-pipeline-stop" data-pipeline-stop type="button">${icons.stop}<span>停止</span></button>`
-        : `<button class="copy-url primary-action terminal-pipeline-run" data-pipeline-run type="button" ${session.readOnly ? 'disabled' : ''}>${icons.start}<span>執行</span></button>`}
-    </div>
-  `;
-
-  const body = `
-    <p class="terminal-pipeline-hint">每段 prompt 會依序送給目前的 ${escapeHtml(agentLabel)}；可逐段設定延續同一對話或切換新對話，並依剩餘配額自動停止。</p>
-    <div class="terminal-pipeline-steps">${stepsHtml}</div>
+  return `
+    <div class="terminal-pipeline">
+      ${renderPipelineControls(session)}
+      <p class="terminal-pipeline-hint">每段 prompt 會依序送給目前的 ${escapeHtml(agentLabel)}；可逐段設定延續同一對話或切換新對話，並依剩餘配額自動停止。</p>
+      <div class="terminal-pipeline-steps">${stepsHtml}</div>
     <button class="copy-url terminal-pipeline-add" data-pipeline-add type="button" ${running ? 'disabled' : ''}>${icons.add}<span>新增一段</span></button>
     <div class="terminal-pipeline-settings">
       <label class="terminal-pipeline-field">
@@ -5965,17 +6007,12 @@ function renderTerminalPipeline(session) {
         </label>
       </div>
     </div>
-    <div class="terminal-pipeline-log-controls">
-      <button class="terminal-pipeline-log-toggle" data-pipeline-log-toggle type="button">${state.terminalPipelineLogExpanded ? '隱藏執行紀錄' : '顯示執行紀錄'}</button>
+      <div class="terminal-pipeline-log-controls">
+        <button class="terminal-pipeline-log-toggle" data-pipeline-log-toggle type="button">${state.terminalPipelineLogExpanded ? '隱藏執行紀錄' : '顯示執行紀錄'}</button>
+      </div>
+      ${state.terminalPipelineLogExpanded ? `<div class="terminal-pipeline-log" data-pipeline-log>${renderPipelineLogEntries()}</div>` : ''}
     </div>
-    ${state.terminalPipelineLogExpanded ? `<div class="terminal-pipeline-log" data-pipeline-log>${renderPipelineLogEntries()}</div>` : ''}
   `;
-
-  return renderTerminalFoldable('pipeline', {
-    title: 'Pipeline 連續提示',
-    headerExtra,
-    body,
-  });
 }
 
 function renderTerminalModal() {
@@ -6002,8 +6039,7 @@ function renderTerminalModal() {
     terminalPanelEl.classList.toggle('is-focus-mode', focusActive);
   }
   if (elements.terminalFocusToggle) {
-    const maximized = TERMINAL_FOLD_SECTIONS.every((key) => state.terminalFold[key]);
-    elements.terminalFocusToggle.setAttribute('aria-pressed', maximized ? 'true' : 'false');
+    elements.terminalFocusToggle.setAttribute('aria-pressed', focusActive ? 'true' : 'false');
   }
 
   if (!activeSession) {
@@ -6040,38 +6076,52 @@ function renderTerminalModal() {
       : 'Optional command, e.g. claude';
   const commandButtonLabel = activeSession.readOnly ? (agentLaunchOnly ? 'Launch only' : 'Read-only') : activeSession.id ? 'Send' : 'Start';
 
-  const setupFoldable = renderTerminalFoldable('setup', {
-    title: '終端設定',
-    badge: escapeHtml(String(projectPort)),
-    body: renderTerminalSetup(activeSession, options, project, sessionTitleControl, projectPort),
-  });
-  const agentFoldable = renderTerminalFoldable('agent', {
-    title: 'Agent 啟動器',
-    badge: escapeHtml(terminalAgentLabel(terminalFavoriteAgentId())),
-    body: `
+  // The workspace shows one content tab at a time (終端 / 啟動 / Pipeline / 設定 /
+  // 指令) so the terminal can use the full height. We leave state.terminalContentTab
+  // as null until the user (or a live transition) picks one, so a fresh draft
+  // defaults to the launcher and a live session to the terminal.
+  const activeTab = effectiveTerminalContentTab(activeSession);
+
+  const commandRow = `
+    <div class="terminal-command-row">
+      <textarea class="terminal-command-input" data-terminal-input="${escapeHtml(activeSession.localId)}" rows="2" spellcheck="false" aria-label="Terminal command" placeholder="${commandPlaceholder}" ${commandReadOnly}></textarea>
+      <button class="copy-url primary-action terminal-run-button" data-terminal-run="${escapeHtml(activeSession.localId)}" type="button" ${commandDisabled}>
+        <span class="terminal-run-button-content">${icons.start}<span>${commandButtonLabel}</span></span>
+      </button>
+    </div>
+  `;
+
+  let tabBody = '';
+  if (activeTab === 'agent') {
+    tabBody = `
       ${renderTerminalAgentTabs()}
       ${renderTerminalActiveAgentLauncher(activeSession, options)}
-    `,
-  });
-  const pipelineFoldable = renderTerminalPipeline(activeSession);
-  const favoritesFoldable = renderTerminalFoldable('favorites', {
-    title: '我的最愛指令',
-    body: renderTerminalFavorites(activeSession),
-  });
+    `;
+  } else if (activeTab === 'pipeline') {
+    tabBody = renderTerminalPipeline(activeSession);
+  } else if (activeTab === 'setup') {
+    tabBody = renderTerminalSetup(activeSession, options, project, sessionTitleControl, projectPort);
+  } else if (activeTab === 'favorites') {
+    tabBody = renderTerminalFavorites(activeSession);
+  } else {
+    tabBody = `
+      ${renderTerminalScrollControls(activeSession)}
+      ${terminalSurface}
+      ${commandRow}
+    `;
+  }
+
+  // While a pipeline runs, keep its status + stop control visible on every tab.
+  const pipelineBar = state.terminalPipelineRun.active && activeTab !== 'pipeline'
+    ? `<div class="terminal-pipeline-runbar">${renderPipelineControls(activeSession, { compact: true })}</div>`
+    : '';
 
   elements.terminalWorkspace.innerHTML = `
     <section class="terminal-session ${focusActive ? 'is-focus-mode' : ''}" data-terminal-panel="${escapeHtml(activeSession.localId)}">
-      ${setupFoldable}
-      ${agentFoldable}
-      ${pipelineFoldable}
-      ${favoritesFoldable}
-      ${renderTerminalScrollControls(activeSession)}
-      ${terminalSurface}
-      <div class="terminal-command-row">
-        <textarea class="terminal-command-input" data-terminal-input="${escapeHtml(activeSession.localId)}" rows="2" spellcheck="false" aria-label="Terminal command" placeholder="${commandPlaceholder}" ${commandReadOnly}></textarea>
-        <button class="copy-url primary-action terminal-run-button" data-terminal-run="${escapeHtml(activeSession.localId)}" type="button" ${commandDisabled}>
-          <span class="terminal-run-button-content">${icons.start}<span>${commandButtonLabel}</span></span>
-        </button>
+      ${renderTerminalContentTabBar(activeTab)}
+      ${pipelineBar}
+      <div class="terminal-tab-content terminal-tab-${escapeHtml(activeTab)}" data-terminal-content="${escapeHtml(activeTab)}">
+        ${tabBody}
       </div>
       <div class="terminal-session-footer">
         <span data-terminal-status class="terminal-status ${activeSession.exitedAt ? 'is-closed' : activeSession.running ? 'is-running' : 'is-draft'}">${terminalStatusLabel(activeSession)}</span>
@@ -6084,10 +6134,12 @@ function renderTerminalModal() {
   if (input) {
     input.value = activeSession.input;
   }
-  if (activeSession.id && activeSession.interactive) {
-    mountTerminalView(activeSession);
-  } else {
-    updateTerminalSessionView(activeSession);
+  if (activeTab === 'terminal') {
+    if (activeSession.id && activeSession.interactive) {
+      mountTerminalView(activeSession);
+    } else {
+      updateTerminalSessionView(activeSession);
+    }
   }
   disposeUnusedTerminalViews();
 }
@@ -7151,12 +7203,23 @@ async function pipelineSendLine(localId, text, token) {
     return true;
   }
 
-  // No live socket yet: fall back to the REST input path used elsewhere.
+  // No live socket (e.g. the user is on another content tab): send over REST
+  // with raw writes so multi-line prompts still use bracketed paste.
   if (session.id) {
-    await api(`/api/terminals/${encodeURIComponent(session.id)}`, {
+    const post = (payload) => api(`/api/terminals/${encodeURIComponent(session.id)}`, {
       method: 'POST',
-      body: JSON.stringify({ input: normalized, cursor: session.cursor }),
+      body: JSON.stringify(payload),
     });
+    if (multiline) {
+      await post({ input: `[200~${normalized}[201~`, raw: true });
+      await pipelineSleep(150);
+      if (!pipelineIsCurrent(token)) {
+        return false;
+      }
+      await post({ input: '\r', raw: true });
+    } else {
+      await post({ input: `${normalized}\r`, raw: true });
+    }
     session.lastOutputAt = Date.now();
     return true;
   }
@@ -7241,8 +7304,6 @@ async function runTerminalPipeline() {
   const idleMs = config.idleSeconds * 1000;
   const maxMs = config.maxWaitSeconds * 1000;
   pipelineLog('info', `Pipeline 啟動（${agentLabel}），共 ${steps.length} 段`);
-  // Maximise the terminal view for the run.
-  state.terminalFocusAppliedSessionId = null;
   renderTerminalModal();
 
   let agentStarted = Boolean(session.id && session.running && session.interactive);
@@ -7367,22 +7428,16 @@ function stopTerminalPipeline() {
   renderTerminalModal();
 }
 
-function toggleTerminalFoldSection(key) {
-  if (!TERMINAL_FOLD_SECTIONS.includes(key)) {
+function setTerminalContentTab(tabId) {
+  if (!TERMINAL_CONTENT_TAB_IDS.has(tabId) || state.terminalContentTab === tabId) {
     return;
   }
-  state.terminalFold[key] = !state.terminalFold[key];
-  // Keep the auto-collapse logic from immediately undoing a manual toggle.
-  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  state.terminalContentTab = tabId;
   renderTerminalModal();
 }
 
 function toggleTerminalFocusMode() {
-  const anyOpen = TERMINAL_FOLD_SECTIONS.some((key) => !state.terminalFold[key]);
-  TERMINAL_FOLD_SECTIONS.forEach((key) => {
-    state.terminalFold[key] = anyOpen;
-  });
-  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  state.terminalManualFocus = !state.terminalManualFocus;
   renderTerminalModal();
 }
 
@@ -7393,9 +7448,7 @@ function addTerminalPipelineStep() {
   const config = getTerminalPipeline();
   config.steps.push(normalizeTerminalPipelineStep({ conversation: 'same' }));
   saveTerminalPipeline();
-  // Keep the pipeline panel open while editing steps.
-  state.terminalFold.pipeline = false;
-  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  state.terminalContentTab = 'pipeline';
   renderTerminalModal();
 }
 
@@ -7409,8 +7462,7 @@ function deleteTerminalPipelineStep(id) {
   }
   config.steps = config.steps.filter((step) => step.id !== id);
   saveTerminalPipeline();
-  state.terminalFold.pipeline = false;
-  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  state.terminalContentTab = 'pipeline';
   renderTerminalModal();
 }
 
@@ -7425,8 +7477,7 @@ function setTerminalPipelineConversation(id, mode) {
   }
   step.conversation = mode;
   saveTerminalPipeline();
-  state.terminalFold.pipeline = false;
-  state.terminalFocusAppliedSessionId = state.terminalActiveSessionId;
+  state.terminalContentTab = 'pipeline';
   renderTerminalModal();
 }
 
@@ -8575,9 +8626,9 @@ elements.terminalWorkspace.addEventListener('focusout', (event) => {
   }
 });
 elements.terminalWorkspace.addEventListener('click', (event) => {
-  const foldToggle = event.target.closest('button[data-terminal-fold]');
-  if (foldToggle) {
-    toggleTerminalFoldSection(foldToggle.dataset.terminalFold);
+  const contentTabButton = event.target.closest('button[data-terminal-content-tab-button]');
+  if (contentTabButton) {
+    setTerminalContentTab(contentTabButton.dataset.terminalContentTabButton);
     return;
   }
 
@@ -8926,6 +8977,81 @@ elements.autoRestoreInput.addEventListener('change', updateSettings);
 elements.autoRestartInput.addEventListener('change', updateSettings);
 elements.healthThresholdInput.addEventListener('change', updateSettings);
 elements.reloadLogsButton.addEventListener('click', loadLogs);
+
+// ---------------------------------------------------------------------------
+// Hover tooltips for the project-list action buttons. We reuse each button's
+// existing `title` (suppressing the slow native tooltip while hovered) and show
+// a styled bubble immediately instead.
+// ---------------------------------------------------------------------------
+const appTooltip = document.createElement('div');
+appTooltip.className = 'app-tooltip';
+appTooltip.hidden = true;
+document.body.appendChild(appTooltip);
+let appTooltipTarget = null;
+
+function positionAppTooltip(el) {
+  const rect = el.getBoundingClientRect();
+  const tipRect = appTooltip.getBoundingClientRect();
+  let top = rect.top - tipRect.height - 8;
+  if (top < 4) {
+    top = rect.bottom + 8;
+  }
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  left = Math.max(6, Math.min(left, window.innerWidth - tipRect.width - 6));
+  appTooltip.style.top = `${Math.round(top)}px`;
+  appTooltip.style.left = `${Math.round(left)}px`;
+}
+
+function showAppTooltip(el) {
+  const text = el.getAttribute('title') || el.dataset.appTooltip || el.getAttribute('aria-label') || '';
+  if (!text) {
+    return;
+  }
+  // Stash + remove the native title so the browser's own tooltip stays hidden.
+  if (el.hasAttribute('title')) {
+    el.dataset.appTooltip = el.getAttribute('title');
+    el.removeAttribute('title');
+  }
+  appTooltipTarget = el;
+  appTooltip.textContent = el.dataset.appTooltip || text;
+  appTooltip.hidden = false;
+  positionAppTooltip(el);
+}
+
+function hideAppTooltip() {
+  if (appTooltipTarget && appTooltipTarget.dataset.appTooltip && !appTooltipTarget.hasAttribute('title')) {
+    appTooltipTarget.setAttribute('title', appTooltipTarget.dataset.appTooltip);
+    delete appTooltipTarget.dataset.appTooltip;
+  }
+  appTooltipTarget = null;
+  appTooltip.hidden = true;
+}
+
+elements.mainPanel?.addEventListener('pointerover', (event) => {
+  if (event.pointerType === 'touch') {
+    return;
+  }
+  const button = event.target.closest('.row-action');
+  if (!button || button === appTooltipTarget) {
+    return;
+  }
+  hideAppTooltip();
+  showAppTooltip(button);
+});
+elements.mainPanel?.addEventListener('pointerout', (event) => {
+  if (!appTooltipTarget) {
+    return;
+  }
+  const related = event.relatedTarget;
+  if (related && appTooltipTarget.contains(related)) {
+    return;
+  }
+  if (event.target === appTooltipTarget || appTooltipTarget.contains(event.target)) {
+    hideAppTooltip();
+  }
+});
+elements.mainPanel?.addEventListener('pointerdown', hideAppTooltip);
+window.addEventListener('scroll', hideAppTooltip, true);
 
 applyDemoModeUi();
 const terminalFavoriteState = readTerminalFavorites();

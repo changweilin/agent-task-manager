@@ -6063,7 +6063,13 @@ async function handleApi(request, response, url) {
     if (request.method === 'POST') {
       const body = await readRequestBody(request);
       try {
-        writeTerminalInput(session, body.input || '');
+        // raw = write bytes verbatim (used for bracketed-paste / control keys);
+        // otherwise treat the body as a command line and append a newline.
+        if (body.raw === true) {
+          writeTerminalData(session, body.input || '');
+        } else {
+          writeTerminalInput(session, body.input || '');
+        }
       } catch (error) {
         sendError(response, 409, error.message);
         return;
@@ -7042,3 +7048,58 @@ server.listen(port, host, () => {
     }
   })();
 });
+
+let shuttingDown = false;
+
+// When ATM itself exits, tear down every managed project dev server (and any
+// open terminal/agent sessions) so nothing is left running in the background.
+async function shutdownAtm(signal) {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  console.log(`\nAgent Task Manager (ATM) received ${signal}; stopping managed project servers...`);
+
+  const pids = new Set();
+  try {
+    for (const entry of getState().projects) {
+      if (entry?.pid && processIsRunning(entry.pid)) {
+        pids.add(Number(entry.pid));
+      }
+    }
+  } catch (error) {
+    // Best effort: still try the in-memory children below.
+  }
+  for (const child of childProcesses.values()) {
+    if (child?.pid) {
+      pids.add(Number(child.pid));
+    }
+  }
+
+  const tasks = [...pids].map((pid) => stopProcessTree(pid).catch(() => {}));
+  for (const id of [...terminalSessions.keys()]) {
+    tasks.push(closeTerminalSession(id).catch(() => {}));
+  }
+
+  // Don't let a hung kill block exit forever.
+  const forceExit = setTimeout(() => process.exit(0), 8000);
+  try {
+    await Promise.all(tasks);
+  } finally {
+    clearTimeout(forceExit);
+    try {
+      server.close();
+    } catch (error) {
+      // The server may already be closing.
+    }
+    console.log(`Stopped ${pids.size} project server(s). Bye.`);
+    process.exit(0);
+  }
+}
+
+// SIGINT = Ctrl+C, SIGBREAK = Ctrl+Break, SIGHUP = console window closed.
+// (A forced kill such as taskkill /F or Stop-Process -Force can't be intercepted.)
+process.on('SIGINT', () => shutdownAtm('SIGINT'));
+process.on('SIGTERM', () => shutdownAtm('SIGTERM'));
+process.on('SIGHUP', () => shutdownAtm('SIGHUP'));
+process.on('SIGBREAK', () => shutdownAtm('SIGBREAK'));
