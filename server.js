@@ -1933,6 +1933,41 @@ function parseNetstatPort(localAddress) {
   return normalizePort(match?.[1]);
 }
 
+// Host portion of a netstat "Local Address" column, e.g. "0.0.0.0:8765",
+// "127.0.0.1:8765", "[::]:8765" or "[fd7a:115c:a1e0::1]:8765".
+function parseNetstatHost(localAddress) {
+  const raw = String(localAddress || '').trim();
+  const portMatch = raw.match(/:(\d{1,5})$/);
+  let host = portMatch ? raw.slice(0, raw.length - portMatch[0].length) : raw;
+  host = host.replace(/^\[/, '').replace(/\]$/, '');
+  return host.toLowerCase();
+}
+
+// True when a listening socket on `host` would actually collide with a dev
+// server bound to 0.0.0.0 / 127.0.0.1 / a LAN IP. Tailscale's tailnet-only
+// listeners — CGNAT 100.64.0.0/10 and the fd7a:115c:a1e0::/48 ULA range that
+// `tailscale serve` binds — do NOT collide, so they must be ignored. Otherwise
+// ATM sees `tailscaled` as the port owner and tries to kill it on every
+// start/restart of any Tailscale-exposed project (and shared its port number).
+function isCompetingLocalAddress(host) {
+  if (!host) {
+    return false;
+  }
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    if (a === 100 && b >= 64 && b <= 127) {
+      return false; // Tailscale CGNAT (100.64.0.0/10)
+    }
+    return true; // 0.0.0.0, 127.x, LAN, etc.
+  }
+  if (host.startsWith('fd7a:115c:a1e0')) {
+    return false; // Tailscale IPv6 ULA (fd7a:115c:a1e0::/48)
+  }
+  return true; // ::, ::1, real IPv6, etc.
+}
+
 function getListeningPortOwnerPids(projectPort) {
   const portNumber = normalizePort(projectPort);
   if (!portNumber || process.platform !== 'win32') {
@@ -1957,6 +1992,10 @@ function getListeningPortOwnerPids(projectPort) {
         continue;
       }
 
+      if (!isCompetingLocalAddress(parseNetstatHost(parts[1]))) {
+        continue; // skip Tailscale tailnet-only listeners (e.g. tailscaled)
+      }
+
       const pid = Number(parts[4]);
       if (Number.isInteger(pid) && pid > 0) {
         pids.add(pid);
@@ -1967,6 +2006,44 @@ function getListeningPortOwnerPids(projectPort) {
   } catch (error) {
     return [];
   }
+}
+
+// Infrastructure processes ATM must never terminate, even if they happen to be
+// listening on a project port. `tailscale serve` makes tailscaled bind every
+// exposed project's port on the tailnet interface; killing it would drop remote
+// access for *all* projects at once.
+const PROTECTED_PROCESS_NAMES = new Set(['tailscaled.exe', 'tailscale.exe']);
+
+function getProcessImageName(pid) {
+  const pidNumber = Number(pid);
+  if (!Number.isInteger(pidNumber) || pidNumber <= 0) {
+    return '';
+  }
+
+  try {
+    if (process.platform === 'win32') {
+      const output = execFileSync('tasklist', ['/FI', `PID eq ${pidNumber}`, '/NH', '/FO', 'CSV'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        windowsHide: true,
+      });
+      const match = output.match(/^"([^"]+)"/m);
+      return match ? match[1].toLowerCase() : '';
+    }
+
+    const output = execFileSync('ps', ['-p', String(pidNumber), '-o', 'comm='], {
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    return output.trim().toLowerCase();
+  } catch (error) {
+    return '';
+  }
+}
+
+function isProtectedProcess(pid) {
+  const name = getProcessImageName(pid);
+  return Boolean(name) && PROTECTED_PROCESS_NAMES.has(name);
 }
 
 function wait(ms) {
@@ -2751,7 +2828,86 @@ function getNpmExecutable() {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm';
 }
 
-function getNpmDevArgs(framework, projectPort, devScript = '', launchOptions = {}) {
+function readProjectPackageScripts(projectPath) {
+  const packageJsonPath = path.join(projectPath || '', 'package.json');
+  const packageJson = projectPath && fs.existsSync(packageJsonPath)
+    ? readJson(packageJsonPath, null)
+    : null;
+  return packageJson && typeof packageJson.scripts === 'object' && packageJson.scripts
+    ? packageJson.scripts
+    : {};
+}
+
+// Normalize a dev command for comparison by removing file-watch / reload flags,
+// so a project's `start` script can be recognized as the no-reload twin of `dev`.
+function stripReloadTokens(command) {
+  return String(command || '')
+    .replace(/\bnode\s+--watch\b/gi, 'node')
+    .replace(/(^|\s)(-Reload|--reload|--watch|--hot|--hmr)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function commandEnablesReload(command) {
+  const original = String(command || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return Boolean(original) && stripReloadTokens(command) !== original;
+}
+
+// Dev servers that are expensive to restart (large ML weights, Python runtimes)
+// where watch-reload re-imports everything on every save.
+const HEAVY_RELOAD_EXTENSIONS = new Set(['.pt', '.pth', '.onnx', '.safetensors', '.gguf', '.engine']);
+const HEAVY_RELOAD_MARKERS = ['requirements.txt', 'pyproject.toml', 'environment.yml', '.venv', 'venv'];
+
+function projectLooksHeavyToReload(project) {
+  const projectPath = project?.path;
+  if (!projectPath || !fs.existsSync(projectPath)) {
+    return false;
+  }
+
+  if (HEAVY_RELOAD_MARKERS.some((marker) => fs.existsSync(path.join(projectPath, marker)))) {
+    return true;
+  }
+
+  try {
+    return fs.readdirSync(projectPath)
+      .some((entry) => HEAVY_RELOAD_EXTENSIONS.has(path.extname(entry).toLowerCase()));
+  } catch (error) {
+    return false;
+  }
+}
+
+// Self-judgment: should ATM launch the reload-enabled `dev` script or the plain
+// `start` script? Only ever diverts to `start` when it is provably `dev` minus
+// its reload flag, so a project's production `start` is never picked by mistake.
+const HMR_FRAMEWORKS = new Set(['vite', 'next', 'astro', 'nuxt', 'remix', 'svelte', 'sveltekit']);
+
+function resolveReloadPlan(project) {
+  const scripts = readProjectPackageScripts(project?.path);
+  const devCmd = typeof scripts.dev === 'string' ? scripts.dev.trim() : '';
+  const startCmd = typeof scripts.start === 'string' ? scripts.start.trim() : '';
+
+  const devEnablesReload = commandEnablesReload(devCmd);
+  const startIsNoReloadTwin = Boolean(
+    devCmd && startCmd && stripReloadTokens(startCmd) === stripReloadTokens(devCmd),
+  );
+
+  let reload;
+  if (!devEnablesReload) {
+    reload = true; // nothing to disable; run dev as-is
+  } else if (HMR_FRAMEWORKS.has(project?.framework)) {
+    reload = true; // cheap built-in HMR — keep it
+  } else {
+    reload = !projectLooksHeavyToReload(project); // heavy generic project → skip reload
+  }
+
+  return { reload, useStartScript: !reload && startIsNoReloadTwin };
+}
+
+function getNpmDevArgs(project, launchOptions = {}) {
+  const framework = project?.framework;
+  const projectPort = project?.port;
+  const devScript = project?.devScript || '';
   const args = ['run', 'dev'];
   const scriptedPort = detectPortFromDevScript(devScript);
 
@@ -2771,15 +2927,18 @@ function getNpmDevArgs(framework, projectPort, devScript = '', launchOptions = {
     return [...args, '--', '--host', '0.0.0.0', '--port', String(projectPort)];
   }
 
+  // Generic projects run their own npm script — let ATM decide reload vs no-reload.
+  const baseArgs = resolveReloadPlan(project).useStartScript ? ['run', 'start'] : args;
+
   if (shouldPreferScriptedPort({ framework, devScript, port: projectPort })) {
-    return args;
+    return baseArgs;
   }
 
   if (scriptedPort && Number(scriptedPort) !== Number(projectPort)) {
-    return [...args, '--', '--host', '0.0.0.0', '--port', String(projectPort)];
+    return [...baseArgs, '--', '--host', '0.0.0.0', '--port', String(projectPort)];
   }
 
-  return args;
+  return baseArgs;
 }
 
 function normalizeHostName(value) {
@@ -3080,7 +3239,7 @@ async function startProject(project, options = {}) {
   const launchOptions = await resolveViteLaunchOptions(project, options);
 
   const npm = getNpmExecutable();
-  const args = getNpmDevArgs(project.framework, project.port, project.devScript, launchOptions);
+  const args = getNpmDevArgs(project, launchOptions);
   const prefix = logPrefix(project);
   const stdoutPath = path.join(LOG_DIR, `${prefix}.out.log`);
   const stderrPath = path.join(LOG_DIR, `${prefix}.err.log`);
@@ -3177,7 +3336,8 @@ async function stopListeningPortOwners(project) {
   }
 
   const owners = getListeningPortOwnerPids(portNumber)
-    .filter((pid) => Number(pid) !== Number(process.pid));
+    .filter((pid) => Number(pid) !== Number(process.pid))
+    .filter((pid) => !isProtectedProcess(pid));
 
   for (const pid of owners) {
     await stopProcessTree(pid);
