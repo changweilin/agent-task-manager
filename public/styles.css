@@ -3319,6 +3319,12 @@ a.page-link:hover {
   margin-top: 0;
 }
 
+/* 設定與啟動整合到同一個分頁時,在設定區塊與 agent 啟動器之間保留間距。 */
+.terminal-tab-agent > .terminal-agent-tabs,
+.terminal-tab-agent > .terminal-claude-launcher {
+  margin-top: 12px;
+}
+
 .terminal-pipeline-runbar {
   flex: 0 0 auto;
   margin-top: 6px;
@@ -3866,6 +3872,94 @@ a.page-link:hover {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+}
+
+/* Log 面板:左側依專案切換的直式頁籤 + 右側 log 內容。 */
+.logs-body {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+  min-height: 0;
+}
+
+.log-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 auto;
+  width: 136px;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.log-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.log-tab > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-tab:hover {
+  color: var(--text);
+  border-color: var(--teal-border);
+}
+
+.log-tab.is-active {
+  color: var(--teal);
+  background: var(--teal-soft);
+  border-color: var(--teal-border);
+}
+
+.log-tab-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.log-tab-dot.running {
+  background: var(--teal);
+}
+
+.log-tab-dot.stopped {
+  background: var(--coral);
+}
+
+.log-tab-dot.stale,
+.log-tab-dot.external,
+.log-tab-dot.unhealthy,
+.log-tab-dot.restarting {
+  background: var(--amber);
+}
+
+.log-tabs-empty {
+  padding: 6px 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.logs-body > #logOutput {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
 }
 
 .mini-toggle {
@@ -4460,6 +4554,11 @@ button:disabled {
 
   pre {
     min-height: 180px;
+    max-height: 38vh;
+  }
+
+  .log-tabs {
+    width: 110px;
     max-height: 38vh;
   }
 

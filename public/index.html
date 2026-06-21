@@ -59,7 +59,7 @@
               <path d="M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
             </svg>
           </button>
-          <button class="icon-button" id="refreshButton" type="button" title="重新整理" aria-label="重新整理">
+          <button class="icon-button" id="refreshButton" type="button" title="全專案重新整理並重啟 ATM 伺服器" aria-label="全專案重新整理並重啟 ATM 伺服器">
             <svg viewBox="0 0 24 24" focusable="false">
               <path d="M20 6v5h-5" />
               <path d="M4 18v-5h5" />
@@ -223,10 +223,14 @@
                   <input id="autoLogInput" type="checkbox" checked />
                   <span>自動更新</span>
                 </label>
+                <button class="text-button" id="copyLogsButton" type="button">複製</button>
                 <button class="text-button" id="reloadLogsButton" type="button">重新讀取</button>
               </div>
             </div>
-            <pre id="logOutput">選擇專案後會顯示最近的 stdout/stderr。</pre>
+            <div class="logs-body">
+              <div class="log-tabs" id="logTabs" role="tablist" aria-label="依專案切換 Log"></div>
+              <pre id="logOutput">選擇專案後會顯示最近的 stdout/stderr。</pre>
+            </div>
           </section>
 
           <section class="panel about-panel" aria-labelledby="aboutTitle">

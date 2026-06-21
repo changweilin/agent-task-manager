@@ -346,9 +346,9 @@ const TERMINAL_PIPELINE_MAXWAIT_MAX = 7200;
 const TERMINAL_PIPELINE_PROMPT_LIMIT = 16000;
 const TERMINAL_CONTENT_TABS = [
   { id: 'terminal', label: '終端' },
-  { id: 'agent', label: '啟動' },
+  // 設定與啟動已整合到同一個分頁:上半部是對話/位置/終端設定,下半部是 agent 啟動器。
+  { id: 'agent', label: '啟動 / 設定' },
   { id: 'pipeline', label: 'Pipeline' },
-  { id: 'setup', label: '設定' },
   { id: 'favorites', label: '指令' },
 ];
 const TERMINAL_CONTENT_TAB_IDS = new Set(TERMINAL_CONTENT_TABS.map((tab) => tab.id));
@@ -705,6 +705,10 @@ const state = {
   suppressNextRootClick: false,
   discoverLoading: false,
   selectedName: null,
+  // Which project's log is shown in the Log 面板 (driven by the vertical log tabs;
+  // defaults to the selected project). logText keeps the raw text for 複製.
+  logProjectName: null,
+  logText: '',
   selectedProfileId: '',
   profileEditorDirty: false,
   firewallProjectName: null,
@@ -860,6 +864,8 @@ const elements = {
   healthThresholdInput: document.querySelector('#healthThresholdInput'),
   autoLogInput: document.querySelector('#autoLogInput'),
   reloadLogsButton: document.querySelector('#reloadLogsButton'),
+  copyLogsButton: document.querySelector('#copyLogsButton'),
+  logTabs: document.querySelector('#logTabs'),
   logOutput: document.querySelector('#logOutput'),
   toast: document.querySelector('#toast'),
   firewallModal: document.querySelector('#firewallModal'),
@@ -2532,6 +2538,7 @@ function render() {
   renderColumnGroup();
   renderHeader();
   renderRows(projects);
+  renderLogTabs(projects);
   alignMobileProjectTop();
 }
 
@@ -2835,6 +2842,63 @@ async function forceRescan() {
   return true;
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 全專案重新整理:先清理重掃,再重啟 ATM 伺服器本身(讓 server.js 的變更生效,
+// 並重新掃描/還原所有專案)。
+async function refreshAllProjectsAndRestart() {
+  const scanned = await forceRescan();
+  if (scanned) {
+    await restartAtmServer();
+  }
+}
+
+async function restartAtmServer() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
+  const confirmed = window.confirm('重啟 ATM 伺服器會關閉所有開發伺服器與終端後重新啟動,確定要繼續嗎?');
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await api('/api/restart', { method: 'POST' });
+  } catch (error) {
+    // The connection usually drops as the server exits — that's expected, the
+    // replacement is already launching.
+  }
+  showToast('正在重啟 ATM 伺服器…');
+  await waitForAtmServer();
+}
+
+// Poll /api/status until the freshly launched server answers, then reload so the
+// UI re-syncs with it.
+async function waitForAtmServer() {
+  const deadline = Date.now() + 90000;
+  // Give the old instance a moment to release the port before we start polling.
+  await delay(2000);
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch('/api/status', { cache: 'no-store' });
+      if (response.ok) {
+        showToast('ATM 伺服器已重啟,重新載入頁面…');
+        await delay(700);
+        window.location.reload();
+        return;
+      }
+    } catch (error) {
+      // Server is still coming back up.
+    }
+    await delay(1200);
+  }
+  showToast('ATM 伺服器重啟逾時,請手動重新整理頁面。');
+}
+
 async function refreshProject(name) {
   if (DEMO_MODE) {
     showDemoNotice();
@@ -3075,9 +3139,56 @@ function useCurrentFilteredProjects() {
   state.profileEditorDirty = true;
 }
 
+// Resolve which project's log to show: the log-tab selection if still valid,
+// otherwise fall back to the main selected project / first project.
+function logViewProject() {
+  const projects = state.payload?.projects || [];
+  let name = state.logProjectName;
+  if (!name || !projects.some((project) => project.name === name)) {
+    name = (state.selectedName && projects.some((project) => project.name === state.selectedName))
+      ? state.selectedName
+      : projects[0]?.name || null;
+    state.logProjectName = name;
+  }
+  return projects.find((project) => project.name === name) || null;
+}
+
+// Vertical per-project tab strip for the Log 面板.
+function renderLogTabs(projects = sortedProjects(filteredProjects())) {
+  if (!elements.logTabs) {
+    return;
+  }
+
+  const activeName = logViewProject()?.name || null;
+  if (!projects.length) {
+    elements.logTabs.innerHTML = '<div class="log-tabs-empty">尚無專案</div>';
+    return;
+  }
+
+  elements.logTabs.innerHTML = projects.map((project) => {
+    const active = project.name === activeName;
+    return `
+      <button
+        class="log-tab ${active ? 'is-active' : ''}"
+        data-log-tab="${escapeHtml(project.name)}"
+        type="button"
+        role="tab"
+        aria-selected="${active ? 'true' : 'false'}"
+        title="${escapeHtml(project.name)}"
+      >
+        <span class="log-tab-dot ${escapeHtml(project.status || '')}" aria-hidden="true"></span>
+        <span>${escapeHtml(project.name)}</span>
+      </button>
+    `;
+  }).join('');
+}
+
 async function loadLogs({ silent = false } = {}) {
-  const project = selectedProject();
+  const project = logViewProject();
   if (!project) {
+    if (!silent) {
+      renderLogText('選擇專案後會顯示最近的 stdout/stderr。');
+    }
     return;
   }
 
@@ -3086,6 +3197,7 @@ async function loadLogs({ silent = false } = {}) {
   }
 
   if (!silent) {
+    state.logText = '';
     elements.logOutput.textContent = '讀取中...';
   }
 
@@ -3100,11 +3212,13 @@ async function loadLogs({ silent = false } = {}) {
     }
     renderLogText(sections.join('\n\n') || '目前沒有 log。');
   } catch (error) {
+    state.logText = '';
     elements.logOutput.textContent = error.message;
   }
 }
 
 function renderLogText(text) {
+  state.logText = text;
   elements.logOutput.innerHTML = text
     .split(/\r?\n/)
     .map((line) => {
@@ -3112,6 +3226,17 @@ function renderLogText(text) {
       return `<span class="${className}">${escapeHtml(line) || ' '}</span>`;
     })
     .join('\n');
+}
+
+async function copyLogs() {
+  const project = logViewProject();
+  const header = project ? `# ${project.name}\n` : '';
+  const body = state.logText && state.logText.trim() ? state.logText : '';
+  if (!body) {
+    showToast('沒有可複製的 log');
+    return;
+  }
+  await copyText(`${header}${body}`);
 }
 
 function logLineTone(line) {
@@ -5159,6 +5284,9 @@ function switchTerminalProject(projectName, { ensureDraft = true } = {}) {
 function openTerminalManager(projectName) {
   state.terminalProjectName = projectName;
   state.terminalModalOpen = true;
+  // 開啟時就維持最大寬度,切換頁籤(設定/啟動/Pipeline...)時尺寸不會再縮回,
+  // 與選到「終端」分頁時一致。使用者仍可用「放大」按鈕切回收合檢視。
+  state.terminalManualFocus = true;
   elements.terminalModal.hidden = false;
   switchTerminalProject(projectName, { ensureDraft: true });
   renderTerminalModal();
@@ -6093,14 +6221,14 @@ function renderTerminalModal() {
 
   let tabBody = '';
   if (activeTab === 'agent') {
+    // 整合分頁:先顯示設定(對話名稱/位置/Port/終端類型 + 目錄樹),再顯示 agent 啟動器。
     tabBody = `
+      ${renderTerminalSetup(activeSession, options, project, sessionTitleControl, projectPort)}
       ${renderTerminalAgentTabs()}
       ${renderTerminalActiveAgentLauncher(activeSession, options)}
     `;
   } else if (activeTab === 'pipeline') {
     tabBody = renderTerminalPipeline(activeSession);
-  } else if (activeTab === 'setup') {
-    tabBody = renderTerminalSetup(activeSession, options, project, sessionTitleControl, projectPort);
   } else if (activeTab === 'favorites') {
     tabBody = renderTerminalFavorites(activeSession);
   } else {
@@ -7991,7 +8119,7 @@ function cssAttrValue(value) {
   return String(value ?? '').replace(/(["\\])/g, '\\$1');
 }
 
-elements.refreshButton.addEventListener('click', () => forceRescan());
+elements.refreshButton.addEventListener('click', () => refreshAllProjectsAndRestart());
 elements.quotaMonitorButton.addEventListener('click', () => openQuotaMonitor());
 elements.themeToggleButton.addEventListener('click', () => {
   const nextTheme = state.theme === 'dark' ? 'light' : 'dark';
@@ -8240,6 +8368,9 @@ elements.projectRows.addEventListener('click', (event) => {
   }
 
   state.selectedName = row.dataset.name;
+  // Selecting a project also points the Log 面板 at it (the vertical log tabs can
+  // still switch to a different project independently afterwards).
+  state.logProjectName = row.dataset.name;
   if (isMobileLayout()) {
     toggleProjectPanel(row.dataset.name);
   } else {
@@ -8977,6 +9108,20 @@ elements.autoRestoreInput.addEventListener('change', updateSettings);
 elements.autoRestartInput.addEventListener('change', updateSettings);
 elements.healthThresholdInput.addEventListener('change', updateSettings);
 elements.reloadLogsButton.addEventListener('click', loadLogs);
+elements.copyLogsButton.addEventListener('click', copyLogs);
+elements.logTabs.addEventListener('click', (event) => {
+  const tab = event.target.closest('button[data-log-tab]');
+  if (!tab) {
+    return;
+  }
+  const name = tab.dataset.logTab;
+  if (name === state.logProjectName) {
+    return;
+  }
+  state.logProjectName = name;
+  renderLogTabs();
+  loadLogs();
+});
 
 // ---------------------------------------------------------------------------
 // Hover tooltips for the project-list action buttons. We reuse each button's

@@ -5894,6 +5894,23 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (request.method === 'POST' && url.pathname === '/api/restart') {
+    if (!isLocalRequest(request)) {
+      sendError(response, 403, 'For safety, ATM can only be restarted from http://127.0.0.1 on this computer.');
+      return;
+    }
+
+    sendJson(response, 200, { restarting: true, at: new Date().toISOString() });
+    // Let the HTTP response flush before we spawn the replacement and tear this
+    // instance down.
+    setTimeout(() => {
+      restartAtm().catch((error) => {
+        console.error(`ATM restart failed: ${error.message}`);
+      });
+    }, 250);
+    return;
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/ai-quotas') {
     if (!isLocalRequest(request)) {
       sendError(response, 403, 'For safety, AI quota probes are only available from http://127.0.0.1 on this computer.');
@@ -7174,7 +7191,7 @@ server.on('upgrade', (request, socket, head) => {
   });
 });
 
-server.listen(port, host, () => {
+function onAtmListening() {
   const lanIp = getLanIp();
   const tailscale = startTailscaleIfNeeded();
   console.log(`Agent Task Manager (ATM) running at http://127.0.0.1:${port}`);
@@ -7207,7 +7224,25 @@ server.listen(port, host, () => {
       console.error(`Auto restore failed: ${error.message}`);
     }
   })();
-});
+}
+
+// On a self-restart (ATM_RESTART=1) the previous instance may still hold the port
+// for a few seconds while it shuts down, so retry binding within a short window.
+function startAtmServer() {
+  const retryDeadline = process.env.ATM_RESTART === '1' ? Date.now() + 20000 : 0;
+  server.on('error', (error) => {
+    if (error && error.code === 'EADDRINUSE' && Date.now() < retryDeadline) {
+      setTimeout(() => server.listen(port, host), 500);
+      return;
+    }
+    console.error(`Agent Task Manager (ATM) could not bind ${host}:${port}: ${error?.message || error}`);
+    process.exit(1);
+  });
+  server.on('listening', onAtmListening);
+  server.listen(port, host);
+}
+
+startAtmServer();
 
 let shuttingDown = false;
 
@@ -7255,6 +7290,45 @@ async function shutdownAtm(signal) {
     console.log(`Stopped ${pids.size} project server(s). Bye.`);
     process.exit(0);
   }
+}
+
+// Launch a fresh copy of this server (same node binary + args + cwd), detached so
+// it survives this process exiting. ATM_RESTART=1 tells the replacement to retry
+// binding the port while this instance finishes shutting down (see startAtmServer).
+function spawnAtmReplacement() {
+  const args = process.argv.slice(1);
+  let stdio = 'ignore';
+  try {
+    const out = fs.openSync(path.join(process.cwd(), '.atm-restart.out.log'), 'a');
+    const err = fs.openSync(path.join(process.cwd(), '.atm-restart.err.log'), 'a');
+    stdio = ['ignore', out, err];
+  } catch (error) {
+    stdio = 'ignore';
+  }
+  const child = spawn(process.execPath, args, {
+    cwd: process.cwd(),
+    detached: true,
+    stdio,
+    windowsHide: false,
+    env: { ...process.env, ATM_RESTART: '1' },
+  });
+  child.unref();
+  return child;
+}
+
+async function restartAtm() {
+  if (shuttingDown) {
+    return;
+  }
+  console.log('\nAgent Task Manager (ATM) restart requested; launching a fresh instance...');
+  try {
+    spawnAtmReplacement();
+  } catch (error) {
+    console.error(`Failed to spawn ATM replacement: ${error.message}`);
+  }
+  // Reuse the shutdown path: stop managed project servers + terminals, then exit.
+  // The replacement re-scans and restores enabled projects on startup.
+  await shutdownAtm('RESTART');
 }
 
 // SIGINT = Ctrl+C, SIGBREAK = Ctrl+Break, SIGHUP = console window closed.
