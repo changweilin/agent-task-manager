@@ -304,6 +304,9 @@ function applyDemoModeUi() {
 
 const TABLE_PREFERENCES_KEY = 'agentTaskManager.tablePreferences.v3';
 const THEME_PREFERENCE_KEY = 'agentTaskManager.theme.v1';
+const LEFT_RAIL_WIDTH_KEY = 'agentTaskManager.leftRailWidth.v1';
+const LEFT_RAIL_MIN_WIDTH = 220;
+const LEFT_RAIL_MAX_WIDTH = 560;
 const TERMINAL_FAVORITES_KEY = 'agentTaskManager.terminalFavorites.v1';
 const TERMINAL_FAVORITES_VERSION_KEY = 'agentTaskManager.terminalFavoritesVersion.v1';
 const TERMINAL_FAVORITES_VERSION = 7;
@@ -780,6 +783,7 @@ const state = {
 let terminalPipelineToken = 0;
 
 let terminalPollTimer = null;
+let terminalListSyncTick = 0;
 let terminalPreferencesSaveTimer = null;
 let nextTerminalLocalId = 1;
 const terminalViews = new Map();
@@ -841,6 +845,9 @@ const elements = {
   sortDirectionButton: document.querySelector('#sortDirectionButton'),
   lastUpdated: document.querySelector('#lastUpdated'),
   mainPanel: document.querySelector('.main-panel'),
+  leftRail: document.querySelector('.left-rail'),
+  workspace: document.querySelector('.workspace'),
+  railResizer: document.querySelector('#railResizer'),
   tableWrap: document.querySelector('.table-wrap'),
   projectTable: document.querySelector('#projectTable'),
   projectColGroup: document.querySelector('#projectColGroup'),
@@ -1396,12 +1403,17 @@ function getProjectHomeLink(project) {
 function renderProjectQuickActions(project, context = {}) {
   const refreshDisabled = context.busy || state.discoverLoading || DEMO_MODE ? 'disabled' : '';
   const restartDisabled = context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : '';
+  const terminalCount = startedTerminalSessionsForProject(project.name).length;
+  const terminalBadge = terminalCount
+    ? `<span class="terminal-session-badge">${terminalCount}</span>`
+    : '';
 
   return `
     <div class="project-quick-actions" aria-label="${escapeHtml(project.name)} 快速操作">
       ${renderProjectPowerAction(project, context)}
       <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled} type="button" title="重新整理" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
       <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${restartDisabled} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
+      <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
     </div>
   `;
 }
@@ -1666,14 +1678,18 @@ function terminalRemoteAgentLaunchEnabled() {
 }
 
 function terminalCanAddSession() {
-  return !terminalIsReadOnly() || terminalRemoteAgentLaunchEnabled();
+  // A draft is just UI scaffolding — a read-only (remote) device still needs one to
+  // reach the Pipeline config tab. Actually launching/typing is gated separately.
+  return true;
 }
 
 function terminalCanUseAgentLauncher(session) {
+  // Launching a CLI is execution, which is only allowed on the local machine.
   return Boolean(session)
     && !session.busy
     && !session.exitedAt
-    && (!session.readOnly || (terminalRemoteAgentLaunchEnabled() && !session.id));
+    && !session.readOnly
+    && !terminalIsReadOnly();
 }
 
 function terminalCanUseClaudeLauncher(session) {
@@ -1815,6 +1831,7 @@ function startRootReorder(event) {
     return;
   }
 
+  const rect = item.getBoundingClientRect();
   state.rootDrag = {
     active: false,
     changed: false,
@@ -1822,7 +1839,28 @@ function startRootReorder(event) {
     pointerId: event.pointerId,
     startX: event.clientX,
     startY: event.clientY,
+    // Where inside the item the pointer grabbed it, so the card stays under the cursor.
+    grabOffsetY: event.clientY - rect.top,
   };
+}
+
+// Keep the lifted item pinned under the pointer while neighbours reflow around it.
+function applyRootDragFollow(clientY) {
+  const drag = state.rootDrag;
+  if (!drag?.active || !elements.rootList) {
+    return;
+  }
+
+  const draggedEl = elements.rootList.querySelector('.root-list-item.is-dragging');
+  if (!draggedEl) {
+    return;
+  }
+
+  draggedEl.style.transition = 'none';
+  draggedEl.style.transform = '';
+  const slotTop = draggedEl.getBoundingClientRect().top;
+  const offset = (clientY - drag.grabOffsetY) - slotTop;
+  draggedEl.style.transform = `translateY(${offset}px)`;
 }
 
 function handleRootPointerMove(event) {
@@ -1846,12 +1884,12 @@ function handleRootPointerMove(event) {
   event.preventDefault();
   const targetItem = document.elementFromPoint(event.clientX, event.clientY)?.closest('.root-list-item[data-root-index]');
   const targetIndex = Number(targetItem?.dataset.rootIndex);
-  if (!targetItem || Number.isNaN(targetIndex)) {
-    return;
+  if (targetItem && !Number.isNaN(targetIndex)) {
+    const rect = targetItem.getBoundingClientRect();
+    moveRootPathNear(drag.root, targetIndex, event.clientY > rect.top + rect.height / 2);
   }
 
-  const rect = targetItem.getBoundingClientRect();
-  moveRootPathNear(drag.root, targetIndex, event.clientY > rect.top + rect.height / 2);
+  applyRootDragFollow(event.clientY);
 }
 
 function finishRootReorder({ suppressClick = false } = {}) {
@@ -1872,6 +1910,94 @@ function finishRootReorder({ suppressClick = false } = {}) {
   if (shouldPersist) {
     discover({ commitDraft: false, includeDraft: false, showToastOnSuccess: false });
   }
+}
+
+function applyLeftRailWidth(width) {
+  const clamped = Math.round(Math.min(LEFT_RAIL_MAX_WIDTH, Math.max(LEFT_RAIL_MIN_WIDTH, width)));
+  document.documentElement.style.setProperty('--left-rail-width', `${clamped}px`);
+  return clamped;
+}
+
+function restoreLeftRailWidth() {
+  const stored = Number(readLocalPreference(LEFT_RAIL_WIDTH_KEY));
+  if (Number.isFinite(stored) && stored > 0) {
+    applyLeftRailWidth(stored);
+  }
+}
+
+function setupRailResizer() {
+  const resizer = elements.railResizer;
+  const rail = elements.leftRail;
+  if (!resizer || !rail) {
+    return;
+  }
+
+  restoreLeftRailWidth();
+
+  let pointerId = null;
+  let lastWidth = null;
+
+  const persistWidth = () => {
+    if (Number.isFinite(lastWidth)) {
+      writeLocalPreference(LEFT_RAIL_WIDTH_KEY, String(lastWidth));
+    }
+  };
+
+  const onMove = (event) => {
+    if (pointerId === null || event.pointerId !== pointerId) {
+      return;
+    }
+    // Rail width tracks the pointer relative to the rail's left edge.
+    lastWidth = applyLeftRailWidth(event.clientX - rail.getBoundingClientRect().left);
+  };
+
+  const end = (event) => {
+    if (pointerId === null || (event && event.pointerId !== pointerId)) {
+      return;
+    }
+    try {
+      resizer.releasePointerCapture(pointerId);
+    } catch {
+      // Pointer capture may already be released; ignore.
+    }
+    pointerId = null;
+    resizer.classList.remove('is-dragging');
+    document.body.classList.remove('is-rail-resizing');
+    persistWidth();
+  };
+
+  resizer.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || isMobileLayout()) {
+      return;
+    }
+    pointerId = event.pointerId;
+    resizer.setPointerCapture(pointerId);
+    resizer.classList.add('is-dragging');
+    document.body.classList.add('is-rail-resizing');
+    event.preventDefault();
+  });
+  resizer.addEventListener('pointermove', onMove);
+  resizer.addEventListener('pointerup', end);
+  resizer.addEventListener('pointercancel', end);
+
+  // Keyboard accessibility: arrow keys nudge the divider.
+  resizer.addEventListener('keydown', (event) => {
+    if (isMobileLayout()) {
+      return;
+    }
+    const step = event.shiftKey ? 32 : 12;
+    let delta = 0;
+    if (event.key === 'ArrowLeft') {
+      delta = -step;
+    } else if (event.key === 'ArrowRight') {
+      delta = step;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    lastWidth = applyLeftRailWidth(rail.getBoundingClientRect().width + delta);
+    persistWidth();
+  });
 }
 
 function formatRootLabel(root) {
@@ -1914,6 +2040,11 @@ function animateRootReorder(previousRects) {
   }
 
   elements.rootList.querySelectorAll('.root-list-item[data-root]').forEach((item) => {
+    // The lifted item follows the pointer directly; don't fight it with a FLIP tween.
+    if (item.classList.contains('is-dragging')) {
+      return;
+    }
+
     const previous = previousRects.get(item.dataset.root);
     if (!previous) {
       return;
@@ -4153,11 +4284,16 @@ function readTerminalPipeline() {
   }
 }
 
-function saveTerminalPipeline() {
+function saveTerminalPipeline({ sync = true } = {}) {
   try {
     writeLocalPreference(TERMINAL_PIPELINE_KEY, JSON.stringify(normalizeTerminalPipeline(state.terminalPipeline)));
   } catch {
     // The pipeline stays usable for this session even if localStorage is blocked.
+  }
+
+  // Sync the pipeline config to the server so it can be set on a phone and run locally.
+  if (sync) {
+    scheduleTerminalPreferencesSave();
   }
 }
 
@@ -4356,7 +4492,10 @@ function terminalPreferencesPayload() {
     favorites: state.terminalFavorites,
     activeAgent: terminalFavoriteAgentId(),
     favoritesByAgent: state.terminalFavoritesByAgent,
-    workspace: buildTerminalWorkspaceState(),
+    pipeline: getTerminalPipeline(),
+    // A read-only (remote) client can't own writable sessions, so it must not overwrite
+    // the shared workspace — that would wipe the local machine's terminal tabs.
+    ...(terminalIsReadOnly() ? {} : { workspace: buildTerminalWorkspaceState() }),
   };
 }
 
@@ -4412,6 +4551,10 @@ function applyTerminalPreferences(payload) {
   }
   if (payload.workspace && typeof payload.workspace === 'object') {
     restoreTerminalWorkspaceState(payload.workspace, { replace: true });
+  }
+  if (payload.pipeline && typeof payload.pipeline === 'object') {
+    state.terminalPipeline = normalizeTerminalPipeline(payload.pipeline);
+    saveTerminalPipeline({ sync: false });
   }
 
   saveTerminalFavorites({ sync: false });
@@ -5292,6 +5435,8 @@ function openTerminalManager(projectName) {
   renderTerminalModal();
   startTerminalPolling();
   loadTerminalSessions({ silent: true });
+  // Pull the latest shared pipeline config (e.g. edited on a phone) right away.
+  syncTerminalPipelineFromServer();
 }
 
 function hideTerminalManager() {
@@ -7403,8 +7548,8 @@ async function runTerminalPipeline() {
     showToast('請先選擇或新增一個終端對話');
     return;
   }
-  if (session.readOnly) {
-    showToast('Terminal is read-only from LAN/Tailscale.');
+  if (session.readOnly || terminalIsReadOnly()) {
+    showToast('Pipeline 執行只能在本機啟動（手機可編輯設定）。');
     return;
   }
 
@@ -7759,9 +7904,93 @@ async function closeTerminalDialog(localId) {
   }
 }
 
+// Pick up terminal sessions launched on another device (e.g. desktop) so the phone's
+// view stays connected to the same live terminals, and drop ones closed elsewhere.
+async function discoverRemoteTerminalSessions() {
+  try {
+    const payload = await api('/api/terminals');
+    const snapshots = Array.isArray(payload.sessions) ? payload.sessions : [];
+    const liveIds = new Set(snapshots.map((snapshot) => snapshot && snapshot.id).filter(Boolean));
+    const knownIds = new Set(state.terminalSessions.filter((session) => session.id).map((session) => session.id));
+
+    let changed = false;
+    snapshots.forEach((snapshot) => {
+      if (snapshot?.id && !knownIds.has(snapshot.id)) {
+        mergeTerminalSessionSnapshot(snapshot);
+        changed = true;
+      }
+    });
+
+    const before = state.terminalSessions.length;
+    state.terminalSessions = state.terminalSessions.filter((session) => !session.id || liveIds.has(session.id));
+    if (state.terminalSessions.length !== before) {
+      changed = true;
+    }
+    state.terminalWorkspaceMetaBySessionId = new Map(
+      [...state.terminalWorkspaceMetaBySessionId.entries()].filter(([id]) => liveIds.has(id)),
+    );
+
+    if (!changed) {
+      return;
+    }
+
+    if (!state.terminalProjectName && state.terminalSessions.length) {
+      state.terminalProjectName = state.terminalSessions[0].projectName;
+    }
+    if (state.terminalProjectName) {
+      const sessions = terminalSessionsForProject(state.terminalProjectName);
+      if (sessions.length && !sessions.some((session) => session.localId === state.terminalActiveSessionId)) {
+        state.terminalActiveSessionId = sessions[0].localId;
+        rememberTerminalActiveSession();
+      }
+    }
+
+    saveTerminalWorkspaceState();
+    renderTerminalModal();
+  } catch {
+    // Best-effort cross-device discovery; ignore transient network errors.
+  }
+}
+
+// Keep this device's pipeline config in step with edits made elsewhere (e.g. set on the
+// phone, run on the local machine) without clobbering an in-progress run or an active edit.
+async function syncTerminalPipelineFromServer() {
+  if (state.terminalPipelineRun.active) {
+    return;
+  }
+  const active = document.activeElement;
+  if (active?.closest?.('.terminal-pipeline')) {
+    return;
+  }
+
+  try {
+    const payload = await api('/api/terminal-preferences');
+    if (!payload?.pipeline || typeof payload.pipeline !== 'object') {
+      return;
+    }
+    const incoming = JSON.stringify(normalizeTerminalPipeline(payload.pipeline));
+    if (incoming === JSON.stringify(normalizeTerminalPipeline(state.terminalPipeline))) {
+      return;
+    }
+    state.terminalPipeline = JSON.parse(incoming);
+    saveTerminalPipeline({ sync: false });
+    renderTerminalModal();
+  } catch {
+    // Best-effort; ignore transient network errors.
+  }
+}
+
 async function pollTerminalSessions() {
   if (!state.terminalModalOpen) {
     return;
+  }
+
+  terminalListSyncTick += 1;
+  if (terminalListSyncTick % 4 === 0) {
+    await discoverRemoteTerminalSessions();
+  }
+  if (terminalListSyncTick % 6 === 0) {
+    await syncTerminalPipelineFromServer();
   }
 
   const sessions = state.terminalSessions.filter((session) => session.id && !session.exitedAt && !hasLiveTerminalSocket(session));
@@ -8168,6 +8397,7 @@ elements.rootList.addEventListener('click', (event) => {
   }
 });
 elements.rootList.addEventListener('pointerdown', startRootReorder);
+setupRailResizer();
 elements.basePortInput.addEventListener('change', () => discover());
 elements.searchInput.addEventListener('input', (event) => {
   state.search = event.target.value;

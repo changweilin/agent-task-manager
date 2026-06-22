@@ -96,6 +96,24 @@
               <span>Base port</span>
               <input id="basePortInput" type="number" min="1000" max="65535" step="1" placeholder="5173" title="掃描時自動分配 port 的起點" />
             </label>
+
+            <div class="source-log-divider" role="separator" aria-label="專案來源與 Log 分隔"></div>
+
+            <div class="panel-heading logs-heading">
+              <h2>Log</h2>
+              <div class="log-controls">
+                <label class="mini-toggle">
+                  <input id="autoLogInput" type="checkbox" checked />
+                  <span>自動更新</span>
+                </label>
+                <button class="text-button" id="copyLogsButton" type="button">複製</button>
+                <button class="text-button" id="reloadLogsButton" type="button">重新讀取</button>
+              </div>
+            </div>
+            <div class="logs-body">
+              <div class="log-tabs" id="logTabs" role="tablist" aria-label="依專案切換 Log"></div>
+              <pre id="logOutput">選擇專案後會顯示最近的 stdout/stderr。</pre>
+            </div>
           </section>
 
           <section class="panel">
@@ -178,7 +196,38 @@
               </div>
             </dl>
           </section>
+
+          <section class="panel about-panel" aria-labelledby="aboutTitle">
+            <div class="panel-heading">
+              <h2 id="aboutTitle">About Me</h2>
+            </div>
+            <div class="about-identity">
+              <span class="about-avatar" aria-hidden="true">CW</span>
+              <strong>Chang Wei Lin</strong>
+            </div>
+            <p class="about-line">我愛星空至深，無懼黑夜。</p>
+            <figure class="about-quote">
+              <blockquote>We have loved the stars too fondly to fear the dark.</blockquote>
+              <figcaption>— &lt;The Old Astronomer&gt; Sarah Williams</figcaption>
+            </figure>
+            <div class="about-links" aria-label="Chang Wei Lin links">
+              <a href="https://github.com/changweilin" target="_blank" rel="noreferrer" title="GitHub">
+                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fgithub.com%2Fchangweilin&sz=64" alt="" />
+                <span>GitHub</span>
+              </a>
+              <a href="https://www.linkedin.com/in/wei-lin-chang-ba38049a/" target="_blank" rel="noreferrer" title="LinkedIn">
+                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fwww.linkedin.com%2Fin%2Fwei-lin-chang-ba38049a%2F&sz=64" alt="" />
+                <span>LinkedIn</span>
+              </a>
+              <a href="https://changweilin.github.io/demo_link/" target="_blank" rel="noreferrer" title="Demo Link">
+                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fchangweilin.github.io%2Fdemo_link%2F&sz=64" alt="" />
+                <span>Demo</span>
+              </a>
+            </div>
+          </section>
         </aside>
+
+        <div class="rail-resizer" id="railResizer" role="separator" aria-orientation="vertical" aria-label="拖曳調整左側欄寬度" tabindex="0" title="拖曳調整左側欄寬度"></div>
 
         <section class="main-panel">
           <div class="table-toolbar">
@@ -213,55 +262,6 @@
             <span>調整篩選、加入專案來源，或重啟伺服器自動掃描。</span>
           </div>
         </section>
-
-        <aside class="inspector">
-          <section class="panel logs-panel">
-            <div class="panel-heading logs-heading">
-              <h2>Log</h2>
-              <div class="log-controls">
-                <label class="mini-toggle">
-                  <input id="autoLogInput" type="checkbox" checked />
-                  <span>自動更新</span>
-                </label>
-                <button class="text-button" id="copyLogsButton" type="button">複製</button>
-                <button class="text-button" id="reloadLogsButton" type="button">重新讀取</button>
-              </div>
-            </div>
-            <div class="logs-body">
-              <div class="log-tabs" id="logTabs" role="tablist" aria-label="依專案切換 Log"></div>
-              <pre id="logOutput">選擇專案後會顯示最近的 stdout/stderr。</pre>
-            </div>
-          </section>
-
-          <section class="panel about-panel" aria-labelledby="aboutTitle">
-            <div class="panel-heading">
-              <h2 id="aboutTitle">About Me</h2>
-            </div>
-            <div class="about-identity">
-              <span class="about-avatar" aria-hidden="true">CW</span>
-              <strong>Chang Wei Lin</strong>
-            </div>
-            <p class="about-line">我愛星空至深，無懼黑夜。</p>
-            <figure class="about-quote">
-              <blockquote>We have loved the stars too fondly to fear the dark.</blockquote>
-              <figcaption>— &lt;The Old Astronomer&gt; Sarah Williams</figcaption>
-            </figure>
-            <div class="about-links" aria-label="Chang Wei Lin links">
-              <a href="https://github.com/changweilin" target="_blank" rel="noreferrer" title="GitHub">
-                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fgithub.com%2Fchangweilin&sz=64" alt="" />
-                <span>GitHub</span>
-              </a>
-              <a href="https://www.linkedin.com/in/wei-lin-chang-ba38049a/" target="_blank" rel="noreferrer" title="LinkedIn">
-                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fwww.linkedin.com%2Fin%2Fwei-lin-chang-ba38049a%2F&sz=64" alt="" />
-                <span>LinkedIn</span>
-              </a>
-              <a href="https://changweilin.github.io/demo_link/" target="_blank" rel="noreferrer" title="Demo Link">
-                <img src="https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fchangweilin.github.io%2Fdemo_link%2F&sz=64" alt="" />
-                <span>Demo</span>
-              </a>
-            </div>
-          </section>
-        </aside>
       </main>
 
       <div class="toast" id="toast" role="status" aria-live="polite"></div>

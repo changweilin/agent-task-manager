@@ -655,6 +655,8 @@ function defaultTerminalPreferences() {
     favorites: favoritesByAgent[DEFAULT_TERMINAL_AGENT_ID],
     favoritesByAgent,
     workspace: normalizeTerminalWorkspace({}),
+    // Pipeline config is shared so it can be set on a phone and run on the local machine.
+    pipeline: null,
     updatedAt: null,
   };
 }
@@ -684,6 +686,9 @@ function readTerminalPreferences() {
     workspace: saved && stored?.workspace
       ? normalizeTerminalWorkspace(stored.workspace)
       : defaults.workspace,
+    pipeline: saved && stored?.pipeline && typeof stored.pipeline === 'object'
+      ? stored.pipeline
+      : defaults.pipeline,
   };
 }
 
@@ -712,6 +717,9 @@ function saveTerminalPreferences(patch) {
     workspace: Object.prototype.hasOwnProperty.call(source, 'workspace')
       ? normalizeTerminalWorkspace(source.workspace)
       : current.workspace,
+    pipeline: Object.prototype.hasOwnProperty.call(source, 'pipeline')
+      ? (source.pipeline && typeof source.pipeline === 'object' ? source.pipeline : null)
+      : current.pipeline,
     updatedAt: new Date().toISOString(),
   };
 
@@ -5599,7 +5607,10 @@ async function getStatusPayload(request = null) {
   const tailscaleIp = getTailscaleIp();
   const lanIp = getLanIp();
   const tailscaleHost = await getTailscaleDnsName(tailscaleIp);
-  const terminalReadOnly = request ? !isLocalRequest(request) : false;
+  // Remote devices (phone over Tailscale/LAN) can view terminals and edit the pipeline
+  // config, but cannot type into terminals or launch/run anything — execution stays local.
+  const localRequest = request ? isLocalRequest(request) : true;
+  const terminalReadOnly = !localRequest;
   const normalizedProjects = normalizeProjects(config.projects, config.basePort);
   const resolvedProjects = normalizedProjects.map((project) => {
     const entry = getStateEntryByPath(state, project.path);
@@ -5742,8 +5753,8 @@ async function getStatusPayload(request = null) {
       tailscaleUrl: buildProjectTailscaleUrl(port, tailscaleIp, { tailscaleHost }),
       tailscaleIp,
       terminalReadOnly,
-      terminalClaudeRemoteLaunch: true,
-      terminalAgentRemoteLaunch: true,
+      terminalClaudeRemoteLaunch: localRequest,
+      terminalAgentRemoteLaunch: localRequest,
       configPath: CONFIG_PATH,
       statePath: STATE_PATH,
     },
@@ -6112,11 +6123,18 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'GET' && url.pathname === '/api/terminals') {
+    // Remote devices can see the live terminals (read-only mirror); only the local
+    // machine gets a writable view.
     sendJson(response, 200, { sessions: terminalSessionList({ readOnly: !isLocalRequest(request) }) });
     return;
   }
 
   if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/terminal-agent$/.test(url.pathname)) {
+    if (!isLocalRequest(request)) {
+      sendError(response, 403, 'For safety, launching agents is only allowed from http://127.0.0.1 on this computer.');
+      return;
+    }
+
     const body = await readRequestBody(request);
     const { project } = selectedProjectFromUrl(url);
     if (!project) {
@@ -6146,11 +6164,16 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    sendJson(response, 201, terminalSnapshot(session, 0, { readOnly: !isLocalRequest(request) }));
+    sendJson(response, 201, terminalSnapshot(session, 0));
     return;
   }
 
   if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/terminal-claude$/.test(url.pathname)) {
+    if (!isLocalRequest(request)) {
+      sendError(response, 403, 'For safety, launching agents is only allowed from http://127.0.0.1 on this computer.');
+      return;
+    }
+
     const body = await readRequestBody(request);
     const { project } = selectedProjectFromUrl(url);
     if (!project) {
@@ -6180,7 +6203,7 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    sendJson(response, 201, terminalSnapshot(session, 0, { readOnly: !isLocalRequest(request) }));
+    sendJson(response, 201, terminalSnapshot(session, 0));
     return;
   }
 
@@ -7178,6 +7201,8 @@ server.on('upgrade', (request, socket, head) => {
     return;
   }
 
+  // Remote devices get a read-only socket (live mirror, no input); only the local
+  // machine can type into the terminal.
   const readOnly = !isLocalRequest(request);
   const id = decodeURIComponent(url.pathname.split('/')[3] || '');
   const session = getTerminalSession(id);

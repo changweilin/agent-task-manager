@@ -441,17 +441,59 @@ h1 {
 .workspace {
   min-width: 0;
   display: grid;
-  grid-template-columns: 256px minmax(520px, 1fr) 340px;
-  gap: 16px;
+  grid-template-columns: var(--left-rail-width, 300px) 14px minmax(420px, 1fr);
+  gap: 0;
   padding: 16px;
 }
 
-.left-rail,
-.inspector {
+.left-rail {
   display: flex;
   flex-direction: column;
   gap: 14px;
   min-width: 0;
+}
+
+/* Draggable splitter between the left rail and the main panel. */
+.rail-resizer {
+  position: relative;
+  align-self: stretch;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.rail-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 140ms ease, width 140ms ease;
+}
+
+.rail-resizer:hover::before,
+.rail-resizer:focus-visible::before,
+.rail-resizer.is-dragging::before {
+  width: 4px;
+  background: var(--teal);
+}
+
+.rail-resizer:focus-visible {
+  outline: none;
+}
+
+body.is-rail-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* Thin rule that separates 專案來源 from the merged Log block. */
+.source-log-divider {
+  height: 1px;
+  margin: 14px 0 2px;
+  background: var(--border);
 }
 
 .panel,
@@ -551,9 +593,14 @@ textarea {
 }
 
 .root-list-item.is-dragging {
+  position: relative;
+  z-index: 5;
   border-color: var(--teal-border);
-  background: var(--row-hover-bg);
-  opacity: 0.82;
+  background: var(--surface);
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.32);
+  opacity: 0.97;
+  cursor: grabbing;
+  will-change: transform;
 }
 
 .is-root-reordering .root-list-item {
@@ -3874,30 +3921,31 @@ a.page-link:hover {
   gap: 10px;
 }
 
-/* Log 面板:左側依專案切換的直式頁籤 + 右側 log 內容。 */
+/* Log 面板(整合進左欄「專案來源」):上方依專案切換的橫式頁籤 + 下方 log 內容。 */
 .logs-body {
   display: flex;
-  gap: 10px;
-  margin-top: 12px;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
   min-height: 0;
 }
 
 .log-tabs {
   display: flex;
-  flex-direction: column;
+  flex-flow: row wrap;
   gap: 4px;
   flex: 0 0 auto;
-  width: 136px;
-  max-height: 52vh;
+  max-height: 108px;
   overflow-y: auto;
-  padding-right: 2px;
+  padding: 0;
 }
 
 .log-tab {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   padding: 6px 8px;
   color: var(--muted);
   background: var(--surface-muted);
@@ -3959,6 +4007,8 @@ a.page-link:hover {
 .logs-body > #logOutput {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 220px;
+  max-height: 46vh;
   margin: 0;
 }
 
@@ -4040,13 +4090,7 @@ button:disabled {
 
 @media (max-width: 1180px) {
   .workspace {
-    grid-template-columns: 230px minmax(420px, 1fr);
-  }
-
-  .inspector {
-    grid-column: 1 / -1;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: clamp(220px, var(--left-rail-width, 300px), 340px) 14px minmax(360px, 1fr);
   }
 }
 
@@ -4134,6 +4178,10 @@ button:disabled {
     padding: 12px;
   }
 
+  .rail-resizer {
+    display: none;
+  }
+
   .main-panel {
     order: 1;
     width: 100%;
@@ -4147,17 +4195,6 @@ button:disabled {
     width: 100%;
     max-width: 100%;
     min-width: 0;
-  }
-
-  .inspector {
-    order: 3;
-    width: 100%;
-    max-width: 100%;
-    min-width: 0;
-  }
-
-  .left-rail,
-  .inspector {
     display: grid;
     grid-template-columns: 1fr;
     gap: 12px;
@@ -4378,9 +4415,19 @@ button:disabled {
 
   tbody tr.project-data-row.is-panel-collapsed .project-quick-actions {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 6px;
     margin-top: 10px;
+  }
+
+  /* Collapsed card keeps only 名稱 / HOME / 啟動 / 兩種重新整理 / 開啟終端. */
+  tbody tr.project-data-row.is-panel-collapsed .project-path-text,
+  tbody tr.project-data-row.is-panel-collapsed .project-name-links .page-count {
+    display: none;
+  }
+
+  tbody tr.project-data-row.is-panel-collapsed .project-name-links {
+    margin-top: 2px;
   }
 
   .project-quick-actions .row-action {
@@ -4558,8 +4605,7 @@ button:disabled {
   }
 
   .log-tabs {
-    width: 110px;
-    max-height: 38vh;
+    max-height: 96px;
   }
 
   .copy-url,
