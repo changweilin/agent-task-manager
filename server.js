@@ -657,6 +657,8 @@ function defaultTerminalPreferences() {
     workspace: normalizeTerminalWorkspace({}),
     // Pipeline config is shared so it can be set on a phone and run on the local machine.
     pipeline: null,
+    // Saved pipeline run-progress so a run can be resumed after a page reload / quota wait.
+    pipelineRun: null,
     updatedAt: null,
   };
 }
@@ -689,6 +691,9 @@ function readTerminalPreferences() {
     pipeline: saved && stored?.pipeline && typeof stored.pipeline === 'object'
       ? stored.pipeline
       : defaults.pipeline,
+    pipelineRun: saved && stored?.pipelineRun && typeof stored.pipelineRun === 'object'
+      ? stored.pipelineRun
+      : defaults.pipelineRun,
   };
 }
 
@@ -720,6 +725,9 @@ function saveTerminalPreferences(patch) {
     pipeline: Object.prototype.hasOwnProperty.call(source, 'pipeline')
       ? (source.pipeline && typeof source.pipeline === 'object' ? source.pipeline : null)
       : current.pipeline,
+    pipelineRun: Object.prototype.hasOwnProperty.call(source, 'pipelineRun')
+      ? (source.pipelineRun && typeof source.pipelineRun === 'object' ? source.pipelineRun : null)
+      : current.pipelineRun,
     updatedAt: new Date().toISOString(),
   };
 
@@ -2759,6 +2767,26 @@ function getProjectByName(projects, name) {
   return projects.find((project) => project.name === name);
 }
 
+// ATM itself can be opened as a terminal target (its own install directory). It is a
+// synthetic project not present in the scanned project list.
+const ATM_TERMINAL_PROJECT_NAME = 'ATM (本機)';
+function atmTerminalProject() {
+  return {
+    name: ATM_TERMINAL_PROJECT_NAME,
+    path: ROOT_DIR,
+    port: null,
+    localUrl: buildUrl('127.0.0.1', port),
+    framework: 'atm',
+    isAtm: true,
+  };
+}
+function terminalProjectFromName(name, projects) {
+  if (name === ATM_TERMINAL_PROJECT_NAME) {
+    return atmTerminalProject();
+  }
+  return getProjectByName(projects, name);
+}
+
 function getProjectByPath(projects, projectPath) {
   return projects.find((project) => normalizePath(project.path) === normalizePath(projectPath));
 }
@@ -3922,6 +3950,82 @@ function extractQuotaSignals(text) {
   return signals;
 }
 
+// Parse a duration like "3h 21m", "45 min", "2 小時 5 分" → seconds.
+function quotaDurationToSeconds(str) {
+  const h = str.match(/(\d+)\s*(?:h(?:ours?|rs?)?|小時)\b/i);
+  const m = str.match(/(\d+)\s*(?:m(?:in(?:ute)?s?)?|分(?:鐘)?)\b/i);
+  if (!h && !m) {
+    return null;
+  }
+  return (h ? Number(h[1]) * 3600 : 0) + (m ? Number(m[1]) * 60 : 0);
+}
+
+// Parse a clock time like "2:00am", "14:30", "2:00 PM" → seconds until its next
+// occurrence from `now`.
+function quotaClockToSeconds(str, now = new Date()) {
+  const match = str.match(/\b(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  if (!match) {
+    return null;
+  }
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const ampm = (match[3] || '').toLowerCase();
+  if (ampm === 'pm' && hour < 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) {
+    return null;
+  }
+  const target = new Date(now);
+  target.setHours(hour, minute, 0, 0);
+  let diff = (target.getTime() - now.getTime()) / 1000;
+  if (diff < -120) {
+    diff += 24 * 3600;
+  }
+  return Math.max(0, diff);
+}
+
+// Best-effort seconds until the 5h/session quota window resets, parsed from the
+// CLI's /usage or /status output. Prefers the line tied to the 5h/session window.
+// Returns null when no reset time can be found.
+function parseQuotaResetSeconds(text) {
+  const cleaned = cleanAiQuotaText(text);
+  if (!cleaned) {
+    return null;
+  }
+  const lines = cleaned.split('\n');
+  let best = null; // { seconds, priority }
+  const consider = (seconds, priority) => {
+    if (seconds == null || !Number.isFinite(seconds) || seconds < 0 || seconds > 6 * 3600) {
+      return;
+    }
+    if (!best || priority > best.priority || (priority === best.priority && seconds < best.seconds)) {
+      best = { seconds, priority };
+    }
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const window = `${lines[i - 1] || ''} ${lines[i]} ${lines[i + 1] || ''}`;
+    const resetIndex = window.search(/reset|重置/i);
+    if (resetIndex < 0) {
+      continue;
+    }
+    // Weekly windows reset on a weekday name, not a time we care about here.
+    if (/(week|weekly|每週|每周|\bmon\b|\btue\b|\bwed\b|\bthu\b|\bfri\b|\bsat\b|\bsun\b)/i.test(window)
+      && !/(5\s*-?\s*h|session|目前)/i.test(window)) {
+      continue;
+    }
+    const priority = /(5\s*-?\s*h(?:our)?|session|目前對話|current\s+session)/i.test(window) ? 3 : 1;
+    const after = window.slice(resetIndex).slice(0, 60);
+    const before = window.slice(Math.max(0, resetIndex - 40), resetIndex);
+    let seconds = quotaDurationToSeconds(after);
+    if (seconds == null) seconds = quotaDurationToSeconds(before);
+    if (seconds == null) seconds = quotaClockToSeconds(after);
+    consider(seconds, priority);
+  }
+
+  return best ? Math.round(best.seconds) : null;
+}
+
 function quotaSignalScore(signal, index) {
   const label = String(signal?.label || '');
   let score = 100;
@@ -4483,6 +4587,9 @@ async function probeAiQuotaAgent(agent, signal = null) {
     usedPercent: primary?.percent ?? null,
     direction: primary?.direction || 'used',
     percentLabel: primary ? (primary.percentLabel || quotaPercentText(primary.displayPercent ?? primary.percent, primary.direction)) : '--%',
+    // Seconds until the 5h/session window resets (null if not detected); used by the
+    // pipeline quota gate to pace work right before the reset.
+    resetSeconds: parseQuotaResetSeconds(combinedOutput),
     probe: agent.probe,
     summary: status === 'timeout'
       ? '配額 slash 指令逾時，已中斷監控終端。'
@@ -5755,6 +5862,13 @@ async function getStatusPayload(request = null) {
       terminalReadOnly,
       terminalClaudeRemoteLaunch: localRequest,
       terminalAgentRemoteLaunch: localRequest,
+      // ATM itself as a terminal target (its own install directory).
+      atm: {
+        name: ATM_TERMINAL_PROJECT_NAME,
+        path: ROOT_DIR,
+        port,
+        localUrl: buildUrl('127.0.0.1', port),
+      },
       configPath: CONFIG_PATH,
       statePath: STATE_PATH,
     },
@@ -6049,7 +6163,9 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    const { project } = selectedProjectFromUrl(url);
+    const sel = selectedProjectFromUrl(url);
+    const reqName = decodeURIComponent(url.pathname.split('/')[3] || '');
+    const project = sel.project || (reqName === ATM_TERMINAL_PROJECT_NAME ? atmTerminalProject() : null);
     if (!project) {
       sendError(response, 404, 'Project not found.');
       return;
@@ -6136,7 +6252,9 @@ async function handleApi(request, response, url) {
     }
 
     const body = await readRequestBody(request);
-    const { project } = selectedProjectFromUrl(url);
+    const sel = selectedProjectFromUrl(url);
+    const reqName = decodeURIComponent(url.pathname.split('/')[3] || '');
+    const project = sel.project || (reqName === ATM_TERMINAL_PROJECT_NAME ? atmTerminalProject() : null);
     if (!project) {
       sendError(response, 404, 'Project not found.');
       return;
@@ -6175,7 +6293,9 @@ async function handleApi(request, response, url) {
     }
 
     const body = await readRequestBody(request);
-    const { project } = selectedProjectFromUrl(url);
+    const sel = selectedProjectFromUrl(url);
+    const reqName = decodeURIComponent(url.pathname.split('/')[3] || '');
+    const project = sel.project || (reqName === ATM_TERMINAL_PROJECT_NAME ? atmTerminalProject() : null);
     if (!project) {
       sendError(response, 404, 'Project not found.');
       return;
@@ -6216,7 +6336,7 @@ async function handleApi(request, response, url) {
     const body = await readRequestBody(request);
     const config = getConfig();
     const projects = normalizeProjects(config.projects, config.basePort);
-    const project = getProjectByName(projects, body.name || '');
+    const project = terminalProjectFromName(body.name || '', projects);
     if (!project) {
       sendError(response, 404, 'Project not found.');
       return;
