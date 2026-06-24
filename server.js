@@ -108,8 +108,8 @@ const TERMINAL_WORKSPACE_SESSION_LIMIT = 80;
 const TERMINAL_DEFAULT_COLS = 100;
 const TERMINAL_DEFAULT_ROWS = 28;
 const TERMINAL_MAX_ROWS = 120;
-const TERMINAL_FAVORITES_VERSION = 7;
-const TERMINAL_AGENT_IDS = ['claude', 'codex', 'antigravity'];
+const TERMINAL_FAVORITES_VERSION = 8;
+const TERMINAL_AGENT_IDS = ['claude', 'codex', 'antigravity', 'opencode'];
 const DEFAULT_TERMINAL_AGENT_ID = 'claude';
 const TERMINAL_LEGACY_CLAUDE_FAVORITES = ['claude', 'claude -r', 'claude -c'];
 const TERMINAL_CLAUDE_SLASH_FAVORITES = [
@@ -177,6 +177,9 @@ const TERMINAL_CODEX_SLASH_FAVORITES = [
   { id: 'favorite-codex-debug-config', command: '/debug-config', note: '' },
   { id: 'favorite-codex-clear', command: '/clear', note: '' },
   { id: 'favorite-codex-new', command: '/new', note: '' },
+  { id: 'favorite-codex-undo', command: '/undo', note: '' },
+  { id: 'favorite-codex-help', command: '/help', note: '' },
+  { id: 'favorite-codex-login', command: '/login', note: '' },
   { id: 'favorite-codex-logout', command: '/logout', note: '' },
   { id: 'favorite-codex-feedback', command: '/feedback', note: '' },
   { id: 'favorite-codex-exit', command: '/exit', note: '' },
@@ -202,12 +205,38 @@ const TERMINAL_ANTIGRAVITY_SLASH_FAVORITES = [
   { id: 'favorite-antigravity-usage', command: '/usage', note: '' },
   { id: 'favorite-antigravity-clear', command: '/clear', note: '' },
   { id: 'favorite-antigravity-fork', command: '/fork', note: '' },
+  { id: 'favorite-antigravity-help', command: '/help', note: '' },
+  { id: 'favorite-antigravity-init', command: '/init', note: '' },
+  { id: 'favorite-antigravity-compact', command: '/compact', note: '' },
+  { id: 'favorite-antigravity-diff', command: '/diff', note: '' },
+  { id: 'favorite-antigravity-login', command: '/login', note: '' },
   { id: 'favorite-antigravity-logout', command: '/logout', note: '' },
+  { id: 'favorite-antigravity-exit', command: '/exit', note: '' },
+];
+const TERMINAL_OPENCODE_SLASH_FAVORITES = [
+  { id: 'favorite-opencode-help', command: '/help', note: '' },
+  { id: 'favorite-opencode-new', command: '/new', note: '' },
+  { id: 'favorite-opencode-sessions', command: '/sessions', note: '' },
+  { id: 'favorite-opencode-share', command: '/share', note: '' },
+  { id: 'favorite-opencode-unshare', command: '/unshare', note: '' },
+  { id: 'favorite-opencode-init', command: '/init', note: '' },
+  { id: 'favorite-opencode-compact', command: '/compact', note: '' },
+  { id: 'favorite-opencode-summarize', command: '/summarize', note: '' },
+  { id: 'favorite-opencode-undo', command: '/undo', note: '' },
+  { id: 'favorite-opencode-redo', command: '/redo', note: '' },
+  { id: 'favorite-opencode-models', command: '/models', note: '' },
+  { id: 'favorite-opencode-agent', command: '/agent', note: '' },
+  { id: 'favorite-opencode-editor', command: '/editor', note: '' },
+  { id: 'favorite-opencode-themes', command: '/themes', note: '' },
+  { id: 'favorite-opencode-details', command: '/details', note: '' },
+  { id: 'favorite-opencode-export', command: '/export', note: '' },
+  { id: 'favorite-opencode-exit', command: '/exit', note: '' },
 ];
 const DEFAULT_TERMINAL_FAVORITES_BY_AGENT = {
   claude: TERMINAL_CLAUDE_SLASH_FAVORITES,
   codex: TERMINAL_CODEX_SLASH_FAVORITES,
   antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES,
+  opencode: TERMINAL_OPENCODE_SLASH_FAVORITES,
 };
 const TERMINAL_CODEX_FAVORITE_MIGRATION_7_COMMANDS = [
   '/approve',
@@ -266,6 +295,19 @@ const TERMINAL_FAVORITE_MIGRATIONS = [
       antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.map((favorite) => favorite.command),
     },
   },
+  {
+    version: 8,
+    favoritesByAgent: {
+      codex: TERMINAL_CODEX_SLASH_FAVORITES.filter((favorite) => ['/undo', '/help', '/login'].includes(favorite.command)),
+      antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.filter((favorite) => ['/help', '/init', '/compact', '/diff', '/login', '/exit'].includes(favorite.command)),
+      opencode: TERMINAL_OPENCODE_SLASH_FAVORITES,
+    },
+    reorderCommandsByAgent: {
+      codex: TERMINAL_CODEX_SLASH_FAVORITES.map((favorite) => favorite.command),
+      antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.map((favorite) => favorite.command),
+      opencode: TERMINAL_OPENCODE_SLASH_FAVORITES.map((favorite) => favorite.command),
+    },
+  },
 ];
 const DEFAULT_TERMINAL_FAVORITES = [
   ...TERMINAL_CLAUDE_SLASH_FAVORITES,
@@ -287,6 +329,8 @@ const TERMINAL_REMOTE_CODEX_FLAGS = new Set([
 ]);
 const TERMINAL_ANTIGRAVITY_COMMANDS = new Set(['agy']);
 const TERMINAL_REMOTE_ANTIGRAVITY_FLAGS = new Set(['--sandbox', '--dangerously-skip-permissions']);
+const TERMINAL_OPENCODE_COMMANDS = new Set(['opencode', 'opencode --continue']);
+const TERMINAL_REMOTE_OPENCODE_FLAGS = new Set(['--share', '--print-logs', '--agent build', '--continue']);
 const AI_QUOTA_PROBE_TIMEOUT_MS = 14000;
 const AI_QUOTA_PTY_PROBE_TIMEOUT_MS = 32000;
 const AI_QUOTA_AUTH_TIMEOUT_MS = 3500;
@@ -3657,6 +3701,43 @@ function buildTerminalAntigravityLaunchCommand(settings = {}) {
   return [command, ...flags].join(' ');
 }
 
+function normalizeTerminalOpencodeFlagForLaunch(value) {
+  let flag = normalizeTerminalClaudeText(value, 120);
+  if (!flag) {
+    return '';
+  }
+  if (!flag.startsWith('-')) {
+    flag = `--${flag}`;
+  }
+  if (!TERMINAL_REMOTE_OPENCODE_FLAGS.has(flag)) {
+    throw new Error(`opencode flag is not allowed for remote launch: ${flag}`);
+  }
+  return flag;
+}
+
+function buildTerminalOpencodeLaunchCommand(settings = {}) {
+  const command = TERMINAL_OPENCODE_COMMANDS.has(settings.command)
+    ? settings.command
+    : 'opencode';
+  const model = normalizeTerminalCodexModelForLaunch(settings.model);
+  const activeFlags = Array.isArray(settings.activeFlags) ? settings.activeFlags : [];
+  const flags = [];
+  const flagKeys = new Set();
+  activeFlags.forEach((item) => {
+    const flag = normalizeTerminalOpencodeFlagForLaunch(item);
+    if (flag && !flagKeys.has(flag)) {
+      flagKeys.add(flag);
+      flags.push(flag);
+    }
+  });
+  const parts = [command];
+  if (model) {
+    parts.push('--model', quoteTerminalClaudeArgument(model));
+  }
+  parts.push(...flags);
+  return parts.join(' ');
+}
+
 function buildTerminalAgentLaunchCommand(agent, settings = {}) {
   const agentId = normalizeTerminalClaudeText(agent, 32).toLowerCase();
   if (agentId === 'claude') {
@@ -3667,6 +3748,9 @@ function buildTerminalAgentLaunchCommand(agent, settings = {}) {
   }
   if (agentId === 'antigravity') {
     return buildTerminalAntigravityLaunchCommand(settings);
+  }
+  if (agentId === 'opencode') {
+    return buildTerminalOpencodeLaunchCommand(settings);
   }
   throw new Error('Terminal agent is not supported for remote launch.');
 }

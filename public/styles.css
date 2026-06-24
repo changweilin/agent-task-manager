@@ -3604,6 +3604,39 @@ a.page-link:hover {
   line-height: 1.5;
 }
 
+/* 記事本:不執行的 pipeline 草稿 + 加入 Pipeline 動作列。 */
+.terminal-notepad-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.terminal-notepad-bar .terminal-pipeline-hint {
+  margin: 0;
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.terminal-notepad-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.terminal-notepad-actions .copy-url {
+  width: auto;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
 .terminal-pipeline-steps {
   display: grid;
   gap: 8px;
@@ -4742,6 +4775,17 @@ button:disabled {
 
   .terminal-heading-actions {
     width: 100%;
+    flex-wrap: wrap;
+  }
+
+  /* Three-way 終端管理 / Pipeline 管理 / 記事本 toggle fits narrow screens. */
+  .terminal-mode-toggle {
+    flex: 1 1 auto;
+  }
+
+  .terminal-mode-button {
+    flex: 1 1 auto;
+    padding: 6px 8px;
   }
 
   .terminal-add-button {

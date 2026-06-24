@@ -309,10 +309,11 @@ const LEFT_RAIL_MIN_WIDTH = 220;
 const LEFT_RAIL_MAX_WIDTH = 560;
 const TERMINAL_FAVORITES_KEY = 'agentTaskManager.terminalFavorites.v1';
 const TERMINAL_FAVORITES_VERSION_KEY = 'agentTaskManager.terminalFavoritesVersion.v1';
-const TERMINAL_FAVORITES_VERSION = 7;
+const TERMINAL_FAVORITES_VERSION = 8;
 const TERMINAL_CLAUDE_SETTINGS_KEY = 'agentTaskManager.terminalClaudeSettings.v1';
 const TERMINAL_CODEX_SETTINGS_KEY = 'agentTaskManager.terminalCodexSettings.v1';
 const TERMINAL_ANTIGRAVITY_SETTINGS_KEY = 'agentTaskManager.terminalAntigravitySettings.v1';
+const TERMINAL_OPENCODE_SETTINGS_KEY = 'agentTaskManager.terminalOpencodeSettings.v1';
 const TERMINAL_WORKSPACE_KEY = 'agentTaskManager.terminalWorkspace.v1';
 const LEGACY_STORAGE_KEYS = new Map([
   [TABLE_PREFERENCES_KEY, 'devDock.tablePreferences.v3'],
@@ -330,10 +331,13 @@ const TERMINAL_AGENT_TABS = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'Codex CLI' },
   { id: 'antigravity', label: 'Antigravity CLI' },
+  { id: 'opencode', label: 'opencode' },
 ];
 const DEFAULT_TERMINAL_AGENT_ID = 'claude';
 const terminalAgentIds = new Set(TERMINAL_AGENT_TABS.map((agent) => agent.id));
 const TERMINAL_PIPELINE_KEY = 'agentTaskManager.terminalPipeline.v1';
+// 記事本:一份不會被執行的 pipeline 草稿(只有段落 prompt,沒有 pipeline 參數)。
+const TERMINAL_NOTEPAD_KEY = 'agentTaskManager.terminalNotepad.v1';
 // ATM itself, openable as a terminal target (must match the server's name).
 const ATM_TERMINAL_PROJECT_NAME = 'ATM (本機)';
 // Slash command each agent uses to start a fresh conversation while the same
@@ -342,6 +346,7 @@ const TERMINAL_PIPELINE_AGENT_RESET = {
   claude: '/clear',
   codex: '/new',
   antigravity: '/clear',
+  opencode: '/new',
 };
 const TERMINAL_PIPELINE_CONVERSATIONS = new Set(['same', 'new']);
 const TERMINAL_PIPELINE_IDLE_MIN = 3;
@@ -449,6 +454,9 @@ const TERMINAL_CODEX_SLASH_FAVORITES = [
   { id: 'favorite-codex-debug-config', command: '/debug-config', note: '' },
   { id: 'favorite-codex-clear', command: '/clear', note: '' },
   { id: 'favorite-codex-new', command: '/new', note: '' },
+  { id: 'favorite-codex-undo', command: '/undo', note: '' },
+  { id: 'favorite-codex-help', command: '/help', note: '' },
+  { id: 'favorite-codex-login', command: '/login', note: '' },
   { id: 'favorite-codex-logout', command: '/logout', note: '' },
   { id: 'favorite-codex-feedback', command: '/feedback', note: '' },
   { id: 'favorite-codex-exit', command: '/exit', note: '' },
@@ -474,12 +482,38 @@ const TERMINAL_ANTIGRAVITY_SLASH_FAVORITES = [
   { id: 'favorite-antigravity-usage', command: '/usage', note: '' },
   { id: 'favorite-antigravity-clear', command: '/clear', note: '' },
   { id: 'favorite-antigravity-fork', command: '/fork', note: '' },
+  { id: 'favorite-antigravity-help', command: '/help', note: '' },
+  { id: 'favorite-antigravity-init', command: '/init', note: '' },
+  { id: 'favorite-antigravity-compact', command: '/compact', note: '' },
+  { id: 'favorite-antigravity-diff', command: '/diff', note: '' },
+  { id: 'favorite-antigravity-login', command: '/login', note: '' },
   { id: 'favorite-antigravity-logout', command: '/logout', note: '' },
+  { id: 'favorite-antigravity-exit', command: '/exit', note: '' },
+];
+const TERMINAL_OPENCODE_SLASH_FAVORITES = [
+  { id: 'favorite-opencode-help', command: '/help', note: '' },
+  { id: 'favorite-opencode-new', command: '/new', note: '' },
+  { id: 'favorite-opencode-sessions', command: '/sessions', note: '' },
+  { id: 'favorite-opencode-share', command: '/share', note: '' },
+  { id: 'favorite-opencode-unshare', command: '/unshare', note: '' },
+  { id: 'favorite-opencode-init', command: '/init', note: '' },
+  { id: 'favorite-opencode-compact', command: '/compact', note: '' },
+  { id: 'favorite-opencode-summarize', command: '/summarize', note: '' },
+  { id: 'favorite-opencode-undo', command: '/undo', note: '' },
+  { id: 'favorite-opencode-redo', command: '/redo', note: '' },
+  { id: 'favorite-opencode-models', command: '/models', note: '' },
+  { id: 'favorite-opencode-agent', command: '/agent', note: '' },
+  { id: 'favorite-opencode-editor', command: '/editor', note: '' },
+  { id: 'favorite-opencode-themes', command: '/themes', note: '' },
+  { id: 'favorite-opencode-details', command: '/details', note: '' },
+  { id: 'favorite-opencode-export', command: '/export', note: '' },
+  { id: 'favorite-opencode-exit', command: '/exit', note: '' },
 ];
 const DEFAULT_TERMINAL_FAVORITES_BY_AGENT = {
   claude: TERMINAL_CLAUDE_SLASH_FAVORITES,
   codex: TERMINAL_CODEX_SLASH_FAVORITES,
   antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES,
+  opencode: TERMINAL_OPENCODE_SLASH_FAVORITES,
 };
 const TERMINAL_CODEX_FAVORITE_MIGRATION_7_COMMANDS = [
   '/approve',
@@ -536,6 +570,21 @@ const TERMINAL_FAVORITE_MIGRATIONS = [
     reorderCommandsByAgent: {
       codex: TERMINAL_CODEX_SLASH_FAVORITES.map((favorite) => favorite.command),
       antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.map((favorite) => favorite.command),
+    },
+  },
+  {
+    // v8: add opencode (new agent) defaults, and backfill commonly-missing codex /
+    // antigravity commands for users who already have stored favorites.
+    version: 8,
+    favoritesByAgent: {
+      codex: TERMINAL_CODEX_SLASH_FAVORITES.filter((favorite) => ['/undo', '/help', '/login'].includes(favorite.command)),
+      antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.filter((favorite) => ['/help', '/init', '/compact', '/diff', '/login', '/exit'].includes(favorite.command)),
+      opencode: TERMINAL_OPENCODE_SLASH_FAVORITES,
+    },
+    reorderCommandsByAgent: {
+      codex: TERMINAL_CODEX_SLASH_FAVORITES.map((favorite) => favorite.command),
+      antigravity: TERMINAL_ANTIGRAVITY_SLASH_FAVORITES.map((favorite) => favorite.command),
+      opencode: TERMINAL_OPENCODE_SLASH_FAVORITES.map((favorite) => favorite.command),
     },
   },
 ];
@@ -656,6 +705,20 @@ const DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS = {
   favoriteFlags: TERMINAL_ANTIGRAVITY_DEFAULT_FLAG_FAVORITES,
   activeFlags: [],
 };
+// opencode (github.com/sst/opencode): `opencode` opens the TUI in the cwd; `-c` /
+// `--continue` resumes the last session; `-m/--model provider/model` picks a model.
+const TERMINAL_OPENCODE_COMMANDS = ['opencode', 'opencode --continue'];
+const TERMINAL_OPENCODE_DEFAULT_FLAG_FAVORITES = [
+  { id: 'opencode-flag-share', flag: '--share' },
+  { id: 'opencode-flag-print-logs', flag: '--print-logs' },
+  { id: 'opencode-flag-agent', flag: '--agent build' },
+];
+const DEFAULT_TERMINAL_OPENCODE_SETTINGS = {
+  command: 'opencode',
+  model: '',
+  favoriteFlags: TERMINAL_OPENCODE_DEFAULT_FLAG_FAVORITES,
+  activeFlags: [],
+};
 const DEFAULT_COLUMN_ORDER = ['name', 'status', 'framework', 'port', 'tailscale', 'health', 'command', 'started', 'restarted', 'pid'];
 const ACTION_URL_COLUMN_IDS = ['local', 'lan'];
 const DEFAULT_COLUMN_WIDTHS = {
@@ -757,6 +820,8 @@ const state = {
   terminalCodexFlagDraft: '',
   terminalAntigravity: { ...DEFAULT_TERMINAL_ANTIGRAVITY_SETTINGS },
   terminalAntigravityFlagDraft: '',
+  terminalOpencode: { ...DEFAULT_TERMINAL_OPENCODE_SETTINGS },
+  terminalOpencodeFlagDraft: '',
   terminalTabDrag: null,
   suppressTerminalTabClick: false,
   quotaModalOpen: false,
@@ -765,6 +830,8 @@ const state = {
   quotaError: '',
   quotaRequestId: 0,
   terminalPipeline: null,
+  // 記事本草稿(不會執行,只暫存段落 prompt;可整批加入 Pipeline)。
+  terminalNotepad: null,
   terminalPipelineRun: {
     active: false,
     sessionLocalId: null,
@@ -900,6 +967,7 @@ const elements = {
   terminalTitle: document.querySelector('#terminalTitle'),
   terminalModeTerminalButton: document.querySelector('#terminalModeTerminalButton'),
   terminalModePipelineButton: document.querySelector('#terminalModePipelineButton'),
+  terminalModeNotepadButton: document.querySelector('#terminalModeNotepadButton'),
   closeTerminalModal: document.querySelector('#closeTerminalModal'),
   addTerminalSession: document.querySelector('#addTerminalSession'),
   terminalTabsRow: document.querySelector('#terminalTabsRow'),
@@ -3674,6 +3742,24 @@ async function loadTerminalSessions({ silent = false } = {}) {
         liveIds.add(session.id);
       }
     });
+    // On the first load after a page (re)load, terminals we had open whose server
+    // process is gone — e.g. ATM was restarted by a 全專案重新整理 — are turned back
+    // into relaunchable drafts so the open tabs/layout are remembered instead of
+    // vanishing. (Ongoing cross-device sync still drops sessions closed elsewhere.)
+    if (!state.terminalWorkspaceLoaded) {
+      state.terminalSessions.forEach((session) => {
+        if (session.id && !liveIds.has(session.id) && !session.readOnly) {
+          session.id = null;
+          session.running = false;
+          session.interactive = false;
+          session.exitedAt = null;
+          session.exitCode = null;
+          session.exitSignal = null;
+          session.cursor = 0;
+          session.output = '';
+        }
+      });
+    }
     state.terminalSessions = state.terminalSessions.filter((session) => !session.id || liveIds.has(session.id));
     state.terminalWorkspaceMetaBySessionId = new Map(
       [...state.terminalWorkspaceMetaBySessionId.entries()].filter(([id]) => liveIds.has(id)),
@@ -4095,6 +4181,46 @@ function saveTerminalAntigravitySettings() {
   }
 }
 
+function normalizeTerminalOpencodeSettings(settings) {
+  const source = settings && typeof settings === 'object' ? settings : {};
+  const command = TERMINAL_OPENCODE_COMMANDS.includes(source.command)
+    ? source.command
+    : DEFAULT_TERMINAL_OPENCODE_SETTINGS.command;
+  const model = String(source.model || '').replace(/\0/g, '').replace(/[\r\n]+/g, ' ').trim().slice(0, 160);
+  const favoriteSource = Array.isArray(source.favoriteFlags)
+    ? [
+        ...source.favoriteFlags,
+        ...(Array.isArray(source.activeFlags) ? source.activeFlags : []),
+      ]
+    : TERMINAL_OPENCODE_DEFAULT_FLAG_FAVORITES;
+  const favoriteFlags = normalizeTerminalAgentFavoriteFlags(favoriteSource, TERMINAL_OPENCODE_DEFAULT_FLAG_FAVORITES, 'opencode');
+  const activeFlags = normalizeTerminalAgentActiveFlags(Array.isArray(source.activeFlags) ? source.activeFlags : [], favoriteFlags);
+
+  return {
+    ...DEFAULT_TERMINAL_OPENCODE_SETTINGS,
+    command,
+    model,
+    favoriteFlags,
+    activeFlags,
+  };
+}
+
+function readTerminalOpencodeSettings() {
+  try {
+    return normalizeTerminalOpencodeSettings(JSON.parse(readLocalPreference(TERMINAL_OPENCODE_SETTINGS_KEY) || 'null'));
+  } catch {
+    return normalizeTerminalOpencodeSettings(DEFAULT_TERMINAL_OPENCODE_SETTINGS);
+  }
+}
+
+function saveTerminalOpencodeSettings() {
+  try {
+    writeLocalPreference(TERMINAL_OPENCODE_SETTINGS_KEY, JSON.stringify(normalizeTerminalOpencodeSettings(state.terminalOpencode)));
+  } catch {
+    // opencode launcher settings remain usable for this session if localStorage is blocked.
+  }
+}
+
 function terminalQuoteArgument(value) {
   const text = String(value || '').replace(/\0/g, '').replace(/[\r\n]+/g, ' ').trim();
   if (!text) {
@@ -4180,6 +4306,30 @@ function terminalAntigravityLaunchPayload() {
   const settings = normalizeTerminalAntigravitySettings(state.terminalAntigravity);
   return {
     command: settings.command,
+    activeFlags: settings.activeFlags,
+  };
+}
+
+function buildTerminalOpencodeCommand() {
+  const settings = normalizeTerminalOpencodeSettings(state.terminalOpencode);
+  const parts = [settings.command];
+  const model = terminalQuoteArgument(settings.model);
+
+  if (model) {
+    parts.push('--model', model);
+  }
+  settings.activeFlags.forEach((flag) => {
+    parts.push(flag);
+  });
+
+  return parts.join(' ');
+}
+
+function terminalOpencodeLaunchPayload() {
+  const settings = normalizeTerminalOpencodeSettings(state.terminalOpencode);
+  return {
+    command: settings.command,
+    model: settings.model,
     activeFlags: settings.activeFlags,
   };
 }
@@ -4278,6 +4428,41 @@ function saveTerminalPipeline({ sync = true } = {}) {
   // Sync the pipeline config to the server so it can be set on a phone and run locally.
   if (sync) {
     scheduleTerminalPreferencesSave();
+  }
+}
+
+// 記事本:一份不會被執行的 pipeline 草稿。共用 pipeline 的段落結構(project /
+// prompt / conversation),但沒有 idle/逾時/quota 等執行參數,也不會被執行。
+function defaultTerminalNotepad() {
+  return { steps: [normalizeTerminalPipelineStep({ conversation: 'same' })] };
+}
+
+function normalizeTerminalNotepad(notepad) {
+  const source = notepad && typeof notepad === 'object' ? notepad : {};
+  const steps = Array.isArray(source.steps) && source.steps.length
+    ? source.steps.map((step) => normalizeTerminalPipelineStep(step))
+    : defaultTerminalNotepad().steps;
+  return { steps };
+}
+
+function getTerminalNotepad() {
+  state.terminalNotepad = normalizeTerminalNotepad(state.terminalNotepad);
+  return state.terminalNotepad;
+}
+
+function readTerminalNotepad() {
+  try {
+    return normalizeTerminalNotepad(JSON.parse(readLocalPreference(TERMINAL_NOTEPAD_KEY) || 'null'));
+  } catch {
+    return defaultTerminalNotepad();
+  }
+}
+
+function saveTerminalNotepad() {
+  try {
+    writeLocalPreference(TERMINAL_NOTEPAD_KEY, JSON.stringify(normalizeTerminalNotepad(state.terminalNotepad)));
+  } catch {
+    // The notepad stays usable for this session even if localStorage is blocked.
   }
 }
 
@@ -4862,6 +5047,10 @@ function applyTerminalAntigravityCommand({ run = false } = {}) {
   applyTerminalAgentCommand('antigravity', buildTerminalAntigravityCommand(), terminalAntigravityLaunchPayload(), { run });
 }
 
+function applyTerminalOpencodeCommand({ run = false } = {}) {
+  applyTerminalAgentCommand('opencode', buildTerminalOpencodeCommand(), terminalOpencodeLaunchPayload(), { run });
+}
+
 function toggleTerminalClaudeFavoriteFlag(id) {
   const settings = normalizeTerminalClaudeSettings(state.terminalClaude);
   const favorite = settings.favoriteFlags.find((item) => item.id === id);
@@ -5066,6 +5255,75 @@ function deleteTerminalAntigravityFavoriteFlag(id) {
     activeFlags: settings.activeFlags.filter((flag) => terminalClaudeFlagKey(flag) !== key),
   });
   saveTerminalAntigravitySettings();
+  renderTerminalModal();
+}
+
+function toggleTerminalOpencodeFavoriteFlag(id) {
+  const settings = normalizeTerminalOpencodeSettings(state.terminalOpencode);
+  const favorite = settings.favoriteFlags.find((item) => item.id === id);
+  if (!favorite) {
+    return;
+  }
+
+  const key = terminalClaudeFlagKey(favorite.flag);
+  const nextActiveFlags = settings.activeFlags.some((flag) => terminalClaudeFlagKey(flag) === key)
+    ? settings.activeFlags.filter((flag) => terminalClaudeFlagKey(flag) !== key)
+    : [...settings.activeFlags, favorite.flag];
+
+  state.terminalOpencode = normalizeTerminalOpencodeSettings({
+    ...settings,
+    activeFlags: nextActiveFlags,
+  });
+  saveTerminalOpencodeSettings();
+  renderTerminalModal();
+}
+
+function addTerminalOpencodeFavoriteFlag() {
+  const flag = normalizeTerminalClaudeFlagText(state.terminalOpencodeFlagDraft);
+  if (!flag) {
+    showToast('請輸入啟動旗標');
+    return;
+  }
+
+  const settings = normalizeTerminalOpencodeSettings(state.terminalOpencode);
+  const existing = settings.favoriteFlags.find((item) => terminalClaudeFlagKey(item.flag) === terminalClaudeFlagKey(flag));
+  const favoriteFlags = existing
+    ? settings.favoriteFlags
+    : [
+        ...settings.favoriteFlags,
+        {
+          id: createTerminalAgentFlagId('opencode', flag, new Set(settings.favoriteFlags.map((item) => item.id))),
+          flag,
+        },
+      ];
+  const activeFlags = settings.activeFlags.some((item) => terminalClaudeFlagKey(item) === terminalClaudeFlagKey(flag))
+    ? settings.activeFlags
+    : [...settings.activeFlags, flag];
+
+  state.terminalOpencode = normalizeTerminalOpencodeSettings({
+    ...settings,
+    favoriteFlags,
+    activeFlags,
+  });
+  state.terminalOpencodeFlagDraft = '';
+  saveTerminalOpencodeSettings();
+  renderTerminalModal();
+}
+
+function deleteTerminalOpencodeFavoriteFlag(id) {
+  const settings = normalizeTerminalOpencodeSettings(state.terminalOpencode);
+  const favorite = settings.favoriteFlags.find((item) => item.id === id);
+  if (!favorite) {
+    return;
+  }
+
+  const key = terminalClaudeFlagKey(favorite.flag);
+  state.terminalOpencode = normalizeTerminalOpencodeSettings({
+    ...settings,
+    favoriteFlags: settings.favoriteFlags.filter((item) => item.id !== id),
+    activeFlags: settings.activeFlags.filter((flag) => terminalClaudeFlagKey(flag) !== key),
+  });
+  saveTerminalOpencodeSettings();
   renderTerminalModal();
 }
 
@@ -5793,6 +6051,9 @@ function renderTerminalActiveAgentLauncher(session, options) {
   if (activeAgentId === 'antigravity') {
     return renderTerminalAntigravityLauncher(session, options);
   }
+  if (activeAgentId === 'opencode') {
+    return renderTerminalOpencodeLauncher(session, options);
+  }
   return renderTerminalClaudeLauncher(session, options);
 }
 
@@ -6062,6 +6323,55 @@ function renderTerminalAntigravityLauncher(session, options) {
         </div>
         ${flags}
       </div>
+    </section>
+  `;
+}
+
+function renderTerminalOpencodeLauncher(session, options) {
+  const settings = normalizeTerminalOpencodeSettings(state.terminalOpencode);
+  const preview = buildTerminalOpencodeCommand();
+  const canUseOpencode = terminalCanUseAgentLauncher(session);
+  const disabled = canUseOpencode ? '' : 'disabled';
+  const commandDisabled = canUseOpencode && !(!session.id && options.loading) ? '' : 'disabled';
+  const commandButtons = TERMINAL_OPENCODE_COMMANDS.map((command) => {
+    const active = settings.command === command;
+    return `
+      <button
+        class="terminal-claude-command-button ${active ? 'is-active' : ''}"
+        data-terminal-opencode-command="${escapeHtml(command)}"
+        type="button"
+        aria-label="Launch ${escapeHtml(command)}"
+        aria-pressed="${active ? 'true' : 'false'}"
+        ${commandDisabled}
+      >${escapeHtml(command)}</button>
+    `;
+  }).join('');
+  const flags = renderTerminalAgentFlagControls({
+    agentId: 'opencode',
+    activeFlags: settings.activeFlags,
+    favoriteFlags: settings.favoriteFlags,
+    draft: state.terminalOpencodeFlagDraft,
+    disabled,
+  });
+
+  return `
+    <section class="terminal-claude-launcher terminal-agent-launcher" aria-label="opencode">
+      <div class="terminal-claude-header">
+        <div>
+          <strong>opencode</strong>
+          <span data-terminal-agent-preview="opencode">${escapeHtml(preview)}</span>
+        </div>
+      </div>
+      <div class="terminal-claude-grid terminal-agent-grid">
+        <div class="terminal-claude-command" role="group" aria-label="opencode command">
+          ${commandButtons}
+        </div>
+        <label class="terminal-claude-field terminal-agent-wide-field">
+          <span>--model</span>
+          <input data-terminal-opencode-model type="text" value="${escapeHtml(settings.model)}" placeholder="anthropic/claude-sonnet-4-6" spellcheck="false" ${disabled} />
+        </label>
+      </div>
+      ${flags}
     </section>
   `;
 }
@@ -6438,6 +6748,61 @@ function renderTerminalPipelineMode() {
   `;
 }
 
+// 記事本:不會被執行的 pipeline 草稿。只有段落(project / prompt / 對話模式),沒有
+// 執行參數與執行/接續/停止控制;提供「加入 Pipeline」與「加入並保留副本」。
+function renderTerminalNotepad() {
+  const notepad = getTerminalNotepad();
+  const projects = terminalProjectList();
+  const projectOptions = (selected) => `
+    <option value="" ${selected ? '' : 'selected'}>預設專案</option>
+    ${projects.map((project) => `<option value="${escapeHtml(project.name)}" ${project.name === selected ? 'selected' : ''}>${escapeHtml(project.name)}</option>`).join('')}
+  `;
+
+  const stepsHtml = notepad.steps.map((step, index) => `
+    <div class="terminal-pipeline-step" data-notepad-step="${escapeHtml(step.id)}">
+      <div class="terminal-pipeline-step-head">
+        <span class="terminal-pipeline-step-index">${index + 1}</span>
+        <label class="terminal-pipeline-step-project" title="加入 Pipeline 後,這段 prompt 要在哪個專案的終端執行">
+          <span class="terminal-pipeline-step-project-icon" aria-hidden="true">${icons.terminal}</span>
+          <select data-notepad-project="${escapeHtml(step.id)}" aria-label="第 ${index + 1} 段專案">
+            ${projectOptions(step.project)}
+          </select>
+        </label>
+        <div class="terminal-pipeline-conversation" role="group" aria-label="第 ${index + 1} 段對話模式">
+          <button class="terminal-pipeline-conv-button ${step.conversation === 'same' ? 'is-active' : ''}" data-notepad-conversation="${escapeHtml(step.id)}" data-notepad-conversation-mode="same" type="button" aria-pressed="${step.conversation === 'same'}">延續對話</button>
+          <button class="terminal-pipeline-conv-button ${step.conversation === 'new' ? 'is-active' : ''}" data-notepad-conversation="${escapeHtml(step.id)}" data-notepad-conversation-mode="new" type="button" aria-pressed="${step.conversation === 'new'}">開新對話</button>
+        </div>
+        <button class="terminal-pipeline-step-delete" data-notepad-delete="${escapeHtml(step.id)}" type="button" title="刪除這段" aria-label="刪除第 ${index + 1} 段" ${notepad.steps.length <= 1 ? 'disabled' : ''}>${icons.remove}</button>
+      </div>
+      <textarea class="terminal-pipeline-prompt" data-notepad-prompt="${escapeHtml(step.id)}" rows="3" spellcheck="false" placeholder="第 ${index + 1} 段筆記 / prompt…">${escapeHtml(step.prompt)}</textarea>
+    </div>
+  `).join('');
+
+  return `
+    <div class="terminal-pipeline terminal-notepad">
+      <div class="terminal-notepad-bar">
+        <p class="terminal-pipeline-hint">記事本只是暫存區,不會被執行。整理好後可整批加入 Pipeline 再去設定執行參數。</p>
+        <div class="terminal-notepad-actions">
+          <button class="copy-url primary-action" data-notepad-to-pipeline type="button">${icons.add}<span>加入 Pipeline</span></button>
+          <button class="copy-url" data-notepad-to-pipeline-copy type="button">${icons.save}<span>加入並保留副本</span></button>
+        </div>
+      </div>
+      <div class="terminal-pipeline-steps">${stepsHtml}</div>
+      <button class="copy-url terminal-pipeline-add" data-notepad-add type="button">${icons.add}<span>新增一段</span></button>
+    </div>
+  `;
+}
+
+function renderTerminalNotepadMode() {
+  elements.terminalWorkspace.innerHTML = `
+    <section class="terminal-session is-focus-mode terminal-pipeline-mode" data-terminal-notepad-mode>
+      <div class="terminal-pipeline-scroll">
+        ${renderTerminalNotepad()}
+      </div>
+    </section>
+  `;
+}
+
 function renderTerminalModal() {
   if (!state.terminalModalOpen) {
     return;
@@ -6450,29 +6815,44 @@ function renderTerminalModal() {
   state.terminalActiveSessionId = activeSession?.localId || null;
   rememberTerminalActiveSession();
 
-  const mode = state.terminalModalMode === 'pipeline' ? 'pipeline' : 'terminal';
+  const mode = state.terminalModalMode === 'pipeline'
+    ? 'pipeline'
+    : state.terminalModalMode === 'notepad'
+      ? 'notepad'
+      : 'terminal';
   const terminalMode = mode === 'terminal';
   elements.terminalTitle.textContent = mode === 'pipeline'
     ? 'Pipeline 管理'
-    : (project ? `終端管理：${project.name}` : '終端管理');
+    : mode === 'notepad'
+      ? '記事本'
+      : (project ? `終端管理：${project.name}` : '終端管理');
 
-  // Mode toggle (終端管理 / Pipeline 管理) button states.
-  elements.terminalModeTerminalButton?.classList.toggle('is-active', terminalMode);
-  elements.terminalModeTerminalButton?.setAttribute('aria-selected', terminalMode ? 'true' : 'false');
-  elements.terminalModePipelineButton?.classList.toggle('is-active', !terminalMode);
-  elements.terminalModePipelineButton?.setAttribute('aria-selected', !terminalMode ? 'true' : 'false');
+  // Mode toggle (終端管理 / Pipeline 管理 / 記事本) button states.
+  elements.terminalModeTerminalButton?.classList.toggle('is-active', mode === 'terminal');
+  elements.terminalModeTerminalButton?.setAttribute('aria-selected', mode === 'terminal' ? 'true' : 'false');
+  elements.terminalModePipelineButton?.classList.toggle('is-active', mode === 'pipeline');
+  elements.terminalModePipelineButton?.setAttribute('aria-selected', mode === 'pipeline' ? 'true' : 'false');
+  elements.terminalModeNotepadButton?.classList.toggle('is-active', mode === 'notepad');
+  elements.terminalModeNotepadButton?.setAttribute('aria-selected', mode === 'notepad' ? 'true' : 'false');
 
   // The modal is always maximised now (the 放大 toggle was replaced by the mode toggle).
   elements.terminalModal.querySelector('.terminal-modal-panel')?.classList.add('is-focus-mode');
 
   // The conversation tabs row (含「新增對話」)belongs to 終端管理 mode only. The 切換專案
-  // cluster moved into the workspace page, so Pipeline 管理 (no tabs/page) hides it too.
+  // cluster moved into the workspace page, so Pipeline 管理 / 記事本 (no tabs/page) hide it.
   elements.terminalTabsRow.hidden = !terminalMode;
 
   if (mode === 'pipeline') {
     elements.terminalEmpty.hidden = true;
     renderTerminalPipelineMode();
     // The terminal surfaces were just detached; tear down their orphaned xterm views.
+    disposeUnusedTerminalViews();
+    return;
+  }
+
+  if (mode === 'notepad') {
+    elements.terminalEmpty.hidden = true;
+    renderTerminalNotepadMode();
     disposeUnusedTerminalViews();
     return;
   }
@@ -7724,6 +8104,10 @@ function pipelineLaunchAgentCommand() {
     applyTerminalAntigravityCommand({ run: true });
     return buildTerminalAntigravityCommand();
   }
+  if (agentId === 'opencode') {
+    applyTerminalOpencodeCommand({ run: true });
+    return buildTerminalOpencodeCommand();
+  }
   applyTerminalClaudeCommand({ run: true });
   return buildTerminalClaudeCommand();
 }
@@ -8122,11 +8506,105 @@ function setTerminalContentTab(tabId) {
 }
 
 function setTerminalModalMode(mode) {
-  const next = mode === 'pipeline' ? 'pipeline' : 'terminal';
+  const next = mode === 'pipeline' ? 'pipeline' : mode === 'notepad' ? 'notepad' : 'terminal';
   if (state.terminalModalMode === next) {
     return;
   }
   state.terminalModalMode = next;
+  renderTerminalModal();
+}
+
+// ---- 記事本(不執行的 pipeline 草稿)----
+function addTerminalNotepadStep() {
+  const notepad = getTerminalNotepad();
+  notepad.steps.push(normalizeTerminalPipelineStep({ conversation: 'same' }));
+  saveTerminalNotepad();
+  renderTerminalModal();
+}
+
+function deleteTerminalNotepadStep(id) {
+  const notepad = getTerminalNotepad();
+  if (notepad.steps.length <= 1) {
+    return;
+  }
+  notepad.steps = notepad.steps.filter((step) => step.id !== id);
+  saveTerminalNotepad();
+  renderTerminalModal();
+}
+
+function setTerminalNotepadConversation(id, conversationMode) {
+  if (!TERMINAL_PIPELINE_CONVERSATIONS.has(conversationMode)) {
+    return;
+  }
+  const notepad = getTerminalNotepad();
+  const step = notepad.steps.find((item) => item.id === id);
+  if (!step || step.conversation === conversationMode) {
+    return;
+  }
+  step.conversation = conversationMode;
+  saveTerminalNotepad();
+  renderTerminalModal();
+}
+
+// Save edits from the notepad prompt/project controls without re-rendering, so the
+// field the user is typing in keeps focus.
+function updateTerminalNotepadFromInput(target) {
+  if (target.dataset.notepadPrompt === undefined) {
+    return false;
+  }
+  const notepad = getTerminalNotepad();
+  const step = notepad.steps.find((item) => item.id === target.dataset.notepadPrompt);
+  if (step) {
+    step.prompt = String(target.value || '').slice(0, TERMINAL_PIPELINE_PROMPT_LIMIT);
+    saveTerminalNotepad();
+  }
+  return true;
+}
+
+function updateTerminalNotepadFromChange(target) {
+  if (target.dataset.notepadProject === undefined) {
+    return false;
+  }
+  const notepad = getTerminalNotepad();
+  const step = notepad.steps.find((item) => item.id === target.dataset.notepadProject);
+  if (step) {
+    step.project = terminalProjectList().some((project) => project.name === target.value) ? target.value : '';
+    saveTerminalNotepad();
+  }
+  return true;
+}
+
+// Append the notepad's (non-empty) steps to the real Pipeline. With keepCopy the
+// notepad keeps its steps; otherwise it is reset to a single blank step.
+function addTerminalNotepadToPipeline({ keepCopy = false } = {}) {
+  if (state.terminalPipelineRun.active) {
+    showToast('Pipeline 執行中,請先停止再加入段落');
+    return;
+  }
+  const notepad = getTerminalNotepad();
+  const steps = notepad.steps.filter((step) => step.prompt.trim());
+  if (!steps.length) {
+    showToast('記事本沒有可加入的段落(每段需有 prompt)');
+    return;
+  }
+
+  const pipeline = getTerminalPipeline();
+  // Drop the pipeline's leftover blank steps, then append fresh copies of the notepad
+  // steps with new ids so the two lists never share step identities.
+  const kept = pipeline.steps.filter((step) => step.prompt.trim());
+  const additions = steps.map((step) => normalizeTerminalPipelineStep({ ...step, id: terminalPipelineStepId() }));
+  pipeline.steps = [...kept, ...additions];
+  saveTerminalPipeline();
+
+  if (!keepCopy) {
+    state.terminalNotepad = defaultTerminalNotepad();
+    saveTerminalNotepad();
+  }
+
+  showToast(keepCopy
+    ? `已加入 Pipeline(保留副本),共 ${additions.length} 段`
+    : `已加入 Pipeline,共 ${additions.length} 段`);
+  state.terminalModalMode = 'pipeline';
   renderTerminalModal();
 }
 
@@ -9121,6 +9599,7 @@ elements.quotaModal.addEventListener('click', (event) => {
 elements.closeTerminalModal.addEventListener('click', hideTerminalManager);
 elements.terminalModeTerminalButton?.addEventListener('click', () => setTerminalModalMode('terminal'));
 elements.terminalModePipelineButton?.addEventListener('click', () => setTerminalModalMode('pipeline'));
+elements.terminalModeNotepadButton?.addEventListener('click', () => setTerminalModalMode('notepad'));
 elements.addTerminalSession.addEventListener('click', () => {
   if (!terminalCanAddSession()) {
     showToast('Terminal is read-only from LAN/Tailscale.');
@@ -9245,6 +9724,9 @@ elements.terminalWorkspace.addEventListener('change', (event) => {
   if (updateTerminalPipelineFromChange(event.target)) {
     return;
   }
+  if (updateTerminalNotepadFromChange(event.target)) {
+    return;
+  }
 
   // 切換專案 picker now lives inside the page (workspace).
   const projectPicker = event.target.closest('select[data-terminal-project-picker]');
@@ -9334,6 +9816,9 @@ elements.terminalWorkspace.addEventListener('input', (event) => {
   if (updateTerminalPipelineFromInput(event.target)) {
     return;
   }
+  if (updateTerminalNotepadFromInput(event.target)) {
+    return;
+  }
 
   const claudeCustomModelInput = event.target.closest('[data-terminal-claude-custom-model]');
   if (claudeCustomModelInput) {
@@ -9373,6 +9858,23 @@ elements.terminalWorkspace.addEventListener('input', (event) => {
   const antigravityFlagDraftInput = event.target.closest('[data-terminal-antigravity-flag-draft]');
   if (antigravityFlagDraftInput) {
     state.terminalAntigravityFlagDraft = antigravityFlagDraftInput.value;
+    return;
+  }
+
+  const opencodeModelInput = event.target.closest('[data-terminal-opencode-model]');
+  if (opencodeModelInput) {
+    state.terminalOpencode = normalizeTerminalOpencodeSettings({
+      ...state.terminalOpencode,
+      model: opencodeModelInput.value,
+    });
+    saveTerminalOpencodeSettings();
+    syncTerminalAgentPreview('opencode', buildTerminalOpencodeCommand());
+    return;
+  }
+
+  const opencodeFlagDraftInput = event.target.closest('[data-terminal-opencode-flag-draft]');
+  if (opencodeFlagDraftInput) {
+    state.terminalOpencodeFlagDraft = opencodeFlagDraftInput.value;
     return;
   }
 
@@ -9487,6 +9989,39 @@ elements.terminalWorkspace.addEventListener('click', (event) => {
     return;
   }
 
+  const notepadAddButton = event.target.closest('button[data-notepad-add]');
+  if (notepadAddButton) {
+    addTerminalNotepadStep();
+    return;
+  }
+
+  const notepadDeleteButton = event.target.closest('button[data-notepad-delete]');
+  if (notepadDeleteButton) {
+    deleteTerminalNotepadStep(notepadDeleteButton.dataset.notepadDelete);
+    return;
+  }
+
+  const notepadConversationButton = event.target.closest('button[data-notepad-conversation]');
+  if (notepadConversationButton) {
+    setTerminalNotepadConversation(
+      notepadConversationButton.dataset.notepadConversation,
+      notepadConversationButton.dataset.notepadConversationMode,
+    );
+    return;
+  }
+
+  const notepadToPipelineButton = event.target.closest('button[data-notepad-to-pipeline]');
+  if (notepadToPipelineButton) {
+    addTerminalNotepadToPipeline({ keepCopy: false });
+    return;
+  }
+
+  const notepadToPipelineCopyButton = event.target.closest('button[data-notepad-to-pipeline-copy]');
+  if (notepadToPipelineCopyButton) {
+    addTerminalNotepadToPipeline({ keepCopy: true });
+    return;
+  }
+
   const agentTabButton = event.target.closest('button[data-terminal-agent-tab]');
   if (agentTabButton) {
     switchTerminalFavoriteAgent(agentTabButton.dataset.terminalAgentTab);
@@ -9577,6 +10112,35 @@ elements.terminalWorkspace.addEventListener('click', (event) => {
   const antigravityAddFlagButton = event.target.closest('button[data-terminal-antigravity-add-flag]');
   if (antigravityAddFlagButton) {
     addTerminalAntigravityFavoriteFlag();
+    return;
+  }
+
+  const opencodeCommandButton = event.target.closest('button[data-terminal-opencode-command]');
+  if (opencodeCommandButton) {
+    state.terminalOpencode = normalizeTerminalOpencodeSettings({
+      ...state.terminalOpencode,
+      command: opencodeCommandButton.dataset.terminalOpencodeCommand,
+    });
+    saveTerminalOpencodeSettings();
+    applyTerminalOpencodeCommand({ run: true });
+    return;
+  }
+
+  const opencodeFavoriteFlagButton = event.target.closest('button[data-terminal-opencode-favorite-flag]');
+  if (opencodeFavoriteFlagButton) {
+    toggleTerminalOpencodeFavoriteFlag(opencodeFavoriteFlagButton.dataset.terminalOpencodeFavoriteFlag);
+    return;
+  }
+
+  const opencodeDeleteFlagButton = event.target.closest('button[data-terminal-opencode-delete-flag]');
+  if (opencodeDeleteFlagButton) {
+    deleteTerminalOpencodeFavoriteFlag(opencodeDeleteFlagButton.dataset.terminalOpencodeDeleteFlag);
+    return;
+  }
+
+  const opencodeAddFlagButton = event.target.closest('button[data-terminal-opencode-add-flag]');
+  if (opencodeAddFlagButton) {
+    addTerminalOpencodeFavoriteFlag();
     return;
   }
 
@@ -9744,6 +10308,20 @@ elements.terminalWorkspace.addEventListener('keydown', (event) => {
     return;
   }
 
+  const opencodeFlagDraftInput = event.target.closest('[data-terminal-opencode-flag-draft]');
+  if (opencodeFlagDraftInput) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      addTerminalOpencodeFavoriteFlag();
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      state.terminalOpencodeFlagDraft = '';
+      renderTerminalModal();
+    }
+    return;
+  }
+
   const favoriteCommandInput = event.target.closest('[data-terminal-favorite-command]');
   const favoriteNoteInput = event.target.closest('[data-terminal-favorite-note]');
   if (favoriteCommandInput || favoriteNoteInput) {
@@ -9877,7 +10455,9 @@ syncTerminalFavoritesFromActiveAgent();
 state.terminalClaude = readTerminalClaudeSettings();
 state.terminalCodex = readTerminalCodexSettings();
 state.terminalAntigravity = readTerminalAntigravitySettings();
+state.terminalOpencode = readTerminalOpencodeSettings();
 state.terminalPipeline = readTerminalPipeline();
+state.terminalNotepad = readTerminalNotepad();
 restoreTerminalWorkspaceState();
 const terminalPreferencesReady = loadTerminalPreferences({ silent: true });
 applyTheme(readThemePreference());
