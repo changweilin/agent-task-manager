@@ -898,12 +898,11 @@ const elements = {
   runFirewallCommand: document.querySelector('#runFirewallCommand'),
   terminalModal: document.querySelector('#terminalModal'),
   terminalTitle: document.querySelector('#terminalTitle'),
-  backToHomeFromTerminal: document.querySelector('#backToHomeFromTerminal'),
   terminalModeTerminalButton: document.querySelector('#terminalModeTerminalButton'),
   terminalModePipelineButton: document.querySelector('#terminalModePipelineButton'),
   closeTerminalModal: document.querySelector('#closeTerminalModal'),
   addTerminalSession: document.querySelector('#addTerminalSession'),
-  terminalProjectBar: document.querySelector('#terminalProjectBar'),
+  terminalTabsRow: document.querySelector('#terminalTabsRow'),
   terminalTabs: document.querySelector('#terminalTabs'),
   terminalWorkspace: document.querySelector('#terminalWorkspace'),
   terminalEmpty: document.querySelector('#terminalEmpty'),
@@ -4731,7 +4730,7 @@ async function launchRemoteTerminalClaude(session) {
   const command = buildTerminalClaudeCommand();
   session.input = command;
   setTerminalTitleFromCommand(session, command);
-  session.busy = true;
+  const signal = beginTerminalSessionBusy(session, '啟動 Claude Code…');
   renderTerminalModal();
 
   try {
@@ -4742,15 +4741,18 @@ async function launchRemoteTerminalClaude(session) {
         cols: session.cols,
         rows: session.rows,
       }),
+      signal,
     });
 
     session.input = '';
     applyTerminalPayload(session, payload);
     startTerminalPolling();
   } catch (error) {
-    showToast(error.message);
+    if (!isAbortError(error)) {
+      showToast(error.message);
+    }
   } finally {
-    session.busy = false;
+    endTerminalSessionBusy(session);
     renderTerminalModal();
   }
 }
@@ -4763,7 +4765,7 @@ async function launchRemoteTerminalAgent(session, agent, command, settings) {
 
   session.input = command;
   setTerminalTitleFromCommand(session, command);
-  session.busy = true;
+  const signal = beginTerminalSessionBusy(session, `啟動 ${terminalAgentLabel(agent)}…`);
   renderTerminalModal();
 
   try {
@@ -4775,15 +4777,18 @@ async function launchRemoteTerminalAgent(session, agent, command, settings) {
         cols: session.cols,
         rows: session.rows,
       }),
+      signal,
     });
 
     session.input = '';
     applyTerminalPayload(session, payload);
     startTerminalPolling();
   } catch (error) {
-    showToast(error.message);
+    if (!isAbortError(error)) {
+      showToast(error.message);
+    }
   } finally {
-    session.busy = false;
+    endTerminalSessionBusy(session);
     renderTerminalModal();
   }
 }
@@ -5513,50 +5518,105 @@ function hasRestorableTerminalProject(projectName) {
     .some((session) => session.projectName === projectName);
 }
 
-function renderTerminalProjectBar() {
-  // The 1s poll and live re-renders call this often; rebuilding innerHTML while the
-  // user has the 切換專案 <select> open (focused) would snap the dropdown shut. Skip
-  // the rebuild until the picker loses focus.
-  if (document.activeElement?.matches?.('select[data-terminal-project-picker]')) {
-    return;
-  }
-
+// The 切換專案 cluster now lives inside the active tab's page (workspace) instead of a
+// bar above the conversation tabs. Returns markup; renderTerminalModal injects it into
+// the workspace. The 1s poll no longer rebuilds the workspace, so an open <select> is
+// not snapped shut mid-interaction.
+function renderTerminalProjectSwitcher() {
   const projects = terminalProjectList();
   const selectedProjectName = state.terminalProjectName || projects[0]?.name || '';
   const openProjectNames = terminalProjectNames();
 
-  elements.terminalProjectBar.innerHTML = `
-    <label class="terminal-project-picker">
-      <span>切換專案</span>
-      <select data-terminal-project-picker aria-label="切換終端專案">
-        ${projects.map((project) => `
-          <option value="${escapeHtml(project.name)}" ${project.name === selectedProjectName ? 'selected' : ''}>
-            ${escapeHtml(project.name)}
-          </option>
-        `).join('')}
-      </select>
-    </label>
-    <div class="terminal-project-windows" role="tablist" aria-label="已開啟的終端視窗">
-      ${openProjectNames.map((projectName) => {
-        const counts = terminalProjectSessionCounts(projectName);
-        const active = projectName === state.terminalProjectName;
-        return `
-          <button
-            class="terminal-project-window ${active ? 'is-active' : ''}"
-            data-terminal-project-window="${escapeHtml(projectName)}"
-            type="button"
-            role="tab"
-            aria-selected="${active ? 'true' : 'false'}"
-            title="${escapeHtml(projectName)}"
-          >
-            <span>${escapeHtml(projectName)}</span>
-            <strong>${counts.total}</strong>
-            ${counts.running ? '<i aria-hidden="true"></i>' : ''}
-          </button>
-        `;
-      }).join('')}
+  return `
+    <div class="terminal-project-bar" aria-label="切換專案">
+      <label class="terminal-project-picker">
+        <span>切換專案</span>
+        <select data-terminal-project-picker aria-label="切換終端專案">
+          ${projects.map((project) => `
+            <option value="${escapeHtml(project.name)}" ${project.name === selectedProjectName ? 'selected' : ''}>
+              ${escapeHtml(project.name)}
+            </option>
+          `).join('')}
+        </select>
+      </label>
+      <div class="terminal-project-windows" role="tablist" aria-label="已開啟的終端視窗">
+        ${openProjectNames.map((projectName) => {
+          const counts = terminalProjectSessionCounts(projectName);
+          const active = projectName === state.terminalProjectName;
+          return `
+            <button
+              class="terminal-project-window ${active ? 'is-active' : ''}"
+              data-terminal-project-window="${escapeHtml(projectName)}"
+              type="button"
+              role="tab"
+              aria-selected="${active ? 'true' : 'false'}"
+              title="${escapeHtml(projectName)}"
+            >
+              <span>${escapeHtml(projectName)}</span>
+              <strong>${counts.total}</strong>
+              ${counts.running ? '<i aria-hidden="true"></i>' : ''}
+            </button>
+          `;
+        }).join('')}
+      </div>
     </div>
   `;
+}
+
+// A small indeterminate progress bar + 中斷 button shown while a session is waiting on a
+// server round-trip (launch / send / close). The abort button cancels the in-flight
+// request via the AbortController stashed on the session.
+function renderTerminalBusyBar(session) {
+  if (!session?.busy) {
+    return '';
+  }
+  const label = session.busyLabel || '處理中…';
+  const canAbort = Boolean(session.busyAbort);
+  return `
+    <div class="terminal-busy-bar" role="status" aria-live="polite">
+      <div class="terminal-busy-track"><div class="terminal-busy-fill"></div></div>
+      <span class="terminal-busy-label">${escapeHtml(label)}</span>
+      ${canAbort ? `<button class="copy-url danger-action terminal-busy-abort" data-terminal-busy-abort="${escapeHtml(session.localId)}" type="button">${icons.stop}<span>中斷</span></button>` : ''}
+    </div>
+  `;
+}
+
+// Marks a session busy with a label + a fresh AbortController so the 中斷 button can
+// cancel the in-flight request. Returns the controller's signal to pass to api().
+function beginTerminalSessionBusy(session, label) {
+  const controller = new AbortController();
+  session.busy = true;
+  session.busyLabel = label || '處理中…';
+  session.busyAbort = controller;
+  session.busyAborted = false;
+  return controller.signal;
+}
+
+function endTerminalSessionBusy(session) {
+  if (!session) {
+    return;
+  }
+  session.busy = false;
+  session.busyLabel = '';
+  session.busyAbort = null;
+}
+
+function abortTerminalSessionBusy(localId) {
+  const session = findTerminalSession(localId);
+  if (!session || !session.busy || !session.busyAbort) {
+    return;
+  }
+  session.busyAborted = true;
+  try {
+    session.busyAbort.abort();
+  } catch {
+    // The request may already have settled.
+  }
+  showToast('已中斷');
+}
+
+function isAbortError(error) {
+  return error?.name === 'AbortError';
 }
 
 function renderTerminalTabs() {
@@ -6323,33 +6383,37 @@ function renderTerminalPipeline(session) {
         </label>
       </div>
       <div class="terminal-pipeline-quota">
-        <label class="terminal-pipeline-quota-toggle">
-          <input type="checkbox" data-pipeline-quota-enabled ${quota.enabled ? 'checked' : ''} ${running ? 'disabled' : ''} />
-          <span>5h 配額調節（達門檻時等到接近重置再續跑）</span>
-        </label>
-        <div class="terminal-pipeline-quota-options ${quota.enabled ? '' : 'is-disabled'}">
-          <label class="terminal-pipeline-field">
-            <span>檢查對象</span>
-            <select data-pipeline-quota-agent ${running || !quota.enabled ? 'disabled' : ''}>
-              ${AI_QUOTA_MONITOR_AGENTS.map((agent) => `<option value="${escapeHtml(agent.id)}" ${quota.agent === agent.id ? 'selected' : ''}>${escapeHtml(agent.label)}</option>`).join('')}
-            </select>
-          </label>
-          <label class="terminal-pipeline-field">
-            <span>剩餘門檻 T %</span>
-            <input data-pipeline-quota-threshold type="number" min="0" max="100" step="1" value="${quota.minRemaining}" ${running || !quota.enabled ? 'disabled' : ''} title="剩餘配額 ≤ T 時開始等待至接近重置" />
-          </label>
-          <label class="terminal-pipeline-field">
-            <span>倒數秒/% C</span>
-            <input data-pipeline-quota-countdown type="number" min="${TERMINAL_PIPELINE_COUNTDOWN_MIN}" max="${TERMINAL_PIPELINE_COUNTDOWN_MAX}" step="1" value="${quota.countdownPerPercent}" ${running || !quota.enabled ? 'disabled' : ''} title="重置前 (剩餘−S)×C 秒開始續跑" />
-          </label>
-          <label class="terminal-pipeline-field">
-            <span>安全緩衝 S %</span>
-            <input data-pipeline-quota-safety type="number" min="${TERMINAL_PIPELINE_SAFETY_MIN}" max="${TERMINAL_PIPELINE_SAFETY_MAX}" step="1" value="${quota.safetyBuffer}" ${running || !quota.enabled ? 'disabled' : ''} title="預留不使用的配額百分比" />
-          </label>
-          <label class="terminal-pipeline-quota-strict">
-            <input type="checkbox" data-pipeline-quota-strict ${quota.stopOnUnknown ? 'checked' : ''} ${running || !quota.enabled ? 'disabled' : ''} />
-            <span>無法判斷配額時停止（否則照舊續跑）</span>
-          </label>
+        <div class="terminal-pipeline-quota-main">
+          <div class="terminal-pipeline-quota-options ${quota.enabled ? '' : 'is-disabled'}">
+            <label class="terminal-pipeline-field">
+              <span>檢查對象</span>
+              <select data-pipeline-quota-agent ${running || !quota.enabled ? 'disabled' : ''}>
+                ${AI_QUOTA_MONITOR_AGENTS.map((agent) => `<option value="${escapeHtml(agent.id)}" ${quota.agent === agent.id ? 'selected' : ''}>${escapeHtml(agent.label)}</option>`).join('')}
+              </select>
+            </label>
+            <label class="terminal-pipeline-field">
+              <span>剩餘門檻 T %</span>
+              <input data-pipeline-quota-threshold type="number" min="0" max="100" step="1" value="${quota.minRemaining}" ${running || !quota.enabled ? 'disabled' : ''} title="剩餘配額 ≤ T 時開始等待至接近重置" />
+            </label>
+            <label class="terminal-pipeline-field">
+              <span>倒數秒/% C</span>
+              <input data-pipeline-quota-countdown type="number" min="${TERMINAL_PIPELINE_COUNTDOWN_MIN}" max="${TERMINAL_PIPELINE_COUNTDOWN_MAX}" step="1" value="${quota.countdownPerPercent}" ${running || !quota.enabled ? 'disabled' : ''} title="重置前 (剩餘−S)×C 秒開始續跑" />
+            </label>
+            <label class="terminal-pipeline-field">
+              <span>安全緩衝 S %</span>
+              <input data-pipeline-quota-safety type="number" min="${TERMINAL_PIPELINE_SAFETY_MIN}" max="${TERMINAL_PIPELINE_SAFETY_MAX}" step="1" value="${quota.safetyBuffer}" ${running || !quota.enabled ? 'disabled' : ''} title="預留不使用的配額百分比" />
+            </label>
+          </div>
+          <div class="terminal-pipeline-quota-checks">
+            <label class="terminal-pipeline-quota-toggle" title="達門檻時等到接近重置再續跑">
+              <input type="checkbox" data-pipeline-quota-enabled ${quota.enabled ? 'checked' : ''} ${running ? 'disabled' : ''} />
+              <span>5h 配額調節</span>
+            </label>
+            <label class="terminal-pipeline-quota-strict" title="無法判斷配額時停止（否則照舊續跑）">
+              <input type="checkbox" data-pipeline-quota-strict ${quota.stopOnUnknown ? 'checked' : ''} ${running || !quota.enabled ? 'disabled' : ''} />
+              <span>無法判斷時停止</span>
+            </label>
+          </div>
         </div>
       </div>
       <div class="terminal-pipeline-steps">${stepsHtml}</div>
@@ -6401,10 +6465,9 @@ function renderTerminalModal() {
   // The modal is always maximised now (the 放大 toggle was replaced by the mode toggle).
   elements.terminalModal.querySelector('.terminal-modal-panel')?.classList.add('is-focus-mode');
 
-  // The project bar / tabs / 新增 belong to 終端管理 mode only.
-  elements.terminalProjectBar.hidden = !terminalMode;
-  elements.terminalTabs.hidden = !terminalMode;
-  elements.addTerminalSession.hidden = !terminalMode;
+  // The conversation tabs row (含「新增對話」)belongs to 終端管理 mode only. The 切換專案
+  // cluster moved into the workspace page, so Pipeline 管理 (no tabs/page) hides it too.
+  elements.terminalTabsRow.hidden = !terminalMode;
 
   if (mode === 'pipeline') {
     elements.terminalEmpty.hidden = true;
@@ -6416,15 +6479,20 @@ function renderTerminalModal() {
 
   elements.addTerminalSession.disabled = !terminalCanAddSession();
   elements.terminalEmpty.hidden = sessions.length > 0;
-  renderTerminalProjectBar();
   renderTerminalTabs();
 
   if (!activeSession) {
-    elements.terminalWorkspace.innerHTML = '';
+    // No conversation yet — still show the 切換專案 cluster so the page is never blank.
+    elements.terminalWorkspace.innerHTML = `
+      <section class="terminal-session">
+        ${renderTerminalProjectSwitcher()}
+      </section>
+    `;
     return;
   }
 
   applyTerminalFocusAuto(activeSession);
+  const focusActive = terminalFocusActive(activeSession);
 
   const editingTitle = state.terminalTitleEditingId === activeSession.localId;
   const sessionTitleControl = editingTitle
@@ -6501,8 +6569,10 @@ function renderTerminalModal() {
 
   elements.terminalWorkspace.innerHTML = `
     <section class="terminal-session ${focusActive ? 'is-focus-mode' : ''}" data-terminal-panel="${escapeHtml(activeSession.localId)}">
+      ${renderTerminalProjectSwitcher()}
       ${renderTerminalContentTabBar(activeTab)}
       ${pipelineBar}
+      ${renderTerminalBusyBar(activeSession)}
       <div class="terminal-tab-content terminal-tab-${escapeHtml(activeTab)} ${activeTab === 'terminal' && terminalLive ? 'is-terminal-live' : ''}" data-terminal-content="${escapeHtml(activeTab)}">
         ${tabBody}
       </div>
@@ -7456,16 +7526,18 @@ async function runTerminalCommand(localId) {
     return;
   }
 
-  session.busy = true;
+  const signal = beginTerminalSessionBusy(session, session.id ? '送出指令…' : '開啟終端…');
   renderTerminalModal();
   try {
     const payload = session.id
       ? await api(`/api/terminals/${encodeURIComponent(session.id)}`, {
           method: 'POST',
           body: JSON.stringify({ input: command, cursor: session.cursor }),
+          signal,
         })
       : await api('/api/terminals', {
           method: 'POST',
+          signal,
           body: JSON.stringify({
             name: session.projectName,
             command,
@@ -7481,9 +7553,11 @@ async function runTerminalCommand(localId) {
     saveTerminalWorkspaceState();
     startTerminalPolling();
   } catch (error) {
-    showToast(error.message);
+    if (!isAbortError(error)) {
+      showToast(error.message);
+    }
   } finally {
-    session.busy = false;
+    endTerminalSessionBusy(session);
     renderTerminalModal();
   }
 }
@@ -8234,17 +8308,18 @@ async function closeTerminalDialog(localId) {
   }
 
   const closingActiveSession = state.terminalActiveSessionId === localId;
-  session.busy = true;
+  const signal = beginTerminalSessionBusy(session, '關閉對話…');
   renderTerminalModal();
   try {
-    disposeTerminalView(localId);
     if (session.id) {
       await api(`/api/terminals/${encodeURIComponent(session.id)}`, {
         method: 'DELETE',
+        signal,
       });
       state.terminalWorkspaceMetaBySessionId.delete(session.id);
     }
 
+    disposeTerminalView(localId);
     state.terminalSessions = state.terminalSessions.filter((item) => item.localId !== localId);
     const sessions = terminalSessionsForProject();
     if (state.terminalTitleEditingId === localId) {
@@ -8258,8 +8333,11 @@ async function closeTerminalDialog(localId) {
     saveTerminalWorkspaceState();
     renderTerminalModal();
   } catch (error) {
-    session.busy = false;
-    showToast(error.message);
+    // 中斷 or failure: keep the conversation; just clear the busy state.
+    endTerminalSessionBusy(session);
+    if (!isAbortError(error)) {
+      showToast(error.message);
+    }
     renderTerminalModal();
   }
 }
@@ -8378,7 +8456,6 @@ async function pollTerminalSessions() {
     renderTerminalModal();
   } else {
     renderTerminalTabs();
-    renderTerminalProjectBar();
   }
 }
 
@@ -9042,7 +9119,6 @@ elements.quotaModal.addEventListener('click', (event) => {
   }
 });
 elements.closeTerminalModal.addEventListener('click', hideTerminalManager);
-elements.backToHomeFromTerminal.addEventListener('click', hideTerminalManager);
 elements.terminalModeTerminalButton?.addEventListener('click', () => setTerminalModalMode('terminal'));
 elements.terminalModePipelineButton?.addEventListener('click', () => setTerminalModalMode('pipeline'));
 elements.addTerminalSession.addEventListener('click', () => {
@@ -9059,26 +9135,6 @@ elements.addTerminalSession.addEventListener('click', () => {
   createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
   saveTerminalWorkspaceState();
   renderTerminalModal();
-});
-elements.terminalProjectBar.addEventListener('change', (event) => {
-  const picker = event.target.closest('select[data-terminal-project-picker]');
-  if (!picker) {
-    return;
-  }
-
-  switchTerminalProject(picker.value, { ensureDraft: true });
-  renderTerminalModal();
-  startTerminalPolling();
-});
-elements.terminalProjectBar.addEventListener('click', (event) => {
-  const projectButton = event.target.closest('button[data-terminal-project-window]');
-  if (!projectButton) {
-    return;
-  }
-
-  switchTerminalProject(projectButton.dataset.terminalProjectWindow, { ensureDraft: true });
-  renderTerminalModal();
-  startTerminalPolling();
 });
 elements.terminalTabs.addEventListener('click', (event) => {
   if (state.suppressTerminalTabClick) {
@@ -9187,6 +9243,15 @@ elements.terminalTabs.addEventListener('pointercancel', () => {
 });
 elements.terminalWorkspace.addEventListener('change', (event) => {
   if (updateTerminalPipelineFromChange(event.target)) {
+    return;
+  }
+
+  // 切換專案 picker now lives inside the page (workspace).
+  const projectPicker = event.target.closest('select[data-terminal-project-picker]');
+  if (projectPicker) {
+    switchTerminalProject(projectPicker.value, { ensureDraft: true });
+    renderTerminalModal();
+    startTerminalPolling();
     return;
   }
 
@@ -9354,6 +9419,22 @@ elements.terminalWorkspace.addEventListener('focusout', (event) => {
   }
 });
 elements.terminalWorkspace.addEventListener('click', (event) => {
+  // 切換專案 window buttons now live inside the page (workspace).
+  const projectWindowButton = event.target.closest('button[data-terminal-project-window]');
+  if (projectWindowButton) {
+    switchTerminalProject(projectWindowButton.dataset.terminalProjectWindow, { ensureDraft: true });
+    renderTerminalModal();
+    startTerminalPolling();
+    return;
+  }
+
+  // 中斷 a session that's waiting on a server round-trip (launch / send / close).
+  const busyAbortButton = event.target.closest('button[data-terminal-busy-abort]');
+  if (busyAbortButton) {
+    abortTerminalSessionBusy(busyAbortButton.dataset.terminalBusyAbort);
+    return;
+  }
+
   const contentTabButton = event.target.closest('button[data-terminal-content-tab-button]');
   if (contentTabButton) {
     setTerminalContentTab(contentTabButton.dataset.terminalContentTabButton);

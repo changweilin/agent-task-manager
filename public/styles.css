@@ -1868,19 +1868,27 @@ a.page-link:hover {
   padding-right: 2px;
 }
 
+/* Conversation tabs row: scrollable tabs on the left, 「新增對話」pinned to the right. */
+.terminal-tabs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.terminal-tabs-row[hidden] {
+  display: none;
+}
+
 .terminal-add-button {
   width: auto;
   height: 32px;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 10px;
-}
-
-.terminal-home-button {
-  width: auto;
-  height: 32px;
-  padding: 0 10px;
+  padding: 0 12px;
+  white-space: nowrap;
 }
 
 .terminal-add-button svg {
@@ -1893,12 +1901,14 @@ a.page-link:hover {
   stroke-linejoin: round;
 }
 
+/* 切換專案 cluster now sits at the top of the active tab's page (inside the workspace). */
 .terminal-project-bar {
   min-height: 30px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 6px;
+  margin: 0 0 8px;
   padding: 5px 6px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
@@ -1986,9 +1996,9 @@ a.page-link:hover {
 
 .terminal-tabs {
   display: flex;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   gap: 4px;
-  margin-top: 6px;
   overflow-x: auto;
   padding-bottom: 3px;
 }
@@ -3435,6 +3445,74 @@ a.page-link:hover {
   background: var(--surface-muted);
 }
 
+/* Indeterminate progress + 中斷 button while a session waits on a server round-trip. */
+.terminal-busy-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-muted);
+}
+
+.terminal-busy-track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.terminal-busy-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 36%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--teal);
+  animation: terminal-busy-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes terminal-busy-slide {
+  0% { left: -36%; }
+  100% { left: 100%; }
+}
+
+.terminal-busy-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.terminal-busy-abort {
+  flex: 0 0 auto;
+  width: auto;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+}
+
+.terminal-busy-abort svg {
+  width: 13px;
+  height: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-busy-fill {
+    animation-duration: 2.4s;
+  }
+}
+
 /* Pipeline prompting ------------------------------------------------------- */
 .terminal-pipeline-controls {
   display: inline-flex;
@@ -3711,6 +3789,13 @@ a.page-link:hover {
   gap: 8px;
 }
 
+/* T/C/S 選單在左,兩項勾選在右側左右並排。 */
+.terminal-pipeline-quota-main {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
 .terminal-pipeline-quota-toggle,
 .terminal-pipeline-quota-strict {
   display: inline-flex;
@@ -3719,11 +3804,14 @@ a.page-link:hover {
   font-size: 11px;
   color: var(--text);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .terminal-pipeline-quota-options {
+  flex: 1 1 auto;
+  min-width: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   align-items: end;
   gap: 8px;
 }
@@ -3732,8 +3820,12 @@ a.page-link:hover {
   opacity: 0.5;
 }
 
-.terminal-pipeline-quota-strict {
-  grid-column: 1 / -1;
+.terminal-pipeline-quota-checks {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 6px;
 }
 
 .terminal-pipeline-log-controls {
@@ -4652,9 +4744,7 @@ button:disabled {
     width: 100%;
   }
 
-  .terminal-home-button,
   .terminal-add-button {
-    flex: 1;
     width: auto;
     justify-content: center;
   }
@@ -4671,6 +4761,15 @@ button:disabled {
 
   .terminal-project-windows {
     width: 100%;
+  }
+
+  .terminal-pipeline-quota-main {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .terminal-pipeline-quota-checks {
+    padding-bottom: 0;
   }
 
   .terminal-tab {

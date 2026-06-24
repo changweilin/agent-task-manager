@@ -328,16 +328,6 @@
                 <button class="terminal-mode-button is-active" id="terminalModeTerminalButton" data-terminal-mode="terminal" type="button" role="tab" aria-selected="true">終端管理</button>
                 <button class="terminal-mode-button" id="terminalModePipelineButton" data-terminal-mode="pipeline" type="button" role="tab" aria-selected="false">Pipeline 管理</button>
               </div>
-              <button class="copy-url terminal-home-button" id="backToHomeFromTerminal" type="button">
-                <span>主頁</span>
-              </button>
-              <button class="copy-url terminal-add-button" id="addTerminalSession" type="button">
-                <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
-                  <path d="M12 5v14" />
-                  <path d="M5 12h14" />
-                </svg>
-                <span>新增</span>
-              </button>
               <button class="icon-button" id="closeTerminalModal" type="button" title="關閉" aria-label="關閉">
                 <svg viewBox="0 0 24 24" focusable="false">
                   <path d="M6 6l12 12" />
@@ -347,8 +337,16 @@
             </div>
           </div>
 
-          <div class="terminal-project-bar" id="terminalProjectBar" aria-label="終端專案視窗"></div>
-          <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="終端對話"></div>
+          <div class="terminal-tabs-row" id="terminalTabsRow">
+            <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="終端對話"></div>
+            <button class="copy-url terminal-add-button" id="addTerminalSession" type="button">
+              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                <path d="M12 5v14" />
+                <path d="M5 12h14" />
+              </svg>
+              <span>新增對話</span>
+            </button>
+          </div>
           <div class="terminal-empty" id="terminalEmpty" hidden>尚未開啟終端對話</div>
           <div class="terminal-workspace" id="terminalWorkspace"></div>
         </section>
