@@ -59,14 +59,30 @@
               <path d="M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
             </svg>
           </button>
-          <button class="icon-button" id="refreshButton" type="button" title="全專案重新整理並重啟 ATM 伺服器" aria-label="全專案重新整理並重啟 ATM 伺服器">
-            <svg viewBox="0 0 24 24" focusable="false">
-              <path d="M20 6v5h-5" />
-              <path d="M4 18v-5h5" />
-              <path d="M19 11a7 7 0 0 0-12.1-4.8L4 9" />
-              <path d="M5 13a7 7 0 0 0 12.1 4.8L20 15" />
-            </svg>
-          </button>
+          <div class="restart-menu" id="restartMenu">
+            <button class="icon-button restart-menu-toggle" id="restartMenuButton" type="button" title="重啟選項" aria-haspopup="true" aria-expanded="false" aria-label="重啟選項">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M20 6v5h-5" />
+                <path d="M4 18v-5h5" />
+                <path d="M19 11a7 7 0 0 0-12.1-4.8L4 9" />
+                <path d="M5 13a7 7 0 0 0 12.1 4.8L20 15" />
+              </svg>
+            </button>
+            <div class="restart-menu-popover" id="restartMenuPopover" hidden role="menu" aria-label="重啟選項">
+              <button class="restart-menu-item" data-restart-action="all-servers" type="button" role="menuitem">
+                <strong>重啟所有專案 server（含 ATM）</strong>
+                <span>重新整理掃描，重啟所有專案 server 與 ATM</span>
+              </button>
+              <button class="restart-menu-item" data-restart-action="all-terminals" type="button" role="menuitem">
+                <strong>重啟所有專案終端（含 ATM）</strong>
+                <span>關閉並重新開啟所有正在執行的終端</span>
+              </button>
+              <button class="restart-menu-item" data-restart-action="atm" type="button" role="menuitem">
+                <strong>重啟 ATM server</strong>
+                <span>僅重啟 ATM，並記住執行中的終端與 server</span>
+              </button>
+            </div>
+          </div>
           <button class="primary-button pipeline-nav-button" id="pipelineOpenButton" type="button" title="開啟 Pipeline 連續提示管理">
             <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
               <path d="M4 7h7" />

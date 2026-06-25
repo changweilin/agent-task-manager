@@ -954,6 +954,61 @@ function projectCanStart(project) {
   return projectHasStartCommand(project) && projectHasWebTarget(project);
 }
 
+// Frontend dev tooling — a project driven by one of these serves a web UI and is
+// treated as the project's "frontend" target, never a backend.
+const FRONTEND_FRAMEWORKS = new Set(['vite', 'next', 'nuxt', 'astro']);
+// Languages that, when they own a project's dev command, indicate a backend service.
+const BACKEND_FRAMEWORKS = new Set(['python', 'go', 'rust']);
+
+// Decide whether a project/branch target is a backend service (vs. a frontend web
+// app). Used by scanning/status so the UI can surface a parallel "後端" management
+// item alongside the project's frontend item. Heuristics, in order:
+//   1. Known frontend frameworks (vite/next/nuxt/astro) → never a backend.
+//   2. Backend languages (python/go/rust) → backend.
+//   3. Explicit naming (server/backend/api/service/worker…) on the name/path → backend.
+//   4. Dev-script signals: backend runners (nodemon, uvicorn, flask, go run…), a
+//      `server.*` entry file, or an entry inside a server/backend/api directory.
+// Anything else (e.g. a generic `node serve.mjs` static host) defaults to frontend.
+function looksLikeBackendTarget(target) {
+  const framework = String(target?.framework || '').toLowerCase();
+  if (FRONTEND_FRAMEWORKS.has(framework)) {
+    return false;
+  }
+  if (BACKEND_FRAMEWORKS.has(framework)) {
+    return true;
+  }
+
+  const nameText = `${target?.name || ''} ${target?.relativePath || ''} ${path.basename(String(target?.path || ''))}`.toLowerCase();
+  if (/(^|[-_/\s])(backend|server|api|service|svc|worker|daemon)([-_/\s]|$)/.test(nameText)) {
+    return true;
+  }
+
+  const devScript = String(target?.devScript || '');
+  if (/\b(nodemon|ts-node-dev|tsx\s+watch)\b/i.test(devScript)) {
+    return true;
+  }
+  if (/\b(python|uv\s+run|uvicorn|gunicorn|hypercorn|daphne|flask|fastapi)\b/i.test(devScript)) {
+    return true;
+  }
+  if (/\b(go\s+run|cargo\s+run|cargo\s+watch|air)\b/i.test(devScript)) {
+    return true;
+  }
+  // An entry file literally named server.* (server.js / server/server.mjs / server.ts).
+  if (/(^|[\\/\s])server\.(c|m)?[jt]s(\s|$)/i.test(devScript)) {
+    return true;
+  }
+  // An entry that lives inside a server/backend/api directory.
+  if (/(^|[\\/\s])(server|backend|api|services?)[\\/]/i.test(devScript)) {
+    return true;
+  }
+
+  return false;
+}
+
+function projectRoleForTarget(target) {
+  return looksLikeBackendTarget(target) ? 'backend' : 'frontend';
+}
+
 function normalizeUrlPath(routePath) {
   const raw = String(routePath || '/').trim().replace(/\\/g, '/');
   if (!raw || raw === '/') {
@@ -2603,6 +2658,56 @@ async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tail
   });
 }
 
+// Build the project's backend management items: branches that look like a backend
+// service and have a manageable web target, each resolved with live status so the
+// UI can render port/framework/status/restart/refresh just like the frontend item.
+async function resolveProjectBackends(project, state, { lanIp, tailscaleIp, tailscaleHost }) {
+  const branches = Array.isArray(project?.branches) ? project.branches : [];
+  const items = [];
+
+  for (const branch of branches) {
+    if (!looksLikeBackendTarget(branch)) {
+      continue;
+    }
+    if (!projectHasWebTarget(branch) && !projectCanStart(branch)) {
+      continue;
+    }
+
+    const resolved = await resolveWebTargetProject(branch, state);
+    const resolvedProject = resolved.project;
+    const running = Boolean(resolved.running);
+    const probe = resolved.probe || { ok: false };
+    const urls = targetUrlsForProject(resolvedProject, lanIp, tailscaleIp, tailscaleHost);
+    const status = running
+      ? probe.ok ? 'running' : 'unhealthy'
+      : probe.ok ? 'external' : resolved.entry ? 'stale' : 'stopped';
+
+    items.push({
+      name: branch.name,
+      path: resolvedProject.path,
+      relativePath: branch.relativePath || '',
+      framework: branch.framework || 'folder',
+      role: 'backend',
+      devScript: branch.devScript || '',
+      port: resolvedProject.port || null,
+      hasWebTarget: projectHasWebTarget(resolvedProject),
+      canStart: Boolean(projectCanStart(resolvedProject)),
+      status,
+      running,
+      pid: running ? resolved.entry?.pid || null : null,
+      startedAt: resolved.entry?.startedAt || null,
+      command: resolved.entry?.command || '',
+      localUrl: urls.localUrl,
+      lanUrl: urls.lanUrl,
+      tailscaleUrl: urls.tailscaleUrl,
+      lastRestartAt: resolved.entry?.lastRestartAt || null,
+      restartCount: Number(resolved.entry?.restartCount || 0),
+    });
+  }
+
+  return items.sort((left, right) => String(left.relativePath || left.path).localeCompare(String(right.relativePath || right.path)));
+}
+
 function routePathForChildTarget(target) {
   return normalizeUrlPath(target.project.relativePath || target.project.name || '/');
 }
@@ -2851,11 +2956,45 @@ function getProjectActionTarget(project) {
     })[0] || project;
 }
 
+// Resolve which start/stop/restart target a request refers to. When the client
+// pins a specific sub-target path (e.g. a backend branch's management item), act on
+// that branch; otherwise fall back to the project's primary action target.
+function resolveProjectSubTarget(project, targetPath = '') {
+  const pinned = String(targetPath || '').trim();
+  if (pinned) {
+    const branch = (Array.isArray(project?.branches) ? project.branches : [])
+      .find((item) => isSamePath(item.path, pinned));
+    if (branch) {
+      return branch;
+    }
+    if (isSamePath(project?.path, pinned)) {
+      return project;
+    }
+  }
+  return getProjectActionTarget(project);
+}
+
 // Resolve which project actually owns the editable web port for a row. A marker
 // project (e.g. a Rust repo) serves its web target through a branch promoted as the
 // row's home, so a port edit on that row must land on the branch, not the parent.
 // `requestedTargetPath` lets the client pin the exact branch shown as the home.
 function resolveProjectPortEditTarget(project, requestedTargetPath = '') {
+  // An explicit target path (e.g. a backend item's branch) always wins, even when the
+  // parent project has its own web target — otherwise a backend port edit would land
+  // on the frontend.
+  const pinnedPath = String(requestedTargetPath || '').trim();
+  if (pinnedPath) {
+    if (isSamePath(project?.path, pinnedPath) && projectHasWebTarget(project)) {
+      return project;
+    }
+    const pinnedBranch = (Array.isArray(project?.branches) ? project.branches : [])
+      .filter(projectHasWebTarget)
+      .find((branch) => isSamePath(branch.path, pinnedPath));
+    if (pinnedBranch) {
+      return pinnedBranch;
+    }
+  }
+
   if (projectHasWebTarget(project)) {
     return project;
   }
@@ -5930,6 +6069,10 @@ async function getStatusPayload(request = null) {
         lastRestartAt: rowEntry?.lastRestartAt || null,
         restartCount: Number(rowEntry?.restartCount || 0),
         autoRestarted: healthResult.autoRestarted,
+        // Whether this row's own target is a frontend web app or a backend service,
+        // plus any separate backend services discovered under the project.
+        role: projectRoleForTarget(actionProject),
+        backends: await resolveProjectBackends(project, state, { lanIp, tailscaleIp, tailscaleHost }),
       };
     }),
   );
@@ -6626,7 +6769,8 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await startProject(getProjectActionTarget(project));
+    const body = await readRequestBody(request).catch(() => ({}));
+    await startProject(resolveProjectSubTarget(project, body.targetPath));
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -6644,7 +6788,8 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await startProject(getProjectActionTarget(project), { lanMode: true, lanIp });
+    const body = await readRequestBody(request).catch(() => ({}));
+    await startProject(resolveProjectSubTarget(project, body.targetPath), { lanMode: true, lanIp });
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -6662,7 +6807,8 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    const actionProject = getProjectActionTarget(project);
+    const body = await readRequestBody(request).catch(() => ({}));
+    const actionProject = resolveProjectSubTarget(project, body.targetPath);
     startTailscaleServeForPort(actionProject.port);
     await startProject(actionProject, { tailscaleMode: true, tailscaleIp });
     sendJson(response, 200, await getStatusPayload());
@@ -6676,7 +6822,12 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await stopProjectAndBranches(project);
+    const body = await readRequestBody(request).catch(() => ({}));
+    if (String(body.targetPath || '').trim()) {
+      await stopProject(resolveProjectSubTarget(project, body.targetPath));
+    } else {
+      await stopProjectAndBranches(project);
+    }
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -6688,7 +6839,8 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    await restartProject(getProjectActionTarget(project));
+    const body = await readRequestBody(request).catch(() => ({}));
+    await restartProject(resolveProjectSubTarget(project, body.targetPath));
     sendJson(response, 200, await getStatusPayload());
     return;
   }

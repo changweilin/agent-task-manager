@@ -310,6 +310,65 @@ h1 {
   display: none;
 }
 
+/* Header 重啟 dropdown: restart all servers / all terminals / ATM only. */
+.restart-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.restart-menu-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 70;
+  min-width: 264px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.restart-menu-popover[hidden] {
+  display: none;
+}
+
+.restart-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  transition: background 150ms ease;
+}
+
+.restart-menu-item:hover,
+.restart-menu-item:focus-visible {
+  background: var(--surface-muted);
+}
+
+.restart-menu-item strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.restart-menu-item span {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.restart-menu-toggle[aria-expanded="true"] {
+  background: var(--surface-muted);
+}
+
 .primary-button {
   height: 42px;
   display: inline-flex;
@@ -1492,6 +1551,70 @@ a.page-link:hover {
   background: transparent;
   border-color: var(--border);
   opacity: 0.62;
+}
+
+/* Backend management item — a richer branch row that mirrors the project's own
+   (frontend) controls: 狀態 / 框架 / port / 啟動·停止·重啟·重新整理. */
+.project-backend-item {
+  grid-template-columns: 18px minmax(0, 1fr) auto auto auto auto;
+  gap: 8px;
+}
+
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  margin-left: 4px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.role-badge.role-backend {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border: 1px solid var(--amber-border);
+}
+
+.role-badge.role-frontend {
+  color: var(--teal);
+  background: var(--teal-soft);
+  border: 1px solid var(--teal-border);
+}
+
+.project-name .page-count.backend-count {
+  color: var(--amber);
+}
+
+.backend-status {
+  display: inline-flex;
+  align-items: center;
+}
+
+.backend-framework {
+  min-width: 52px;
+}
+
+.backend-port-cell {
+  display: inline-flex;
+  align-items: center;
+}
+
+.backend-port-input {
+  width: 70px;
+  min-width: 70px;
+}
+
+/* The quick-action cluster is hidden in the default desktop layout, but for backend
+   items it is the row's only control surface, so force it visible. */
+.project-backend-item .project-quick-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .status-chip {

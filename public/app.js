@@ -785,6 +785,7 @@ const state = {
   profileEditorDirty: false,
   firewallProjectName: null,
   theme: 'dark',
+  restartMenuOpen: false,
   busy: new Set(),
   mobileInstallBusyProject: null,
   mobileInstallLogHoldUntil: 0,
@@ -910,7 +911,8 @@ const elements = {
   tailscaleIp: document.querySelector('#tailscaleIp'),
   runningCount: document.querySelector('#runningCount'),
   themeToggleButton: document.querySelector('#themeToggleButton'),
-  refreshButton: document.querySelector('#refreshButton'),
+  restartMenuButton: document.querySelector('#restartMenuButton'),
+  restartMenuPopover: document.querySelector('#restartMenuPopover'),
   quotaMonitorButton: document.querySelector('#quotaMonitorButton'),
   pipelineOpenButton: document.querySelector('#pipelineOpenButton'),
   openAtmTerminalButton: document.querySelector('#openAtmTerminalButton'),
@@ -1448,6 +1450,27 @@ function getProjectBranches(project) {
   return Array.isArray(project?.branches) ? project.branches : [];
 }
 
+function getProjectBackends(project) {
+  return Array.isArray(project?.backends) ? project.backends : [];
+}
+
+// Branches shown in the plain 分支 list, excluding any that are already surfaced as
+// richer backend management items (so a backend never shows up twice).
+function getProjectNonBackendBranches(project) {
+  const backendPaths = new Set(getProjectBackends(project).map((backend) => String(backend.path || '').toLowerCase()));
+  return getProjectBranches(project).filter((branch) => !backendPaths.has(String(branch.path || '').toLowerCase()));
+}
+
+function roleBadgeHtml(role) {
+  if (role === 'backend') {
+    return '<span class="role-badge role-backend" title="後端服務">後端</span>';
+  }
+  if (role === 'frontend') {
+    return '<span class="role-badge role-frontend" title="前端網頁">前端</span>';
+  }
+  return '';
+}
+
 function getPageTargetDefinition(targetId) {
   return PAGE_LINK_TARGETS.find((target) => target.id === targetId) || PAGE_LINK_TARGETS[0];
 }
@@ -1500,14 +1523,17 @@ function renderProjectQuickActions(project, context = {}) {
 
 function renderProjectName(project, context = {}) {
   const pages = getProjectPages(project);
-  const branches = getProjectBranches(project);
+  const branches = getProjectNonBackendBranches(project);
+  const backends = getProjectBackends(project);
   const pageCount = pages.length;
   const branchCount = branches.length;
+  const backendCount = backends.length;
   const expanded = Boolean(context.pagesExpanded && pageCount > 0);
   const branchesExpanded = Boolean(context.branchesExpanded && branchCount > 0);
   const projectExpanded = context.projectPanelExpanded !== false;
   const pageLabel = pageCount === 1 ? '1 page' : `${pageCount} pages`;
   const branchLabel = branchCount === 1 ? '1 分支' : `${branchCount} 分支`;
+  const backendLabel = backendCount === 1 ? '1 後端' : `${backendCount} 後端`;
   const homeLink = getProjectHomeLink(project);
   const pageCountControl = pageCount > 0
     ? `
@@ -1535,6 +1561,9 @@ function renderProjectName(project, context = {}) {
       >${escapeHtml(branchLabel)}</button>
     `
     : '';
+  const backendCountControl = backendCount > 0
+    ? `<span class="page-count backend-count" title="此專案的後端服務數量">${escapeHtml(backendLabel)}</span>`
+    : '';
   const homeControl = homeLink.url
     ? `<a class="project-home-link" href="${escapeHtml(homeLink.url)}" target="_blank" rel="noreferrer" title="${escapeHtml(homeLink.url)}">Home</a>`
     : '<span class="project-home-link is-disabled">Home</span>';
@@ -1544,6 +1573,7 @@ function renderProjectName(project, context = {}) {
       <div class="project-name">
         <div class="project-name-heading">
           <strong>${escapeHtml(project.name)}</strong>
+          ${roleBadgeHtml(project.role)}
           <button
             class="project-panel-toggle ${projectExpanded ? 'is-expanded' : ''}"
             data-panel-toggle
@@ -1557,6 +1587,7 @@ function renderProjectName(project, context = {}) {
         <span class="project-path-text" title="${escapeHtml(project.path)}">${escapeHtml(compactPath(project.path))}</span>
         <div class="project-name-links">
           ${branchCountControl}
+          ${backendCountControl}
           ${pageCountControl}
           ${homeControl}
         </div>
@@ -1566,12 +1597,87 @@ function renderProjectName(project, context = {}) {
   `;
 }
 
+// A backend management item mirrors the project's own (frontend) controls —
+// 狀態 / 框架 / port / 啟動·停止 / 重啟 / 重新整理 — but every action is pinned to the
+// backend branch via data-target-path so the server acts on that branch only.
+function renderBackendItem(project, backend, context = {}) {
+  const relativePath = backend.relativePath || compactPath(backend.path);
+  const command = projectCommandLabel(backend);
+  const title = [backend.path, command].filter(Boolean).join('\n');
+  const targetPathAttr = escapeHtml(backend.path || '');
+  const busy = Boolean(context.busy);
+  const running = projectIsManagedRunning(backend);
+  const powerAction = running ? 'stop' : 'start';
+  const powerLabel = powerAction === 'stop' ? '停止' : '啟動';
+  const powerDisabled = DEMO_MODE || busy || (powerAction === 'start' && backend.canStart === false);
+  const restartDisabled = busy || DEMO_MODE || backend.canStart === false;
+  const refreshDisabled = busy || state.discoverLoading || DEMO_MODE;
+  const portCell = backend.port
+    ? `<input
+        class="port-input mono-muted backend-port-input"
+        type="number"
+        inputmode="numeric"
+        min="1"
+        max="65535"
+        step="1"
+        value="${escapeHtml(String(backend.port))}"
+        data-port-input
+        data-name="${escapeHtml(project.name)}"
+        data-target-path="${targetPathAttr}"
+        aria-label="${escapeHtml(backend.name)} port"
+        title="修改 ${escapeHtml(backend.name)} port（按 Enter 套用）"
+        ${DEMO_MODE ? 'disabled' : ''}
+      />`
+    : '<span class="mono-muted">--</span>';
+
+  return `
+    <div class="page-branch-item project-backend-item" data-backend-path="${targetPathAttr}">
+      <span class="page-branch-marker" aria-hidden="true"></span>
+      <div class="page-route project-branch-main">
+        <strong title="${escapeHtml(title)}">${escapeHtml(backend.name)} ${roleBadgeHtml('backend')}</strong>
+        <span>${escapeHtml(relativePath)}</span>
+      </div>
+      <span class="backend-status"><span class="status-chip ${escapeHtml(backend.status)}">${statusLabel(backend.status)}</span></span>
+      <span class="page-link-mode backend-framework">${escapeHtml(frameworkLabel(backend.framework))}</span>
+      <span class="backend-port-cell">${portCell}</span>
+      <div class="project-quick-actions backend-quick-actions" aria-label="${escapeHtml(backend.name)} 後端操作">
+        <button class="row-action ${powerAction}" data-action="${powerAction}" data-name="${escapeHtml(project.name)}" data-target-path="${targetPathAttr}" ${powerDisabled ? 'disabled' : ''} type="button" title="${powerLabel}" aria-label="${powerLabel} ${escapeHtml(backend.name)}">${icons[powerAction]}</button>
+        <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled ? 'disabled' : ''} type="button" title="重新整理" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
+        <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" data-target-path="${targetPathAttr}" ${restartDisabled ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(backend.name)}">${icons.restart}</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderProjectBackends(project, columnCount, expanded, selectedClass, context = {}) {
+  if (!expanded) {
+    return '';
+  }
+
+  const backends = getProjectBackends(project);
+  if (!backends.length) {
+    return '';
+  }
+
+  const items = backends.map((backend) => renderBackendItem(project, backend, context)).join('');
+
+  return `
+    <tr class="project-pages-row project-backends-row ${selectedClass}" data-backends-for="${escapeHtml(project.name)}">
+      <td colspan="${columnCount}">
+        <div class="project-pages-branch project-backends">
+          ${items}
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
 function renderProjectBranches(project, columnCount, expanded, selectedClass) {
   if (!expanded) {
     return '';
   }
 
-  const branches = getProjectBranches(project);
+  const branches = getProjectNonBackendBranches(project);
   if (!branches.length) {
     return '';
   }
@@ -1718,7 +1824,7 @@ async function api(path, options = {}) {
 
 async function loadStatus({ silent = false } = {}) {
   if (!silent) {
-    elements.refreshButton.disabled = true;
+    elements.restartMenuButton.disabled = true;
   }
 
   try {
@@ -1737,7 +1843,7 @@ async function loadStatus({ silent = false } = {}) {
   } catch (error) {
     showToast(error.message);
   } finally {
-    elements.refreshButton.disabled = false;
+    elements.restartMenuButton.disabled = false;
   }
 }
 
@@ -2818,6 +2924,7 @@ function renderRows(projects) {
   const editingPort = activeElement && activeElement.matches?.('[data-port-input]')
     ? {
         name: activeElement.dataset.name,
+        targetPath: activeElement.dataset.targetPath || '',
         value: activeElement.value,
       }
     : null;
@@ -2842,6 +2949,7 @@ function renderRows(projects) {
       const selectedClass = isSelected ? 'is-selected' : '';
       return `
         <tr class="project-data-row ${selectedClass} ${panelClass}" data-name="${escapeHtml(project.name)}">${cells}</tr>
+        ${renderProjectBackends(project, columns.length, projectPanelExpanded, selectedClass, { busy })}
         ${renderProjectBranches(project, columns.length, branchesExpanded, selectedClass)}
         ${renderProjectPages(project, columns.length, pagesExpanded, selectedClass)}
         <tr class="project-actions-row ${selectedClass} ${panelClass}" data-actions-for="${escapeHtml(project.name)}">
@@ -2857,7 +2965,11 @@ function renderRows(projects) {
     .join('');
 
   if (editingPort?.name) {
-    const restored = elements.projectRows.querySelector(`input[data-port-input][data-name="${cssAttrValue(editingPort.name)}"]`);
+    const targetSelector = editingPort.targetPath
+      ? `input[data-port-input][data-name="${cssAttrValue(editingPort.name)}"][data-target-path="${cssAttrValue(editingPort.targetPath)}"]`
+      : `input[data-port-input][data-name="${cssAttrValue(editingPort.name)}"]:not([data-target-path])`;
+    const restored = elements.projectRows.querySelector(targetSelector)
+      || elements.projectRows.querySelector(`input[data-port-input][data-name="${cssAttrValue(editingPort.name)}"]`);
     if (restored) {
       restored.value = editingPort.value;
       restored.focus();
@@ -2867,7 +2979,7 @@ function renderRows(projects) {
   elements.emptyState.hidden = projects.length > 0;
 }
 
-async function runAction(name, action) {
+async function runAction(name, action, options = {}) {
   if (DEMO_MODE) {
     showDemoNotice();
     return false;
@@ -2894,13 +3006,14 @@ async function runAction(name, action) {
     return refreshProject(name);
   }
 
+  const targetPath = String(options.targetPath || '').trim();
   state.busy.add(name);
   render();
 
   try {
     state.payload = await api(`/api/projects/${encodeURIComponent(name)}/${action}`, {
       method: 'POST',
-      body: '{}',
+      body: JSON.stringify(targetPath ? { targetPath } : {}),
     });
     state.selectedName = name;
     showToast(actionMessage(action));
@@ -2918,13 +3031,18 @@ async function runAction(name, action) {
   }
 }
 
-async function commitProjectPort(name, rawValue) {
+async function commitProjectPort(name, rawValue, explicitTargetPath = '') {
   if (DEMO_MODE) {
     showDemoNotice();
     return;
   }
 
   const project = state.payload?.projects.find((item) => item.name === name);
+  const pinnedTarget = String(explicitTargetPath || '').trim();
+  const backend = pinnedTarget
+    ? getProjectBackends(project).find((item) => String(item.path || '').toLowerCase() === pinnedTarget.toLowerCase())
+    : null;
+  const currentTarget = backend || project;
   const port = Number(rawValue);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     showToast('Port 需介於 1-65535');
@@ -2932,14 +3050,16 @@ async function commitProjectPort(name, rawValue) {
     return;
   }
 
-  if (project && Number(project.port) === port) {
+  if (currentTarget && Number(currentTarget.port) === port) {
     return;
   }
 
   try {
-    // For a marker row the port belongs to its promoted web branch; pin the edit to
-    // that branch so the server updates the right project even with multiple branches.
-    const targetPath = project?.hasWebTarget === false ? project?.derivedHome?.path || '' : '';
+    // For a backend item the port belongs to its branch; for a marker row it belongs
+    // to the promoted web branch (derivedHome). Pin the edit to that branch so the
+    // server updates the right project even with multiple branches.
+    const targetPath = pinnedTarget
+      || (project?.hasWebTarget === false ? project?.derivedHome?.path || '' : '');
     state.payload = await api(`/api/projects/${encodeURIComponent(name)}/port`, {
       method: 'POST',
       body: JSON.stringify(targetPath ? { port, targetPath } : { port }),
@@ -3056,25 +3176,130 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// 全專案重新整理:先清理重掃,再重啟 ATM 伺服器本身(讓 server.js 的變更生效,
-// 並重新掃描/還原所有專案)。
-async function refreshAllProjectsAndRestart() {
-  const scanned = await forceRescan();
-  if (scanned) {
-    await restartAtmServer();
+// Dispatch for the header 重啟 dropdown.
+function runRestartMenuAction(action) {
+  if (action === 'all-servers') {
+    return restartAllProjectServers();
+  }
+  if (action === 'all-terminals') {
+    return restartAllProjectTerminals();
+  }
+  if (action === 'atm') {
+    return restartAtmServer();
   }
 }
 
-async function restartAtmServer() {
+// 重啟所有專案 server(含 ATM):先清理重掃(讓新專案/程式碼變更生效),記住目前
+// 執行中的 server 與終端,再重啟 ATM 本身。ATM 重新啟動後會自動還原這些服務。
+async function restartAllProjectServers() {
+  const scanned = await forceRescan();
+  if (!scanned) {
+    return;
+  }
+  await restartAtmServer({
+    confirmMessage: '重啟所有專案 server(含 ATM)會關閉所有開發伺服器與終端後重新啟動並還原,確定要繼續嗎?',
+  });
+}
+
+// 重啟所有專案終端(含 ATM):關閉每個正在執行的終端 pty,再以相同 shell/目錄重新
+// 開啟。不會重啟 ATM 本身。
+async function restartAllProjectTerminals() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+  const confirmed = window.confirm('重啟所有專案終端(含 ATM)會關閉並重新開啟所有正在執行的終端,確定要繼續嗎?');
+  if (!confirmed) {
+    return;
+  }
+
+  await loadTerminalSessions({ silent: true });
+  const liveLocalIds = (state.terminalSessions || [])
+    .filter((session) => session.id && !session.readOnly && session.localId)
+    .map((session) => session.localId);
+  if (!liveLocalIds.length) {
+    showToast('沒有正在執行的終端可重啟');
+    return;
+  }
+
+  showToast('正在重啟所有終端…');
+  let restarted = 0;
+  for (const localId of liveLocalIds) {
+    try {
+      await restartTerminalSessionByLocalId(localId);
+      restarted += 1;
+    } catch (error) {
+      // Best-effort per terminal; keep going.
+    }
+  }
+  await loadTerminalSessions({ silent: true });
+  if (state.terminalModalOpen) {
+    renderTerminalModal();
+  } else {
+    render();
+  }
+  showToast(`已重啟 ${restarted} 個終端`);
+}
+
+// Kill a session's live server pty and spawn a fresh one with the same shell/cwd,
+// reusing the same tab (localId) so no duplicate tabs appear.
+async function restartTerminalSessionByLocalId(localId) {
+  const session = findTerminalSession(localId);
+  if (!session || session.readOnly) {
+    return;
+  }
+  if (session.id) {
+    try {
+      await api(`/api/terminals/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+      state.terminalWorkspaceMetaBySessionId.delete(session.id);
+    } catch (error) {
+      // Even if the close call fails, the spawn below still opens a fresh session.
+    }
+    session.id = null;
+    session.running = false;
+    session.interactive = false;
+    session.cursor = 0;
+    session.output = '';
+  }
+  await spawnTerminalSessionPty(session);
+}
+
+// POST /api/terminals to open a fresh shell for an existing (draft) session object.
+async function spawnTerminalSessionPty(session) {
+  const options = terminalOptionsForProject(session.projectName);
+  const cwd = selectedTerminalCwd(session, options);
+  const shellId = selectedTerminalShellId(session, options);
+  const payload = await api('/api/terminals', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: session.projectName,
+      command: '',
+      cwd,
+      shellId,
+      cols: session.cols,
+      rows: session.rows,
+    }),
+  });
+  applyTerminalPayload(session, payload);
+  saveTerminalWorkspaceState();
+  return session;
+}
+
+async function restartAtmServer({ confirmMessage } = {}) {
   if (DEMO_MODE) {
     showDemoNotice();
     return;
   }
 
-  const confirmed = window.confirm('重啟 ATM 伺服器會關閉所有開發伺服器與終端後重新啟動,確定要繼續嗎?');
+  const confirmed = window.confirm(confirmMessage
+    || '重啟 ATM 伺服器會關閉所有開發伺服器與終端後重新啟動,確定要繼續嗎?');
   if (!confirmed) {
     return;
   }
+
+  // Remember everything currently running so the freshly launched ATM can bring the
+  // same servers and terminals back (see applyAtmResumeSnapshot on startup).
+  saveAtmResumeSnapshot(captureAtmResumeSnapshot());
 
   try {
     await api('/api/restart', { method: 'POST' });
@@ -3084,6 +3309,137 @@ async function restartAtmServer() {
   }
   showToast('正在重啟 ATM 伺服器…');
   await waitForAtmServer();
+}
+
+// ---------------------------------------------------------------------------
+// ATM restart memory: snapshot which servers and terminals are running before an
+// ATM restart, persist it across the page reload, then restore them once the new
+// ATM is up.
+// ---------------------------------------------------------------------------
+const ATM_RESUME_KEY = 'atm-resume-snapshot';
+const ATM_RESUME_MAX_AGE_MS = 5 * 60 * 1000;
+
+function captureAtmResumeSnapshot() {
+  const projects = state.payload?.projects || [];
+  const servers = [];
+  for (const project of projects) {
+    if (projectIsManagedRunning(project)) {
+      servers.push({
+        name: project.name,
+        targetPath: '',
+        lanMode: Boolean(project.lanMode),
+        tailscaleMode: Boolean(project.tailscaleMode),
+      });
+    }
+    for (const backend of getProjectBackends(project)) {
+      if (projectIsManagedRunning(backend)) {
+        servers.push({ name: project.name, targetPath: backend.path || '', lanMode: false, tailscaleMode: false });
+      }
+    }
+  }
+
+  // Live terminal sessions become relaunchable drafts (same localId) after the reload,
+  // so localId is a stable key for reviving exactly those tabs.
+  const terminals = (state.terminalSessions || [])
+    .filter((session) => session.id && !session.readOnly && session.localId)
+    .map((session) => ({ localId: session.localId, projectName: session.projectName }));
+
+  return { servers, terminals, at: Date.now() };
+}
+
+function saveAtmResumeSnapshot(snapshot) {
+  try {
+    writeLocalPreference(ATM_RESUME_KEY, JSON.stringify(snapshot));
+  } catch (error) {
+    // Resume is best-effort; ignore storage failures.
+  }
+}
+
+function readAtmResumeSnapshot() {
+  try {
+    const raw = readLocalPreference(ATM_RESUME_KEY);
+    if (!raw) {
+      return null;
+    }
+    const snapshot = JSON.parse(raw);
+    if (!snapshot || Date.now() - Number(snapshot.at || 0) > ATM_RESUME_MAX_AGE_MS) {
+      return null;
+    }
+    return snapshot;
+  } catch (error) {
+    return null;
+  }
+}
+
+function clearAtmResumeSnapshot() {
+  try {
+    removeLocalPreference(ATM_RESUME_KEY);
+  } catch (error) {
+    // Ignore.
+  }
+}
+
+async function applyAtmResumeSnapshot() {
+  if (DEMO_MODE) {
+    return;
+  }
+  const snapshot = readAtmResumeSnapshot();
+  if (!snapshot) {
+    return;
+  }
+  clearAtmResumeSnapshot();
+
+  let restoredServers = 0;
+  for (const server of snapshot.servers || []) {
+    const project = state.payload?.projects.find((item) => item.name === server.name);
+    if (!project) {
+      continue;
+    }
+    const targetPath = String(server.targetPath || '').trim();
+    const target = targetPath
+      ? getProjectBackends(project).find((item) => String(item.path || '').toLowerCase() === targetPath.toLowerCase())
+      : project;
+    if (!target || projectIsManagedRunning(target)) {
+      continue;
+    }
+
+    const action = server.tailscaleMode ? 'tailscale' : server.lanMode ? 'lan' : 'start';
+    try {
+      await api(`/api/projects/${encodeURIComponent(server.name)}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify(targetPath ? { targetPath } : {}),
+      });
+      restoredServers += 1;
+    } catch (error) {
+      // Skip a server that won't come back; restore the rest.
+    }
+  }
+  if (restoredServers) {
+    await loadStatus({ silent: true });
+  }
+
+  let restoredTerminals = 0;
+  for (const terminal of snapshot.terminals || []) {
+    const session = terminal.localId ? findTerminalSession(terminal.localId) : null;
+    if (!session || session.id || session.readOnly) {
+      continue;
+    }
+    try {
+      await spawnTerminalSessionPty(session);
+      restoredTerminals += 1;
+    } catch (error) {
+      // Tab stays as a relaunchable draft if the shell can't be respawned.
+    }
+  }
+
+  if (restoredServers || restoredTerminals) {
+    if (state.terminalModalOpen) {
+      renderTerminalModal();
+    } else {
+      render();
+    }
+    showToast(`已還原 ${restoredServers} 個 server、${restoredTerminals} 個終端`);
+  }
 }
 
 // Poll /api/status until the freshly launched server answers, then reload so the
@@ -9263,7 +9619,43 @@ function cssAttrValue(value) {
   return String(value ?? '').replace(/(["\\])/g, '\\$1');
 }
 
-elements.refreshButton.addEventListener('click', () => refreshAllProjectsAndRestart());
+function setRestartMenuOpen(open) {
+  state.restartMenuOpen = Boolean(open);
+  elements.restartMenuPopover.hidden = !state.restartMenuOpen;
+  elements.restartMenuButton.setAttribute('aria-expanded', String(state.restartMenuOpen));
+}
+
+function toggleRestartMenu() {
+  setRestartMenuOpen(!state.restartMenuOpen);
+}
+
+elements.restartMenuButton.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleRestartMenu();
+});
+
+elements.restartMenuPopover.addEventListener('click', (event) => {
+  const item = event.target.closest('[data-restart-action]');
+  if (!item) {
+    return;
+  }
+  event.stopPropagation();
+  setRestartMenuOpen(false);
+  runRestartMenuAction(item.dataset.restartAction);
+});
+
+// Dismiss the menu on an outside click or Escape.
+document.addEventListener('click', (event) => {
+  if (state.restartMenuOpen && !elements.restartMenuButton.parentElement.contains(event.target)) {
+    setRestartMenuOpen(false);
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.restartMenuOpen) {
+    setRestartMenuOpen(false);
+  }
+});
+
 elements.quotaMonitorButton.addEventListener('click', () => openQuotaMonitor());
 elements.pipelineOpenButton.addEventListener('click', () => openPipelineManager());
 elements.openAtmTerminalButton?.addEventListener('click', () => {
@@ -9500,7 +9892,7 @@ elements.projectRows.addEventListener('click', (event) => {
   const actionButton = event.target.closest('button[data-action]');
   if (actionButton) {
     event.stopPropagation();
-    runAction(actionButton.dataset.name, actionButton.dataset.action);
+    runAction(actionButton.dataset.name, actionButton.dataset.action, { targetPath: actionButton.dataset.targetPath || '' });
     return;
   }
 
@@ -9542,7 +9934,11 @@ elements.projectRows.addEventListener('keydown', (event) => {
   } else if (event.key === 'Escape') {
     event.preventDefault();
     const project = state.payload?.projects.find((item) => item.name === portInput.dataset.name);
-    portInput.value = project?.port != null ? String(project.port) : '';
+    const targetPath = String(portInput.dataset.targetPath || '').trim();
+    const target = targetPath
+      ? getProjectBackends(project).find((item) => String(item.path || '').toLowerCase() === targetPath.toLowerCase())
+      : project;
+    portInput.value = target?.port != null ? String(target.port) : '';
     portInput.blur();
   }
 });
@@ -9553,7 +9949,7 @@ elements.projectRows.addEventListener('change', (event) => {
     return;
   }
 
-  commitProjectPort(portInput.dataset.name, portInput.value);
+  commitProjectPort(portInput.dataset.name, portInput.value, portInput.dataset.targetPath || '');
 });
 
 elements.profileSelect.addEventListener('change', (event) => {
@@ -10465,7 +10861,11 @@ loadTablePreferences();
 syncQuotaRouteFromHash();
 loadStatus().then(() => {
   loadLogs();
-  terminalPreferencesReady.finally(() => loadTerminalSessions({ silent: true }));
+  terminalPreferencesReady
+    .finally(() => loadTerminalSessions({ silent: true }))
+    // After the new ATM is up and terminals have reconciled, bring back whatever was
+    // running before a 重啟 ATM server (servers + terminals).
+    .finally(() => applyAtmResumeSnapshot());
 });
 setInterval(() => loadStatus({ silent: true }), 6000);
 setInterval(() => {
