@@ -2949,7 +2949,6 @@ function renderRows(projects) {
       const selectedClass = isSelected ? 'is-selected' : '';
       return `
         <tr class="project-data-row ${selectedClass} ${panelClass}" data-name="${escapeHtml(project.name)}">${cells}</tr>
-        ${renderProjectBackends(project, columns.length, projectPanelExpanded, selectedClass, { busy })}
         ${renderProjectBranches(project, columns.length, branchesExpanded, selectedClass)}
         ${renderProjectPages(project, columns.length, pagesExpanded, selectedClass)}
         <tr class="project-actions-row ${selectedClass} ${panelClass}" data-actions-for="${escapeHtml(project.name)}">
@@ -2960,6 +2959,7 @@ function renderRows(projects) {
             </div>
           </td>
         </tr>
+        ${renderProjectBackends(project, columns.length, projectPanelExpanded, selectedClass, { busy })}
       `;
     })
     .join('');
@@ -3187,6 +3187,9 @@ function runRestartMenuAction(action) {
   if (action === 'atm') {
     return restartAtmServer();
   }
+  if (action === 'atm-terminal') {
+    return restartAtmTerminals();
+  }
 }
 
 // 重啟所有專案 server(含 ATM):先清理重掃(讓新專案/程式碼變更生效),記住目前
@@ -3239,6 +3242,49 @@ async function restartAllProjectTerminals() {
     render();
   }
   showToast(`已重啟 ${restarted} 個終端`);
+}
+
+// 重啟 ATM 終端:只關閉並重新開啟 ATM (本機) 的終端 pty,不重啟 ATM server。
+// 與「重啟 ATM server」分開,讓使用者能在不重啟整個 ATM 的情況下重整 ATM 終端。
+async function restartAtmTerminals() {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+
+  const atmName = atmTerminalProject()?.name || ATM_TERMINAL_PROJECT_NAME;
+  await loadTerminalSessions({ silent: true });
+  const liveLocalIds = (state.terminalSessions || [])
+    .filter((session) => session.id && !session.readOnly && session.localId
+      && session.projectName === atmName)
+    .map((session) => session.localId);
+  if (!liveLocalIds.length) {
+    showToast('沒有正在執行的 ATM 終端可重啟');
+    return;
+  }
+
+  const confirmed = window.confirm('重啟 ATM 終端會關閉並重新開啟 ATM 終端,確定要繼續嗎?');
+  if (!confirmed) {
+    return;
+  }
+
+  showToast('正在重啟 ATM 終端…');
+  let restarted = 0;
+  for (const localId of liveLocalIds) {
+    try {
+      await restartTerminalSessionByLocalId(localId);
+      restarted += 1;
+    } catch (error) {
+      // Best-effort per terminal; keep going.
+    }
+  }
+  await loadTerminalSessions({ silent: true });
+  if (state.terminalModalOpen) {
+    renderTerminalModal();
+  } else {
+    render();
+  }
+  showToast(`已重啟 ${restarted} 個 ATM 終端`);
 }
 
 // Kill a session's live server pty and spawn a fresh one with the same shell/cwd,

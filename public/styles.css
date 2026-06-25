@@ -1554,10 +1554,30 @@ a.page-link:hover {
 }
 
 /* Backend management item — a richer branch row that mirrors the project's own
-   (frontend) controls: 狀態 / 框架 / port / 啟動·停止·重啟·重新整理. */
+   (frontend) controls: 狀態 / 框架 / port / 啟動·停止·重啟·重新整理. A wrapping flex row
+   keeps the 狀態/框架/port/操作 cluster aligned to the right and lets it drop to a second
+   line on narrow widths instead of overflowing and overlapping itself. */
 .project-backend-item {
-  grid-template-columns: 18px minmax(0, 1fr) auto auto auto auto;
-  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.project-backend-item .page-branch-marker {
+  flex: 0 0 auto;
+}
+
+.project-backend-item .project-branch-main {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.project-backend-item .backend-status,
+.project-backend-item .backend-framework,
+.project-backend-item .backend-port-cell,
+.project-backend-item .backend-quick-actions {
+  flex: 0 0 auto;
 }
 
 .role-badge {
@@ -1615,6 +1635,19 @@ a.page-link:hover {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+/* Backends render as a nested block BELOW the complete parent project (after its
+   actions row). The actions row normally carries the project separator border; when a
+   backends block follows, move that border down past the backends so the sub-project
+   stays visually attached to its parent instead of the next one. */
+tbody tr.project-actions-row:has(+ tr.project-backends-row) td {
+  border-bottom: 0;
+}
+
+tbody tr.project-backends-row td {
+  padding-top: 4px;
+  border-bottom: 1px solid var(--border);
 }
 
 .status-chip {
@@ -4805,6 +4838,51 @@ button:disabled {
     height: auto;
     padding: 0 12px 12px;
     border: 0;
+  }
+
+  /* On mobile the project is a card; with backends now rendering below it, let the
+     actions row flow straight into the backends block and give the backends block the
+     rounded bottom + bottom margin so the whole thing reads as one card with the
+     sub-project branching off the bottom. */
+  tbody tr.project-actions-row:has(+ tr.project-backends-row) {
+    margin-bottom: 0;
+    border-radius: 0;
+  }
+
+  tbody tr.project-backends-row {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    margin: -1px 0 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-top: 0;
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+
+  tbody tr.project-backends-row td {
+    display: block;
+    height: auto;
+    padding: 4px 12px 12px;
+    border: 0;
+  }
+
+  /* On a narrow card the backend name takes the whole first line (beside the marker)
+     so the 狀態/框架/port/操作 cluster wraps tidily onto the lines below instead of the
+     name growing and shoving them off the right edge. Constrain the item/name width so
+     a long name ellipsis-truncates instead of being hard-clipped by the card edge. */
+  .project-backend-item {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .project-backend-item .project-branch-main {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
   }
 
   .project-row-actions-panel {
