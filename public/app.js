@@ -328,16 +328,20 @@ const LEGACY_STORAGE_KEYS = new Map([
 const TERMINAL_PREFERENCE_TEXT_LIMIT = 4096;
 const TERMINAL_FAVORITE_COLLAPSED_ROWS = 2;
 const TERMINAL_AGENT_TABS = [
-  { id: 'claude', label: 'Claude Code' },
-  { id: 'codex', label: 'Codex CLI' },
-  { id: 'antigravity', label: 'Antigravity CLI' },
-  { id: 'opencode', label: 'opencode' },
+  // `tab` is the compact one-row label; `label` is the full name used elsewhere (logs etc.).
+  { id: 'claude', label: 'Claude Code', tab: 'Claude Code' },
+  { id: 'codex', label: 'Codex CLI', tab: 'Codex' },
+  { id: 'antigravity', label: 'Antigravity CLI', tab: 'Antigravity' },
+  { id: 'opencode', label: 'opencode', tab: 'opencode' },
 ];
 const DEFAULT_TERMINAL_AGENT_ID = 'claude';
 const terminalAgentIds = new Set(TERMINAL_AGENT_TABS.map((agent) => agent.id));
 const TERMINAL_PIPELINE_KEY = 'agentTaskManager.terminalPipeline.v1';
 // 記事本:一份不會被執行的 pipeline 草稿(只有段落 prompt,沒有 pipeline 參數)。
 const TERMINAL_NOTEPAD_KEY = 'agentTaskManager.terminalNotepad.v1';
+// Sentinel <option> value in the per-step project pickers that triggers the
+// 「新增專案」 flow instead of selecting an existing project.
+const TERMINAL_NEW_PROJECT_OPTION = '__new_project__';
 // ATM itself, openable as a terminal target (must match the server's name).
 const ATM_TERMINAL_PROJECT_NAME = 'ATM (本機)';
 // Slash command each agent uses to start a fresh conversation while the same
@@ -918,6 +922,7 @@ const elements = {
   openAtmTerminalButton: document.querySelector('#openAtmTerminalButton'),
   rootsInput: document.querySelector('#rootsInput'),
   addRootButton: document.querySelector('#addRootButton'),
+  newRootButton: document.querySelector('#newRootButton'),
   rootList: document.querySelector('#rootList'),
   basePortInput: document.querySelector('#basePortInput'),
   filterButtons: document.querySelector('#filterButtons'),
@@ -1084,8 +1089,8 @@ const tableColumns = [
       return `
         <div class="row-actions">
           ${renderProjectPowerAction(project, context)}
-          <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${context.busy || state.discoverLoading || DEMO_MODE ? 'disabled' : ''} type="button" title="重新整理" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
-          <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
+          <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${context.busy || state.discoverLoading || DEMO_MODE ? 'disabled' : ''} type="button" title="重新整理:重新掃描此專案的頁面、port 與健康狀態,不會重啟伺服器或終端" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
+          <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : ''} type="button" title="重啟:先停止這個專案的開發伺服器,再依原本的啟動指令重新啟動" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
           <button class="row-action firewall" data-action="firewall" data-name="${escapeHtml(project.name)}" ${!project.lanUrl || DEMO_MODE || project.firewallSupported === false ? 'disabled' : ''} type="button" title="LAN 防火牆" aria-label="設定 ${escapeHtml(project.name)} 的 LAN 防火牆">${icons.firewall}</button>
           ${renderMobileInstallAction(project, context)}
           <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
@@ -1514,8 +1519,8 @@ function renderProjectQuickActions(project, context = {}) {
   return `
     <div class="project-quick-actions" aria-label="${escapeHtml(project.name)} 快速操作">
       ${renderProjectPowerAction(project, context)}
-      <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled} type="button" title="重新整理" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
-      <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${restartDisabled} type="button" title="重啟" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
+      <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled} type="button" title="重新整理:重新掃描此專案的頁面、port 與健康狀態,不會重啟伺服器或終端" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
+      <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${restartDisabled} type="button" title="重啟:先停止這個專案的開發伺服器,再依原本的啟動指令重新啟動" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
       <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
     </div>
   `;
@@ -1642,8 +1647,8 @@ function renderBackendItem(project, backend, context = {}) {
       <span class="backend-port-cell">${portCell}</span>
       <div class="project-quick-actions backend-quick-actions" aria-label="${escapeHtml(backend.name)} 後端操作">
         <button class="row-action ${powerAction}" data-action="${powerAction}" data-name="${escapeHtml(project.name)}" data-target-path="${targetPathAttr}" ${powerDisabled ? 'disabled' : ''} type="button" title="${powerLabel}" aria-label="${powerLabel} ${escapeHtml(backend.name)}">${icons[powerAction]}</button>
-        <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled ? 'disabled' : ''} type="button" title="重新整理" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
-        <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" data-target-path="${targetPathAttr}" ${restartDisabled ? 'disabled' : ''} type="button" title="重啟" aria-label="重啟 ${escapeHtml(backend.name)}">${icons.restart}</button>
+        <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled ? 'disabled' : ''} type="button" title="重新整理:重新掃描此後端服務的 port 與健康狀態,不會重啟服務" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
+        <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" data-target-path="${targetPathAttr}" ${restartDisabled ? 'disabled' : ''} type="button" title="重啟:先停止這個後端服務,再依原本的啟動指令重新啟動" aria-label="重啟 ${escapeHtml(backend.name)}">${icons.restart}</button>
       </div>
     </div>
   `;
@@ -2027,6 +2032,10 @@ function startRootReorder(event) {
     startY: event.clientY,
     // Where inside the item the pointer grabbed it, so the card stays under the cursor.
     grabOffsetY: event.clientY - rect.top,
+    // Latest pointer position + pending rAF id for frame-throttled reordering.
+    lastClientX: event.clientX,
+    lastClientY: event.clientY,
+    rafId: 0,
   };
 }
 
@@ -2068,20 +2077,46 @@ function handleRootPointerMove(event) {
   }
 
   event.preventDefault();
-  const targetItem = document.elementFromPoint(event.clientX, event.clientY)?.closest('.root-list-item[data-root-index]');
+  // pointermove can fire several times per frame; record the latest position and process
+  // it once per animation frame. Re-running elementFromPoint + reorder + re-render on
+  // every raw event is what made the drag stutter.
+  drag.lastClientX = event.clientX;
+  drag.lastClientY = event.clientY;
+  if (drag.rafId) {
+    return;
+  }
+  drag.rafId = window.requestAnimationFrame(() => {
+    drag.rafId = null;
+    processRootDragMove();
+  });
+}
+
+function processRootDragMove() {
+  const drag = state.rootDrag;
+  if (!drag?.active) {
+    return;
+  }
+
+  const { lastClientX, lastClientY } = drag;
+  const targetItem = document.elementFromPoint(lastClientX, lastClientY)?.closest('.root-list-item[data-root-index]');
   const targetIndex = Number(targetItem?.dataset.rootIndex);
   if (targetItem && !Number.isNaN(targetIndex)) {
     const rect = targetItem.getBoundingClientRect();
-    moveRootPathNear(drag.root, targetIndex, event.clientY > rect.top + rect.height / 2);
+    moveRootPathNear(drag.root, targetIndex, lastClientY > rect.top + rect.height / 2);
   }
 
-  applyRootDragFollow(event.clientY);
+  applyRootDragFollow(lastClientY);
 }
 
 function finishRootReorder({ suppressClick = false } = {}) {
   const drag = state.rootDrag;
   if (!drag) {
     return;
+  }
+
+  if (drag.rafId) {
+    window.cancelAnimationFrame(drag.rafId);
+    drag.rafId = 0;
   }
 
   const shouldPersist = drag.active && drag.changed;
@@ -2837,6 +2872,9 @@ function render() {
   }
   elements.rootsInput.disabled = DEMO_MODE || state.discoverLoading;
   elements.addRootButton.disabled = DEMO_MODE || state.discoverLoading;
+  if (elements.newRootButton) {
+    elements.newRootButton.disabled = DEMO_MODE || state.discoverLoading;
+  }
   elements.basePortInput.disabled = DEMO_MODE || state.discoverLoading;
   elements.copyManagerLocal.disabled = DEMO_MODE || !payload.manager.localUrl;
   elements.copyManagerLan.disabled = DEMO_MODE || !payload.manager.lanUrl;
@@ -3106,6 +3144,53 @@ async function openRootFolder(rootPath) {
     showToast('\u5df2\u958b\u555f\u5c08\u6848\u4f86\u6e90');
   } catch (error) {
     showToast(error.message);
+  }
+}
+
+// Create a brand-new project folder under Documents\app (with .git + .github via the
+// server), add it to the project sources, and refresh. Returns the created project's
+// name, or null when the user cancels or it fails.
+async function createNewProject({ defaultName = '' } = {}) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return null;
+  }
+
+  const input = window.prompt(
+    '輸入新專案名稱\n會在 C:\\Users\\user\\Documents\\app 建立資料夾,並生成 .git 與 .github。',
+    defaultName,
+  );
+  if (input === null) {
+    return null;
+  }
+  const name = input.trim();
+  if (!name) {
+    showToast('請輸入專案名稱');
+    return null;
+  }
+
+  try {
+    const payload = await api('/api/projects/create', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+    state.rootEditorDirty = false;
+    state.payload = payload;
+    const createdName = payload.created?.name || name;
+    if (!state.selectedName) {
+      state.selectedName = createdName;
+    }
+    render();
+    if (state.terminalModalOpen) {
+      renderTerminalModal();
+    }
+    showToast(payload.created?.gitInitialized === false
+      ? `已建立專案「${createdName}」(git init 未完成,請手動初始化)`
+      : `已建立專案「${createdName}」`);
+    return createdName;
+  } catch (error) {
+    showToast(error.message);
+    return null;
   }
 }
 
@@ -6438,7 +6523,8 @@ function renderTerminalAgentTabs() {
             type="button"
             role="tab"
             aria-selected="${active ? 'true' : 'false'}"
-          >${escapeHtml(agent.label)}</button>
+            title="${escapeHtml(agent.label)}"
+          >${escapeHtml(agent.tab || agent.label)}</button>
         `;
       }).join('')}
     </div>
@@ -7051,6 +7137,7 @@ function renderTerminalPipeline(session) {
   const projectOptions = (selected) => `
     <option value="" ${selected ? '' : 'selected'}>預設專案</option>
     ${projects.map((project) => `<option value="${escapeHtml(project.name)}" ${project.name === selected ? 'selected' : ''}>${escapeHtml(project.name)}</option>`).join('')}
+    <option value="${TERMINAL_NEW_PROJECT_OPTION}">＋ 新增專案…</option>
   `;
 
   const stepsHtml = config.steps.map((step, index) => {
@@ -7158,6 +7245,7 @@ function renderTerminalNotepad() {
   const projectOptions = (selected) => `
     <option value="" ${selected ? '' : 'selected'}>預設專案</option>
     ${projects.map((project) => `<option value="${escapeHtml(project.name)}" ${project.name === selected ? 'selected' : ''}>${escapeHtml(project.name)}</option>`).join('')}
+    <option value="${TERMINAL_NEW_PROJECT_OPTION}">＋ 新增專案…</option>
   `;
 
   const stepsHtml = notepad.steps.map((step, index) => `
@@ -7177,6 +7265,10 @@ function renderTerminalNotepad() {
         <button class="terminal-pipeline-step-delete" data-notepad-delete="${escapeHtml(step.id)}" type="button" title="刪除這段" aria-label="刪除第 ${index + 1} 段" ${notepad.steps.length <= 1 ? 'disabled' : ''}>${icons.remove}</button>
       </div>
       <textarea class="terminal-pipeline-prompt" data-notepad-prompt="${escapeHtml(step.id)}" rows="3" spellcheck="false" placeholder="第 ${index + 1} 段筆記 / prompt…">${escapeHtml(step.prompt)}</textarea>
+      <div class="terminal-notepad-step-actions">
+        <button class="copy-url terminal-notepad-step-action" data-notepad-step-to-pipeline="${escapeHtml(step.id)}" type="button" title="只把這一段加入 Pipeline(加入後從記事本移除)">${icons.add}<span>加入 Pipeline</span></button>
+        <button class="copy-url terminal-notepad-step-action" data-notepad-step-to-pipeline-copy="${escapeHtml(step.id)}" type="button" title="把這一段加入 Pipeline,並在記事本保留副本">${icons.save}<span>加入並保留副本</span></button>
+      </div>
     </div>
   `).join('');
 
@@ -8967,6 +9059,10 @@ function updateTerminalNotepadFromChange(target) {
   if (target.dataset.notepadProject === undefined) {
     return false;
   }
+  if (target.value === TERMINAL_NEW_PROJECT_OPTION) {
+    chooseNewProjectForStep('notepad', target.dataset.notepadProject);
+    return true;
+  }
   const notepad = getTerminalNotepad();
   const step = notepad.steps.find((item) => item.id === target.dataset.notepadProject);
   if (step) {
@@ -8974,6 +9070,23 @@ function updateTerminalNotepadFromChange(target) {
     saveTerminalNotepad();
   }
   return true;
+}
+
+// Triggered when a per-step project picker selects 「＋ 新增專案…」. Creates the project,
+// then points that step at the freshly created project (or reverts on cancel/failure).
+async function chooseNewProjectForStep(scope, stepId) {
+  const createdName = await createNewProject();
+  const container = scope === 'pipeline' ? getTerminalPipeline() : getTerminalNotepad();
+  const step = container.steps.find((item) => item.id === stepId);
+  if (step && createdName) {
+    step.project = createdName;
+    if (scope === 'pipeline') {
+      saveTerminalPipeline();
+    } else {
+      saveTerminalNotepad();
+    }
+  }
+  renderTerminalModal();
 }
 
 // Append the notepad's (non-empty) steps to the real Pipeline. With keepCopy the
@@ -9007,6 +9120,38 @@ function addTerminalNotepadToPipeline({ keepCopy = false } = {}) {
     ? `已加入 Pipeline(保留副本),共 ${additions.length} 段`
     : `已加入 Pipeline,共 ${additions.length} 段`);
   state.terminalModalMode = 'pipeline';
+  renderTerminalModal();
+}
+
+// Append a single notepad step to the real Pipeline. Stays in the notepad afterwards so
+// the user can keep curating; with keepCopy the step is kept, otherwise it is removed.
+function addTerminalNotepadStepToPipeline(stepId, { keepCopy = false } = {}) {
+  if (state.terminalPipelineRun.active) {
+    showToast('Pipeline 執行中,請先停止再加入段落');
+    return;
+  }
+  const notepad = getTerminalNotepad();
+  const step = notepad.steps.find((item) => item.id === stepId);
+  if (!step || !step.prompt.trim()) {
+    showToast('這段沒有可加入的 prompt');
+    return;
+  }
+
+  const pipeline = getTerminalPipeline();
+  const kept = pipeline.steps.filter((item) => item.prompt.trim());
+  pipeline.steps = [...kept, normalizeTerminalPipelineStep({ ...step, id: terminalPipelineStepId() })];
+  saveTerminalPipeline();
+
+  if (!keepCopy) {
+    if (notepad.steps.length <= 1) {
+      state.terminalNotepad = defaultTerminalNotepad();
+    } else {
+      notepad.steps = notepad.steps.filter((item) => item.id !== stepId);
+    }
+    saveTerminalNotepad();
+  }
+
+  showToast(keepCopy ? '已加入 Pipeline(保留副本)' : '已加入 Pipeline');
   renderTerminalModal();
 }
 
@@ -9115,6 +9260,10 @@ function updateTerminalPipelineFromChange(target) {
     return true;
   }
   if (target.dataset.pipelineProject !== undefined) {
+    if (target.value === TERMINAL_NEW_PROJECT_OPTION) {
+      chooseNewProjectForStep('pipeline', target.dataset.pipelineProject);
+      return true;
+    }
     const step = config.steps.find((item) => item.id === target.dataset.pipelineProject);
     if (step) {
       step.project = terminalProjectList().some((project) => project.name === target.value) ? target.value : '';
@@ -9722,6 +9871,9 @@ elements.addRootButton.addEventListener('click', () => {
     return;
   }
   discover({ commitDraft: false });
+});
+elements.newRootButton?.addEventListener('click', () => {
+  createNewProject({ defaultName: elements.rootsInput.value.trim() });
 });
 elements.rootsInput.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter') {
@@ -10461,6 +10613,18 @@ elements.terminalWorkspace.addEventListener('click', (event) => {
   const notepadToPipelineCopyButton = event.target.closest('button[data-notepad-to-pipeline-copy]');
   if (notepadToPipelineCopyButton) {
     addTerminalNotepadToPipeline({ keepCopy: true });
+    return;
+  }
+
+  const notepadStepToPipelineCopyButton = event.target.closest('button[data-notepad-step-to-pipeline-copy]');
+  if (notepadStepToPipelineCopyButton) {
+    addTerminalNotepadStepToPipeline(notepadStepToPipelineCopyButton.dataset.notepadStepToPipelineCopy, { keepCopy: true });
+    return;
+  }
+
+  const notepadStepToPipelineButton = event.target.closest('button[data-notepad-step-to-pipeline]');
+  if (notepadStepToPipelineButton) {
+    addTerminalNotepadStepToPipeline(notepadStepToPipelineButton.dataset.notepadStepToPipeline, { keepCopy: false });
     return;
   }
 

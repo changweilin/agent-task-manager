@@ -6644,6 +6644,72 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (request.method === 'POST' && url.pathname === '/api/projects/create') {
+    if (!isLocalRequest(request)) {
+      sendError(response, 403, 'For safety, creating projects is only allowed from http://127.0.0.1 on this computer.');
+      return;
+    }
+
+    const body = await readRequestBody(request);
+    const rawName = String(body.name || '').trim();
+    if (!rawName) {
+      sendError(response, 400, '請輸入專案名稱。');
+      return;
+    }
+
+    const folderName = safeName(rawName);
+    if (!folderName) {
+      sendError(response, 400, '專案名稱無效，請改用英數字、底線或連字號。');
+      return;
+    }
+
+    // New projects are created as sibling folders next to ATM, i.e. under Documents\app.
+    const parentDir = path.dirname(ROOT_DIR);
+    const projectPath = normalizePath(path.join(parentDir, folderName));
+    if (fs.existsSync(projectPath)) {
+      sendError(response, 409, `資料夾已存在：${folderName}`);
+      return;
+    }
+
+    let gitInitialized = false;
+    try {
+      fs.mkdirSync(projectPath, { recursive: true });
+      // .github with a workflows folder (kept by a placeholder so git tracks the dir).
+      fs.mkdirSync(path.join(projectPath, '.github', 'workflows'), { recursive: true });
+      fs.writeFileSync(path.join(projectPath, '.github', 'workflows', '.gitkeep'), '');
+      // A minimal README so the new repo has at least one tracked file.
+      fs.writeFileSync(path.join(projectPath, 'README.md'), `# ${rawName}\n`);
+      try {
+        execFileSync('git', ['init'], { cwd: projectPath, stdio: 'ignore' });
+        gitInitialized = true;
+      } catch (gitError) {
+        gitInitialized = false;
+      }
+    } catch (error) {
+      sendError(response, 400, `建立專案失敗：${error.message}`);
+      return;
+    }
+
+    const config = getConfig();
+    const existingRoots = (config.defaultRoots || []).map((root) => normalizePath(root));
+    const nextRoots = existingRoots.some((root) => root.toLowerCase() === projectPath.toLowerCase())
+      ? existingRoots
+      : [...existingRoots, projectPath];
+    await refreshDiscoveredProjects({ roots: nextRoots, basePort: config.basePort, config });
+
+    const payload = await getStatusPayload(request);
+    const createdProject = payload.projects.find((project) => isSamePath(project.path, projectPath));
+    sendJson(response, 201, {
+      ...payload,
+      created: {
+        name: createdProject?.name || folderName,
+        path: projectPath,
+        gitInitialized,
+      },
+    });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/discover') {
     const body = await readRequestBody(request);
     const currentConfig = getConfig();
