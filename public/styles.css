@@ -292,8 +292,8 @@ h1 {
 .app-tooltip {
   position: fixed;
   z-index: 60;
-  max-width: 280px;
-  padding: 5px 9px;
+  max-width: 300px;
+  padding: 6px 10px;
   border-radius: 6px;
   background: #0b0f0e;
   color: #f1f5f3;
@@ -301,9 +301,9 @@ h1 {
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
   font-size: 11px;
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 1.45;
   pointer-events: none;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .app-tooltip[hidden] {
@@ -432,22 +432,10 @@ h1 {
   color: var(--teal);
 }
 
-.row-action.lan {
-  color: var(--lan-action-text);
-  background: var(--lan-action-bg);
-  border-color: var(--lan-action-border);
-}
-
 .row-action.firewall {
   color: var(--amber);
   background: var(--amber-soft);
   border-color: var(--amber-border);
-}
-
-.row-action.tailscale {
-  color: var(--tailscale-action-text);
-  background: var(--tailscale-action-bg);
-  border-color: var(--tailscale-action-border);
 }
 
 .row-action.apk {
@@ -1604,6 +1592,12 @@ a.page-link:hover {
   color: var(--teal);
   background: var(--teal-soft);
   border: 1px solid var(--teal-border);
+}
+
+.role-badge.role-crawler {
+  color: var(--lan-action-text);
+  background: var(--lan-action-bg);
+  border: 1px solid var(--lan-action-border);
 }
 
 .project-name .page-count.backend-count {
@@ -4534,17 +4528,17 @@ button:disabled {
   /* On phones/tablets give the 專案來源 list room to breathe: more gap between the
      project blocks and more vertical padding inside each link. */
   .root-list {
-    gap: 12px;
-    margin-top: 12px;
+    gap: 18px;
+    margin-top: 14px;
   }
 
   .root-list-empty,
   .root-list-item {
-    min-height: 46px;
+    min-height: 52px;
   }
 
   .root-list-item {
-    padding: 9px 8px 9px 11px;
+    padding: 12px 10px 12px 13px;
   }
 
   .table-toolbar {

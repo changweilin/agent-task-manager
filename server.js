@@ -315,7 +315,7 @@ const DEFAULT_TERMINAL_FAVORITES = [
 const TERMINAL_CLAUDE_COMMANDS = new Set(['claude', 'claude -r', 'claude -c']);
 const TERMINAL_CLAUDE_EFFORTS = new Set(['', 'low', 'medium', 'high', 'xhigh', 'max']);
 const TERMINAL_CLAUDE_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'dontAsk']);
-const TERMINAL_REMOTE_CLAUDE_FLAGS = new Set(['--remote-control', '--chrome', '--worktree', '--init']);
+const TERMINAL_REMOTE_CLAUDE_FLAGS = new Set(['--remote-control', '--chrome', '--worktree', '--init', '--advisor']);
 const TERMINAL_CODEX_COMMANDS = new Set(['codex', 'codex resume --last', 'codex fork --last']);
 const TERMINAL_CODEX_SANDBOXES = new Set(['', 'read-only', 'workspace-write', 'danger-full-access']);
 const TERMINAL_CODEX_APPROVALS = new Set(['', 'untrusted', 'on-request', 'never']);
@@ -1005,7 +1005,35 @@ function looksLikeBackendTarget(target) {
   return false;
 }
 
+// Crawler / scraper automation scripts (scrapy, playwright, puppeteer, crawlee spiders).
+// Checked before the generic backend heuristics so a folder like "api-scraper" is
+// labelled 爬蟲 rather than 後端.
+function looksLikeCrawlerTarget(target) {
+  const framework = String(target?.framework || '').toLowerCase();
+  if (FRONTEND_FRAMEWORKS.has(framework)) {
+    return false;
+  }
+
+  const nameText = `${target?.name || ''} ${target?.relativePath || ''} ${path.basename(String(target?.path || ''))}`.toLowerCase();
+  if (/(^|[-_/\s])(crawler|crawlers|spider|spiders|scraper|scrapers|scraping)([-_/\s]|$)/.test(nameText)) {
+    return true;
+  }
+
+  const devScript = String(target?.devScript || '');
+  if (/\b(scrapy|playwright|puppeteer|crawlee)\b/i.test(devScript)) {
+    return true;
+  }
+  if (/\b(crawl|scrape)\b/i.test(devScript)) {
+    return true;
+  }
+
+  return false;
+}
+
 function projectRoleForTarget(target) {
+  if (looksLikeCrawlerTarget(target)) {
+    return 'crawler';
+  }
   return looksLikeBackendTarget(target) ? 'backend' : 'frontend';
 }
 
@@ -2659,14 +2687,17 @@ async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tail
 }
 
 // Build the project's backend management items: branches that look like a backend
-// service and have a manageable web target, each resolved with live status so the
-// UI can render port/framework/status/restart/refresh just like the frontend item.
+// service or a crawler/scraper script and have a manageable web target (or are at
+// least startable), each resolved with live status so the UI can render
+// port/framework/status/restart/refresh just like the frontend item.
 async function resolveProjectBackends(project, state, { lanIp, tailscaleIp, tailscaleHost }) {
   const branches = Array.isArray(project?.branches) ? project.branches : [];
   const items = [];
 
   for (const branch of branches) {
-    if (!looksLikeBackendTarget(branch)) {
+    const isCrawler = looksLikeCrawlerTarget(branch);
+    const isBackend = !isCrawler && looksLikeBackendTarget(branch);
+    if (!isCrawler && !isBackend) {
       continue;
     }
     if (!projectHasWebTarget(branch) && !projectCanStart(branch)) {
@@ -2687,7 +2718,7 @@ async function resolveProjectBackends(project, state, { lanIp, tailscaleIp, tail
       path: resolvedProject.path,
       relativePath: branch.relativePath || '',
       framework: branch.framework || 'folder',
-      role: 'backend',
+      role: isCrawler ? 'crawler' : 'backend',
       devScript: branch.devScript || '',
       port: resolvedProject.port || null,
       hasWebTarget: projectHasWebTarget(resolvedProject),

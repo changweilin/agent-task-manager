@@ -636,6 +636,7 @@ const TERMINAL_CLAUDE_DEFAULT_FLAG_FAVORITES = [
   { id: 'claude-flag-chrome', flag: '--chrome' },
   { id: 'claude-flag-worktree', flag: '--worktree' },
   { id: 'claude-flag-init', flag: '--init' },
+  { id: 'claude-flag-advisor', flag: '--advisor' },
 ];
 const TERMINAL_CLAUDE_CUSTOM_MODEL_VALUE = '__custom__';
 const TERMINAL_CLAUDE_MODEL_OPTIONS = [
@@ -1470,6 +1471,9 @@ function roleBadgeHtml(role) {
   if (role === 'backend') {
     return '<span class="role-badge role-backend" title="後端服務">後端</span>';
   }
+  if (role === 'crawler') {
+    return '<span class="role-badge role-crawler" title="爬蟲腳本">爬蟲</span>';
+  }
   if (role === 'frontend') {
     return '<span class="role-badge role-frontend" title="前端網頁">前端</span>';
   }
@@ -1532,13 +1536,17 @@ function renderProjectName(project, context = {}) {
   const backends = getProjectBackends(project);
   const pageCount = pages.length;
   const branchCount = branches.length;
-  const backendCount = backends.length;
+  const backendCount = backends.filter((backend) => backend.role !== 'crawler').length;
+  const crawlerCount = backends.filter((backend) => backend.role === 'crawler').length;
   const expanded = Boolean(context.pagesExpanded && pageCount > 0);
   const branchesExpanded = Boolean(context.branchesExpanded && branchCount > 0);
   const projectExpanded = context.projectPanelExpanded !== false;
   const pageLabel = pageCount === 1 ? '1 page' : `${pageCount} pages`;
   const branchLabel = branchCount === 1 ? '1 分支' : `${branchCount} 分支`;
-  const backendLabel = backendCount === 1 ? '1 後端' : `${backendCount} 後端`;
+  const backendLabel = [
+    backendCount > 0 ? `${backendCount} 後端` : '',
+    crawlerCount > 0 ? `${crawlerCount} 爬蟲` : '',
+  ].filter(Boolean).join('・');
   const homeLink = getProjectHomeLink(project);
   const pageCountControl = pageCount > 0
     ? `
@@ -1566,8 +1574,8 @@ function renderProjectName(project, context = {}) {
       >${escapeHtml(branchLabel)}</button>
     `
     : '';
-  const backendCountControl = backendCount > 0
-    ? `<span class="page-count backend-count" title="此專案的後端服務數量">${escapeHtml(backendLabel)}</span>`
+  const backendCountControl = backends.length > 0
+    ? `<span class="page-count backend-count" title="此專案的後端服務與爬蟲腳本數量">${escapeHtml(backendLabel)}</span>`
     : '';
   const homeControl = homeLink.url
     ? `<a class="project-home-link" href="${escapeHtml(homeLink.url)}" target="_blank" rel="noreferrer" title="${escapeHtml(homeLink.url)}">Home</a>`
@@ -1617,6 +1625,7 @@ function renderBackendItem(project, backend, context = {}) {
   const powerDisabled = DEMO_MODE || busy || (powerAction === 'start' && backend.canStart === false);
   const restartDisabled = busy || DEMO_MODE || backend.canStart === false;
   const refreshDisabled = busy || state.discoverLoading || DEMO_MODE;
+  const roleLabel = backend.role === 'crawler' ? '爬蟲' : '後端';
   const portCell = backend.port
     ? `<input
         class="port-input mono-muted backend-port-input"
@@ -1639,16 +1648,16 @@ function renderBackendItem(project, backend, context = {}) {
     <div class="page-branch-item project-backend-item" data-backend-path="${targetPathAttr}">
       <span class="page-branch-marker" aria-hidden="true"></span>
       <div class="page-route project-branch-main">
-        <strong title="${escapeHtml(title)}">${escapeHtml(backend.name)} ${roleBadgeHtml('backend')}</strong>
+        <strong title="${escapeHtml(title)}">${escapeHtml(backend.name)} ${roleBadgeHtml(backend.role || 'backend')}</strong>
         <span>${escapeHtml(relativePath)}</span>
       </div>
       <span class="backend-status"><span class="status-chip ${escapeHtml(backend.status)}">${statusLabel(backend.status)}</span></span>
       <span class="page-link-mode backend-framework">${escapeHtml(frameworkLabel(backend.framework))}</span>
       <span class="backend-port-cell">${portCell}</span>
-      <div class="project-quick-actions backend-quick-actions" aria-label="${escapeHtml(backend.name)} 後端操作">
+      <div class="project-quick-actions backend-quick-actions" aria-label="${escapeHtml(backend.name)} ${roleLabel}操作">
         <button class="row-action ${powerAction}" data-action="${powerAction}" data-name="${escapeHtml(project.name)}" data-target-path="${targetPathAttr}" ${powerDisabled ? 'disabled' : ''} type="button" title="${powerLabel}" aria-label="${powerLabel} ${escapeHtml(backend.name)}">${icons[powerAction]}</button>
-        <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled ? 'disabled' : ''} type="button" title="重新整理:重新掃描此後端服務的 port 與健康狀態,不會重啟服務" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
-        <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" data-target-path="${targetPathAttr}" ${restartDisabled ? 'disabled' : ''} type="button" title="重啟:先停止這個後端服務,再依原本的啟動指令重新啟動" aria-label="重啟 ${escapeHtml(backend.name)}">${icons.restart}</button>
+        <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${refreshDisabled ? 'disabled' : ''} type="button" title="重新整理:重新掃描此${roleLabel}的 port 與健康狀態,不會重啟服務" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
+        <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" data-target-path="${targetPathAttr}" ${restartDisabled ? 'disabled' : ''} type="button" title="重啟:先停止這個${roleLabel},再依原本的啟動指令重新啟動" aria-label="重啟 ${escapeHtml(backend.name)}">${icons.restart}</button>
       </div>
     </div>
   `;
@@ -1966,6 +1975,38 @@ function removeRootPath(index) {
   renderRootList();
 }
 
+// Re-order the existing DOM nodes in place (no innerHTML rebuild, no marquee
+// recalculation) so dragging doesn't stutter. Only used while a drag is active;
+// finishRootReorder() does a full renderRootList() afterwards to resync everything.
+function reorderRootListDomInPlace(nextPaths) {
+  if (!elements.rootList) {
+    return;
+  }
+
+  const previousRects = captureRootItemRects();
+  const itemsByRoot = new Map();
+  elements.rootList.querySelectorAll('.root-list-item[data-root]').forEach((item) => {
+    itemsByRoot.set(item.dataset.root, item);
+  });
+
+  let anchor = null;
+  nextPaths.forEach((root, index) => {
+    const item = itemsByRoot.get(root);
+    if (!item) {
+      return;
+    }
+    item.dataset.rootIndex = String(index);
+    if (anchor) {
+      anchor.after(item);
+    } else if (elements.rootList.firstElementChild !== item) {
+      elements.rootList.prepend(item);
+    }
+    anchor = item;
+  });
+
+  animateRootReorder(previousRects);
+}
+
 function moveRootPathNear(sourceRoot, targetIndex, placeAfter) {
   const sourceIndex = state.rootPaths.findIndex((root) => root === sourceRoot);
   if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= state.rootPaths.length) {
@@ -1993,7 +2034,13 @@ function moveRootPathNear(sourceRoot, targetIndex, placeAfter) {
   if (state.rootDrag) {
     state.rootDrag.changed = true;
   }
-  renderRootList();
+  if (state.rootDrag?.active) {
+    // Mid-drag: move the existing nodes instead of rebuilding the whole list
+    // (innerHTML rebuild + marquee width recalculation on every swap was the stutter).
+    reorderRootListDomInPlace(nextPaths);
+  } else {
+    renderRootList();
+  }
   return true;
 }
 
