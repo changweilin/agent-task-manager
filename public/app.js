@@ -149,7 +149,11 @@ function sanitizeDemoPayload(rawPayload = DEFAULT_DEMO_PAYLOAD) {
       stdout: '',
       stderr: '',
       localUrl,
+      lanUrl: '',
       tailscaleUrl: '',
+      lanMode: false,
+      lanReady: false,
+      lanIpAtStart: null,
       tailscaleMode: false,
       tailscaleReady: false,
       tailscaleIpAtStart: null,
@@ -166,6 +170,7 @@ function sanitizeDemoPayload(rawPayload = DEFAULT_DEMO_PAYLOAD) {
       pages: pages.map((page) => ({
         ...page,
         localUrl: page.pattern ? '' : demoPreviewUrl(name, page.path),
+        lanUrl: '',
         tailscaleUrl: '',
       })),
       mobileInstall: project.mobileInstall || { supported: false, reason: '展示資料不包含 Android build 流程。' },
@@ -712,7 +717,7 @@ const DEFAULT_TERMINAL_OPENCODE_SETTINGS = {
   activeFlags: [],
 };
 const DEFAULT_COLUMN_ORDER = ['name', 'status', 'framework', 'port', 'tailscale', 'health', 'command', 'started', 'restarted', 'pid'];
-const ACTION_URL_COLUMN_IDS = ['local'];
+const ACTION_URL_COLUMN_IDS = ['local', 'lan'];
 const DEFAULT_COLUMN_WIDTHS = {
   name: 238,
   status: 104,
@@ -742,6 +747,7 @@ const STATUS_SORT_ORDER = {
 };
 const PAGE_LINK_TARGETS = [
   { id: 'local', label: 'Local', urlKey: 'localUrl' },
+  { id: 'lan', label: 'LAN', urlKey: 'lanUrl' },
   { id: 'tailscale', label: 'Tailscale', urlKey: 'tailscaleUrl' },
 ];
 const DEFAULT_PAGE_LINK_TARGET_ID = 'local';
@@ -1029,6 +1035,13 @@ const tableColumns = [
     sortable: true,
     getSortValue: (project) => project.localUrl || '',
     render: (project) => renderUrlLink(project.localUrl, '本機 URL'),
+  },
+  {
+    id: 'lan',
+    label: 'LAN',
+    sortable: true,
+    getSortValue: (project) => project.lanUrl || '',
+    render: (project) => renderUrlLink(project.lanUrl, 'LAN URL'),
   },
   {
     id: 'tailscale',
@@ -1378,10 +1391,13 @@ function renderProjectActionUrls(project) {
 }
 
 function connectionActionForTarget(targetId) {
-  return targetId === 'tailscale' ? targetId : '';
+  return targetId === 'lan' || targetId === 'tailscale' ? targetId : '';
 }
 
 function targetNeedsConnection(project, targetId) {
+  if (targetId === 'lan') {
+    return Boolean(project.lanUrl && !project.lanReady);
+  }
   if (targetId === 'tailscale') {
     return Boolean(project.tailscaleUrl && !project.tailscaleReady);
   }
@@ -3138,6 +3154,7 @@ function actionMessage(action) {
     start: '已送出啟動',
     stop: '已停止',
     restart: '已重啟',
+    lan: '已啟用 LAN 分享',
     tailscale: '已啟用 Tailscale',
   };
 
@@ -3478,12 +3495,13 @@ function captureAtmResumeSnapshot() {
       servers.push({
         name: project.name,
         targetPath: '',
+        lanMode: Boolean(project.lanMode),
         tailscaleMode: Boolean(project.tailscaleMode),
       });
     }
     for (const backend of getProjectBackends(project)) {
       if (projectIsManagedRunning(backend)) {
-        servers.push({ name: project.name, targetPath: backend.path || '', tailscaleMode: false });
+        servers.push({ name: project.name, targetPath: backend.path || '', lanMode: false, tailscaleMode: false });
       }
     }
   }
@@ -3553,7 +3571,7 @@ async function applyAtmResumeSnapshot() {
       continue;
     }
 
-    const action = server.tailscaleMode ? 'tailscale' : 'start';
+    const action = server.tailscaleMode ? 'tailscale' : server.lanMode ? 'lan' : 'start';
     try {
       await api(`/api/projects/${encodeURIComponent(server.name)}/${action}`, {
         method: 'POST',

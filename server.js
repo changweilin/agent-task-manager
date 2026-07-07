@@ -2691,14 +2691,15 @@ function childWebTargetScore(target) {
   return score;
 }
 
-function targetUrlsForProject(project, tailscaleIp, tailscaleHost = '') {
+function targetUrlsForProject(project, lanIp, tailscaleIp, tailscaleHost = '') {
   return {
     localUrl: buildUrl('127.0.0.1', project.port),
+    lanUrl: buildUrl(lanIp, project.port),
     tailscaleUrl: buildProjectTailscaleUrl(project.port, tailscaleIp, { tailscaleHost }),
   };
 }
 
-async function resolveChildWebTargets(project, state, { tailscaleIp, tailscaleHost }) {
+async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tailscaleHost }) {
   const branches = Array.isArray(project.branches) ? project.branches : [];
   const targets = [];
 
@@ -2710,7 +2711,7 @@ async function resolveChildWebTargets(project, state, { tailscaleIp, tailscaleHo
     const resolved = await resolveWebTargetProject(branch, state);
     targets.push({
       ...resolved,
-      ...targetUrlsForProject(resolved.project, tailscaleIp, tailscaleHost),
+      ...targetUrlsForProject(resolved.project, lanIp, tailscaleIp, tailscaleHost),
     });
   }
 
@@ -2727,7 +2728,7 @@ async function resolveChildWebTargets(project, state, { tailscaleIp, tailscaleHo
 // service or a crawler/scraper script and have a manageable web target (or are at
 // least startable), each resolved with live status so the UI can render
 // port/framework/status/restart/refresh just like the frontend item.
-async function resolveProjectBackends(project, state, { tailscaleIp, tailscaleHost }) {
+async function resolveProjectBackends(project, state, { lanIp, tailscaleIp, tailscaleHost }) {
   const branches = Array.isArray(project?.branches) ? project.branches : [];
   const items = [];
 
@@ -2745,7 +2746,7 @@ async function resolveProjectBackends(project, state, { tailscaleIp, tailscaleHo
     const resolvedProject = resolved.project;
     const running = Boolean(resolved.running);
     const probe = resolved.probe || { ok: false };
-    const urls = targetUrlsForProject(resolvedProject, tailscaleIp, tailscaleHost);
+    const urls = targetUrlsForProject(resolvedProject, lanIp, tailscaleIp, tailscaleHost);
     const status = running
       ? probe.ok ? 'running' : 'unhealthy'
       : probe.ok ? 'external' : resolved.entry ? 'stale' : 'stopped';
@@ -2766,6 +2767,7 @@ async function resolveProjectBackends(project, state, { tailscaleIp, tailscaleHo
       startedAt: resolved.entry?.startedAt || null,
       command: resolved.entry?.command || '',
       localUrl: urls.localUrl,
+      lanUrl: urls.lanUrl,
       tailscaleUrl: urls.tailscaleUrl,
       lastRestartAt: resolved.entry?.lastRestartAt || null,
       restartCount: Number(resolved.entry?.restartCount || 0),
@@ -2788,6 +2790,7 @@ function childTargetRootPage(target) {
     file: target.project.relativePath || '',
     pattern: false,
     localUrl: target.localUrl,
+    lanUrl: target.lanUrl,
     tailscaleUrl: target.tailscaleUrl,
   };
 }
@@ -2804,6 +2807,7 @@ function pageFromChildTarget(target, page) {
     source: page.source ? `${target.project.name}:${page.source}` : 'subproject',
     file,
     localUrl: page.pattern ? '' : buildPageUrl(target.localUrl, page.path),
+    lanUrl: page.pattern ? '' : buildPageUrl(target.lanUrl, page.path),
     tailscaleUrl: page.pattern ? '' : buildPageUrl(target.tailscaleUrl, page.path),
   };
 }
@@ -3442,6 +3446,8 @@ function updateProjectEntry(project, patch) {
 
 function mergeProjectModeOptions(options = {}, existing = null) {
   return {
+    lanMode: Boolean(existing?.lanMode || options.lanMode),
+    lanIp: options.lanIp || existing?.lanIpAtStart || null,
     tailscaleMode: Boolean(existing?.tailscaleMode || options.tailscaleMode),
     tailscaleIp: options.tailscaleIp || existing?.tailscaleIpAtStart || null,
   };
@@ -3462,6 +3468,8 @@ function adoptExternalProjectServer(project, options = {}, probe = null) {
     stderr: '',
     external: true,
     adoptedAt: now,
+    lanMode: Boolean(options.lanMode),
+    lanIpAtStart: options.lanIp || null,
     tailscaleMode: Boolean(options.tailscaleMode),
     tailscaleIpAtStart: options.tailscaleIp || null,
     healthFailures: 0,
@@ -3496,8 +3504,10 @@ async function startProject(project, options = {}) {
       return adoptExternalProjectServer(activeProject, modeOptions, activeExternal.probe);
     }
 
-    if (options.tailscaleMode) {
+    if (options.tailscaleMode || options.lanMode) {
       return updateProjectEntry(project, {
+        lanMode: Boolean(existing.lanMode || options.lanMode),
+        lanIpAtStart: options.lanIp || existing.lanIpAtStart || null,
         tailscaleMode: Boolean(existing.tailscaleMode || options.tailscaleMode),
         tailscaleIpAtStart: options.tailscaleIp || existing.tailscaleIpAtStart || null,
       }) || existing;
@@ -3555,6 +3565,8 @@ async function startProject(project, options = {}) {
     command: `${npm} ${args.join(' ')}`,
     stdout: stdoutPath,
     stderr: stderrPath,
+    lanMode: Boolean(options.lanMode),
+    lanIpAtStart: options.lanIp || null,
     tailscaleMode: Boolean(options.tailscaleMode),
     tailscaleIpAtStart: options.tailscaleIp || null,
     healthFailures: 0,
@@ -3650,7 +3662,9 @@ async function restartProject(project, options = {}) {
   }
 
   const entry = getStateEntryByPath(getState(), project.path);
+  const lanIp = options.lanIp || getLanIp();
   const tailscaleIp = options.tailscaleIp || getTailscaleIp();
+  const lanMode = options.lanMode !== undefined ? options.lanMode : entry?.lanMode;
   const tailscaleMode = options.tailscaleMode !== undefined ? options.tailscaleMode : entry?.tailscaleMode;
 
   await stopProject(project);
@@ -3664,6 +3678,8 @@ async function restartProject(project, options = {}) {
   }
 
   return startProject(project, {
+    lanMode: Boolean(lanMode && lanIp),
+    lanIp: lanMode ? lanIp : null,
     tailscaleMode: Boolean(tailscaleMode && tailscaleIp),
     tailscaleIp: tailscaleMode ? tailscaleIp : null,
   });
@@ -5920,6 +5936,8 @@ async function applyHealthPolicy(project, entry, running, probe, config, network
     });
 
     const restartedEntry = await restartProject(project, {
+      lanMode: Boolean(entry.lanMode && networkContext.lanIp),
+      lanIp: entry.lanMode ? networkContext.lanIp : null,
       tailscaleMode: Boolean(entry.tailscaleMode && networkContext.tailscaleIp),
       tailscaleIp: entry.tailscaleMode ? networkContext.tailscaleIp : null,
     });
@@ -5964,7 +5982,7 @@ async function getStatusPayload(request = null) {
       const webTarget = projectHasWebTarget(project);
       const childWebTargets = webTarget
         ? []
-        : await resolveChildWebTargets(project, state, { tailscaleIp, tailscaleHost });
+        : await resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tailscaleHost });
       const homeChildWebTarget = childWebTargets[0] || null;
       let probe = webTarget
         ? await probeLocalPort(project.port)
@@ -5992,7 +6010,7 @@ async function getStatusPayload(request = null) {
       }
 
       const healthResult = webTarget
-        ? await applyHealthPolicy(project, entry, running, probe, config, { tailscaleIp })
+        ? await applyHealthPolicy(project, entry, running, probe, config, { lanIp, tailscaleIp })
         : { entry, autoRestarted: false };
       entry = healthResult.entry || entry;
       running = Boolean(entry?.pid && processIsRunning(entry.pid));
@@ -6020,6 +6038,7 @@ async function getStatusPayload(request = null) {
                 : 'stopped'
           : 'stopped';
       const localUrl = webTarget ? buildUrl('127.0.0.1', project.port) : homeChildWebTarget?.localUrl || '';
+      const lanUrl = webTarget ? buildUrl(lanIp, project.port) : homeChildWebTarget?.lanUrl || '';
       const tailscaleUrl = webTarget ? buildProjectTailscaleUrl(project.port, tailscaleIp, { tailscaleHost }) : homeChildWebTarget?.tailscaleUrl || '';
       const mobileInstall = getMobileInstallSummary(project);
       const pages = homeChildWebTarget && !webTarget
@@ -6027,6 +6046,7 @@ async function getStatusPayload(request = null) {
         : discoverProjectPages(project).map((page) => ({
             ...page,
             localUrl: page.pattern ? '' : buildPageUrl(localUrl, page.path),
+            lanUrl: page.pattern ? '' : buildPageUrl(lanUrl, page.path),
             tailscaleUrl: page.pattern ? '' : buildPageUrl(tailscaleUrl, page.path),
           }));
       const rowEntry = webTarget ? entry : homeChildWebTarget?.entry || entry;
@@ -6044,12 +6064,16 @@ async function getStatusPayload(request = null) {
         command: rowEntry?.command || '',
         stdout: rowEntry?.stdout || '',
         stderr: rowEntry?.stderr || '',
+        lanMode: Boolean(rowEntry?.lanMode && lanIp),
+        lanReady: webTarget ? Boolean(lanIp && (running || probe.ok)) : Boolean(homeChildWebTarget?.lanUrl && homeChildWebTarget.probe.ok),
+        lanIpAtStart: rowEntry?.lanIpAtStart || null,
         tailscaleMode: Boolean(rowEntry?.tailscaleMode && tailscaleIp),
         tailscaleReady: webTarget
           ? Boolean(tailscaleUrl && (running || probe.ok) && projectHasTailscaleServeRoute(project.port))
           : Boolean(homeChildWebTarget?.tailscaleUrl && homeChildWebTarget.probe.ok && projectHasTailscaleServeRoute(homeChildWebTarget.project.port)),
         tailscaleIpAtStart: rowEntry?.tailscaleIpAtStart || null,
         localUrl,
+        lanUrl,
         tailscaleUrl,
         derivedHome: homeChildWebTarget
           ? {
@@ -6073,7 +6097,7 @@ async function getStatusPayload(request = null) {
         // Whether this row's own target is a frontend web app or a backend service,
         // plus any separate backend services discovered under the project.
         role: projectRoleForTarget(actionProject),
-        backends: await resolveProjectBackends(project, state, { tailscaleIp, tailscaleHost }),
+        backends: await resolveProjectBackends(project, state, { lanIp, tailscaleIp, tailscaleHost }),
       };
     }),
   );
@@ -6120,10 +6144,11 @@ async function restoreEnabledProjectsOnStartup() {
 
   const state = getState();
   const projects = normalizeProjects(config.projects, config.basePort);
+  const lanIp = getLanIp();
   const tailscaleIp = getTailscaleIp();
 
   for (const entry of state.projects) {
-    const shouldRestore = Boolean(entry?.tailscaleMode);
+    const shouldRestore = Boolean(entry?.lanMode || entry?.tailscaleMode);
     if (!shouldRestore || processIsRunning(entry.pid)) {
       continue;
     }
@@ -6138,6 +6163,8 @@ async function restoreEnabledProjectsOnStartup() {
       const activeProject = { ...project, port: activeServer.port };
       syncProjectPort(project.path, activeServer.port);
       adoptExternalProjectServer(activeProject, {
+        lanMode: Boolean(entry.lanMode && lanIp),
+        lanIp: entry.lanMode ? lanIp : null,
         tailscaleMode: Boolean(entry.tailscaleMode && tailscaleIp),
         tailscaleIp: entry.tailscaleMode ? tailscaleIp : null,
       }, activeServer.probe);
@@ -6147,6 +6174,8 @@ async function restoreEnabledProjectsOnStartup() {
 
     try {
       await startProject(project, {
+        lanMode: Boolean(entry.lanMode && lanIp),
+        lanIp: entry.lanMode ? lanIp : null,
         tailscaleMode: Boolean(entry.tailscaleMode && tailscaleIp),
         tailscaleIp: entry.tailscaleMode ? tailscaleIp : null,
       });
@@ -6768,6 +6797,25 @@ async function handleApi(request, response, url) {
 
     const body = await readRequestBody(request).catch(() => ({}));
     await startProject(resolveProjectSubTarget(project, body.targetPath));
+    sendJson(response, 200, await getStatusPayload());
+    return;
+  }
+
+  if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/lan$/.test(url.pathname)) {
+    const { project } = selectedProjectFromUrl(url);
+    if (!project) {
+      sendError(response, 404, 'Project not found.');
+      return;
+    }
+
+    const lanIp = getLanIp();
+    if (!lanIp) {
+      sendError(response, 409, 'LAN IP not found. Make sure this computer is connected to Wi-Fi or Ethernet.');
+      return;
+    }
+
+    const body = await readRequestBody(request).catch(() => ({}));
+    await startProject(resolveProjectSubTarget(project, body.targetPath), { lanMode: true, lanIp });
     sendJson(response, 200, await getStatusPayload());
     return;
   }

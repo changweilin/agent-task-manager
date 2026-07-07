@@ -1264,6 +1264,10 @@ tbody tr.project-actions-row td {
   color: var(--teal);
 }
 
+.project-action-url.lan {
+  color: var(--info-accent-text);
+}
+
 .project-action-url.tailscale {
   color: var(--tailscale-action-text);
 }
