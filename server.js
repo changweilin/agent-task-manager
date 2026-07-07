@@ -1005,6 +1005,9 @@ function looksLikeBackendTarget(target) {
   return false;
 }
 
+// Libraries/tools commonly used to build crawler/scraper automation scripts.
+const CRAWLER_TOOL_NAMES = /\b(scrapy|playwright|puppeteer|crawlee|selenium|beautifulsoup4?|bs4|cheerio|httpx|requests-html)\b/i;
+
 // Crawler / scraper automation scripts (scrapy, playwright, puppeteer, crawlee spiders).
 // Checked before the generic backend heuristics so a folder like "api-scraper" is
 // labelled 爬蟲 rather than 後端.
@@ -1015,16 +1018,46 @@ function looksLikeCrawlerTarget(target) {
   }
 
   const nameText = `${target?.name || ''} ${target?.relativePath || ''} ${path.basename(String(target?.path || ''))}`.toLowerCase();
-  if (/(^|[-_/\s])(crawler|crawlers|spider|spiders|scraper|scrapers|scraping)([-_/\s]|$)/.test(nameText)) {
+  if (/(^|[-_/\s])(crawler|crawlers|spider|spiders|scraper|scrapers|scraping|scrape|bot|bots|harvest|harvester|ingest|ingestion|fetcher|collector|extractor)([-_/\s]|$)/.test(nameText)) {
     return true;
   }
 
   const devScript = String(target?.devScript || '');
-  if (/\b(scrapy|playwright|puppeteer|crawlee)\b/i.test(devScript)) {
+  if (CRAWLER_TOOL_NAMES.test(devScript)) {
     return true;
   }
   if (/\b(crawl|scrape)\b/i.test(devScript)) {
     return true;
+  }
+
+  // Node/Python projects without a dev script still declare their crawler tooling in
+  // their manifest (package.json dependencies, requirements.txt, pyproject.toml).
+  if (!devScript && manifestMentionsCrawlerTooling(target?.path)) {
+    return true;
+  }
+
+  return false;
+}
+
+function manifestMentionsCrawlerTooling(projectPath) {
+  if (!projectPath) {
+    return false;
+  }
+
+  const manifestFiles = ['package.json', 'requirements.txt', 'pyproject.toml', 'Pipfile'];
+  for (const manifestFile of manifestFiles) {
+    try {
+      const manifestPath = path.join(projectPath, manifestFile);
+      if (!fs.existsSync(manifestPath)) {
+        continue;
+      }
+      const contents = fs.readFileSync(manifestPath, 'utf8');
+      if (CRAWLER_TOOL_NAMES.test(contents)) {
+        return true;
+      }
+    } catch (error) {
+      // Best-effort manifest sniffing; ignore unreadable files.
+    }
   }
 
   return false;
@@ -1257,9 +1290,14 @@ function routeFromHtmlFile(rootPath, filePath) {
   const lastSegment = segments[segments.length - 1];
 
   if (lastSegment === 'index') {
+    // A directory's index.html loads from the directory URL itself; no extension needed.
     segments.pop();
+    return routeFromSegments(segments);
   }
 
+  // Static html/htm files have no server-side rewrite to fall back on, so the link
+  // must keep its extension (e.g. /about.html) or the static file server 404s.
+  segments[segments.length - 1] = `${lastSegment}${extension}`;
   return routeFromSegments(segments);
 }
 
@@ -2653,15 +2691,14 @@ function childWebTargetScore(target) {
   return score;
 }
 
-function targetUrlsForProject(project, lanIp, tailscaleIp, tailscaleHost = '') {
+function targetUrlsForProject(project, tailscaleIp, tailscaleHost = '') {
   return {
     localUrl: buildUrl('127.0.0.1', project.port),
-    lanUrl: buildUrl(lanIp, project.port),
     tailscaleUrl: buildProjectTailscaleUrl(project.port, tailscaleIp, { tailscaleHost }),
   };
 }
 
-async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tailscaleHost }) {
+async function resolveChildWebTargets(project, state, { tailscaleIp, tailscaleHost }) {
   const branches = Array.isArray(project.branches) ? project.branches : [];
   const targets = [];
 
@@ -2673,7 +2710,7 @@ async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tail
     const resolved = await resolveWebTargetProject(branch, state);
     targets.push({
       ...resolved,
-      ...targetUrlsForProject(resolved.project, lanIp, tailscaleIp, tailscaleHost),
+      ...targetUrlsForProject(resolved.project, tailscaleIp, tailscaleHost),
     });
   }
 
@@ -2690,7 +2727,7 @@ async function resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tail
 // service or a crawler/scraper script and have a manageable web target (or are at
 // least startable), each resolved with live status so the UI can render
 // port/framework/status/restart/refresh just like the frontend item.
-async function resolveProjectBackends(project, state, { lanIp, tailscaleIp, tailscaleHost }) {
+async function resolveProjectBackends(project, state, { tailscaleIp, tailscaleHost }) {
   const branches = Array.isArray(project?.branches) ? project.branches : [];
   const items = [];
 
@@ -2708,7 +2745,7 @@ async function resolveProjectBackends(project, state, { lanIp, tailscaleIp, tail
     const resolvedProject = resolved.project;
     const running = Boolean(resolved.running);
     const probe = resolved.probe || { ok: false };
-    const urls = targetUrlsForProject(resolvedProject, lanIp, tailscaleIp, tailscaleHost);
+    const urls = targetUrlsForProject(resolvedProject, tailscaleIp, tailscaleHost);
     const status = running
       ? probe.ok ? 'running' : 'unhealthy'
       : probe.ok ? 'external' : resolved.entry ? 'stale' : 'stopped';
@@ -2729,7 +2766,6 @@ async function resolveProjectBackends(project, state, { lanIp, tailscaleIp, tail
       startedAt: resolved.entry?.startedAt || null,
       command: resolved.entry?.command || '',
       localUrl: urls.localUrl,
-      lanUrl: urls.lanUrl,
       tailscaleUrl: urls.tailscaleUrl,
       lastRestartAt: resolved.entry?.lastRestartAt || null,
       restartCount: Number(resolved.entry?.restartCount || 0),
@@ -2752,7 +2788,6 @@ function childTargetRootPage(target) {
     file: target.project.relativePath || '',
     pattern: false,
     localUrl: target.localUrl,
-    lanUrl: target.lanUrl,
     tailscaleUrl: target.tailscaleUrl,
   };
 }
@@ -2769,7 +2804,6 @@ function pageFromChildTarget(target, page) {
     source: page.source ? `${target.project.name}:${page.source}` : 'subproject',
     file,
     localUrl: page.pattern ? '' : buildPageUrl(target.localUrl, page.path),
-    lanUrl: page.pattern ? '' : buildPageUrl(target.lanUrl, page.path),
     tailscaleUrl: page.pattern ? '' : buildPageUrl(target.tailscaleUrl, page.path),
   };
 }
@@ -3408,8 +3442,6 @@ function updateProjectEntry(project, patch) {
 
 function mergeProjectModeOptions(options = {}, existing = null) {
   return {
-    lanMode: Boolean(existing?.lanMode || options.lanMode),
-    lanIp: options.lanIp || existing?.lanIpAtStart || null,
     tailscaleMode: Boolean(existing?.tailscaleMode || options.tailscaleMode),
     tailscaleIp: options.tailscaleIp || existing?.tailscaleIpAtStart || null,
   };
@@ -3430,8 +3462,6 @@ function adoptExternalProjectServer(project, options = {}, probe = null) {
     stderr: '',
     external: true,
     adoptedAt: now,
-    lanMode: Boolean(options.lanMode),
-    lanIpAtStart: options.lanIp || null,
     tailscaleMode: Boolean(options.tailscaleMode),
     tailscaleIpAtStart: options.tailscaleIp || null,
     healthFailures: 0,
@@ -3466,10 +3496,8 @@ async function startProject(project, options = {}) {
       return adoptExternalProjectServer(activeProject, modeOptions, activeExternal.probe);
     }
 
-    if (options.tailscaleMode || options.lanMode) {
+    if (options.tailscaleMode) {
       return updateProjectEntry(project, {
-        lanMode: Boolean(existing.lanMode || options.lanMode),
-        lanIpAtStart: options.lanIp || existing.lanIpAtStart || null,
         tailscaleMode: Boolean(existing.tailscaleMode || options.tailscaleMode),
         tailscaleIpAtStart: options.tailscaleIp || existing.tailscaleIpAtStart || null,
       }) || existing;
@@ -3527,8 +3555,6 @@ async function startProject(project, options = {}) {
     command: `${npm} ${args.join(' ')}`,
     stdout: stdoutPath,
     stderr: stderrPath,
-    lanMode: Boolean(options.lanMode),
-    lanIpAtStart: options.lanIp || null,
     tailscaleMode: Boolean(options.tailscaleMode),
     tailscaleIpAtStart: options.tailscaleIp || null,
     healthFailures: 0,
@@ -3624,9 +3650,7 @@ async function restartProject(project, options = {}) {
   }
 
   const entry = getStateEntryByPath(getState(), project.path);
-  const lanIp = options.lanIp || getLanIp();
   const tailscaleIp = options.tailscaleIp || getTailscaleIp();
-  const lanMode = options.lanMode !== undefined ? options.lanMode : entry?.lanMode;
   const tailscaleMode = options.tailscaleMode !== undefined ? options.tailscaleMode : entry?.tailscaleMode;
 
   await stopProject(project);
@@ -3640,8 +3664,6 @@ async function restartProject(project, options = {}) {
   }
 
   return startProject(project, {
-    lanMode: Boolean(lanMode && lanIp),
-    lanIp: lanMode ? lanIp : null,
     tailscaleMode: Boolean(tailscaleMode && tailscaleIp),
     tailscaleIp: tailscaleMode ? tailscaleIp : null,
   });
@@ -5753,39 +5775,6 @@ function quotePowerShellArgument(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function getLanFirewallCommand(project) {
-  return [
-    'powershell',
-    '-NoProfile',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-File',
-    quotePowerShellArgument(path.join(ROOT_DIR, 'dev-manager.ps1')),
-    'firewall-lan',
-    '-BasePort',
-    String(project.port),
-    '-PortCount',
-    '1',
-  ].join(' ');
-}
-
-function getElevatedLanFirewallCommand(project) {
-  const args = [
-    '-NoProfile',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-File',
-    path.join(ROOT_DIR, 'dev-manager.ps1'),
-    'firewall-lan',
-    '-BasePort',
-    String(project.port),
-    '-PortCount',
-    '1',
-  ];
-
-  return `Start-Process -FilePath powershell.exe -Verb RunAs -ArgumentList @(${args.map(quotePowerShellArgument).join(', ')})`;
-}
-
 function isLocalRequest(request) {
   const address = normalizeSocketAddress(request.socket?.remoteAddress || '');
   if (address === '127.0.0.1' || address === '::1') {
@@ -5810,16 +5799,6 @@ function getLocalAddressSet() {
   }
 
   return addresses;
-}
-
-function openElevatedLanFirewall(project) {
-  const command = getElevatedLanFirewallCommand(project);
-  const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: false,
-  });
-  child.unref();
 }
 
 function openFolderPath(folderPath, missingMessage = 'Folder was not found.') {
@@ -5941,8 +5920,6 @@ async function applyHealthPolicy(project, entry, running, probe, config, network
     });
 
     const restartedEntry = await restartProject(project, {
-      lanMode: Boolean(entry.lanMode && networkContext.lanIp),
-      lanIp: entry.lanMode ? networkContext.lanIp : null,
       tailscaleMode: Boolean(entry.tailscaleMode && networkContext.tailscaleIp),
       tailscaleIp: entry.tailscaleMode ? networkContext.tailscaleIp : null,
     });
@@ -5987,7 +5964,7 @@ async function getStatusPayload(request = null) {
       const webTarget = projectHasWebTarget(project);
       const childWebTargets = webTarget
         ? []
-        : await resolveChildWebTargets(project, state, { lanIp, tailscaleIp, tailscaleHost });
+        : await resolveChildWebTargets(project, state, { tailscaleIp, tailscaleHost });
       const homeChildWebTarget = childWebTargets[0] || null;
       let probe = webTarget
         ? await probeLocalPort(project.port)
@@ -6015,7 +5992,7 @@ async function getStatusPayload(request = null) {
       }
 
       const healthResult = webTarget
-        ? await applyHealthPolicy(project, entry, running, probe, config, { lanIp, tailscaleIp })
+        ? await applyHealthPolicy(project, entry, running, probe, config, { tailscaleIp })
         : { entry, autoRestarted: false };
       entry = healthResult.entry || entry;
       running = Boolean(entry?.pid && processIsRunning(entry.pid));
@@ -6043,7 +6020,6 @@ async function getStatusPayload(request = null) {
                 : 'stopped'
           : 'stopped';
       const localUrl = webTarget ? buildUrl('127.0.0.1', project.port) : homeChildWebTarget?.localUrl || '';
-      const lanUrl = webTarget ? buildUrl(lanIp, project.port) : homeChildWebTarget?.lanUrl || '';
       const tailscaleUrl = webTarget ? buildProjectTailscaleUrl(project.port, tailscaleIp, { tailscaleHost }) : homeChildWebTarget?.tailscaleUrl || '';
       const mobileInstall = getMobileInstallSummary(project);
       const pages = homeChildWebTarget && !webTarget
@@ -6051,7 +6027,6 @@ async function getStatusPayload(request = null) {
         : discoverProjectPages(project).map((page) => ({
             ...page,
             localUrl: page.pattern ? '' : buildPageUrl(localUrl, page.path),
-            lanUrl: page.pattern ? '' : buildPageUrl(lanUrl, page.path),
             tailscaleUrl: page.pattern ? '' : buildPageUrl(tailscaleUrl, page.path),
           }));
       const rowEntry = webTarget ? entry : homeChildWebTarget?.entry || entry;
@@ -6069,18 +6044,13 @@ async function getStatusPayload(request = null) {
         command: rowEntry?.command || '',
         stdout: rowEntry?.stdout || '',
         stderr: rowEntry?.stderr || '',
-        lanMode: Boolean(rowEntry?.lanMode && lanIp),
-        lanReady: webTarget ? Boolean(lanIp && (running || probe.ok)) : Boolean(homeChildWebTarget?.lanUrl && homeChildWebTarget.probe.ok),
-        lanIpAtStart: rowEntry?.lanIpAtStart || null,
         tailscaleMode: Boolean(rowEntry?.tailscaleMode && tailscaleIp),
         tailscaleReady: webTarget
           ? Boolean(tailscaleUrl && (running || probe.ok) && projectHasTailscaleServeRoute(project.port))
           : Boolean(homeChildWebTarget?.tailscaleUrl && homeChildWebTarget.probe.ok && projectHasTailscaleServeRoute(homeChildWebTarget.project.port)),
         tailscaleIpAtStart: rowEntry?.tailscaleIpAtStart || null,
         localUrl,
-        lanUrl,
         tailscaleUrl,
-        firewallSupported: Boolean(webTarget || homeChildWebTarget),
         derivedHome: homeChildWebTarget
           ? {
               name: homeChildWebTarget.project.name,
@@ -6103,7 +6073,7 @@ async function getStatusPayload(request = null) {
         // Whether this row's own target is a frontend web app or a backend service,
         // plus any separate backend services discovered under the project.
         role: projectRoleForTarget(actionProject),
-        backends: await resolveProjectBackends(project, state, { lanIp, tailscaleIp, tailscaleHost }),
+        backends: await resolveProjectBackends(project, state, { tailscaleIp, tailscaleHost }),
       };
     }),
   );
@@ -6150,11 +6120,10 @@ async function restoreEnabledProjectsOnStartup() {
 
   const state = getState();
   const projects = normalizeProjects(config.projects, config.basePort);
-  const lanIp = getLanIp();
   const tailscaleIp = getTailscaleIp();
 
   for (const entry of state.projects) {
-    const shouldRestore = Boolean(entry?.lanMode || entry?.tailscaleMode);
+    const shouldRestore = Boolean(entry?.tailscaleMode);
     if (!shouldRestore || processIsRunning(entry.pid)) {
       continue;
     }
@@ -6169,8 +6138,6 @@ async function restoreEnabledProjectsOnStartup() {
       const activeProject = { ...project, port: activeServer.port };
       syncProjectPort(project.path, activeServer.port);
       adoptExternalProjectServer(activeProject, {
-        lanMode: Boolean(entry.lanMode && lanIp),
-        lanIp: entry.lanMode ? lanIp : null,
         tailscaleMode: Boolean(entry.tailscaleMode && tailscaleIp),
         tailscaleIp: entry.tailscaleMode ? tailscaleIp : null,
       }, activeServer.probe);
@@ -6180,8 +6147,6 @@ async function restoreEnabledProjectsOnStartup() {
 
     try {
       await startProject(project, {
-        lanMode: Boolean(entry.lanMode && lanIp),
-        lanIp: entry.lanMode ? lanIp : null,
         tailscaleMode: Boolean(entry.tailscaleMode && tailscaleIp),
         tailscaleIp: entry.tailscaleMode ? tailscaleIp : null,
       });
@@ -6347,71 +6312,6 @@ async function handleApi(request, response, url) {
     const stdout = readTail(entry?.stdout, lines);
     const stderr = readTail(entry?.stderr, lines);
     sendJson(response, 200, { name, stdout, stderr });
-    return;
-  }
-
-  if (request.method === 'GET' && url.pathname === '/api/firewall/lan-command') {
-    const name = url.searchParams.get('name') || '';
-    const { project } = selectedProjectFromUrl(new URL(`/api/projects/${encodeURIComponent(name)}/firewall`, url.origin));
-    if (!project) {
-      sendError(response, 404, 'Project not found.');
-      return;
-    }
-    const actionProject = getProjectActionTarget(project);
-    if (!projectHasWebTarget(actionProject)) {
-      sendError(response, 400, 'Project does not have a web port configured.');
-      return;
-    }
-
-    const lanIp = getLanIp();
-    sendJson(response, 200, {
-      name: actionProject.name,
-      port: actionProject.port,
-      lanUrl: buildUrl(lanIp, actionProject.port),
-      command: getLanFirewallCommand(actionProject),
-      requiresAdmin: true,
-      scope: {
-        remoteAddress: 'LocalSubnet',
-        profile: 'Private',
-        protocol: 'TCP',
-        localPort: actionProject.port,
-      },
-    });
-    return;
-  }
-
-  if (request.method === 'POST' && url.pathname === '/api/firewall/lan-run') {
-    if (!isLocalRequest(request)) {
-      sendError(response, 403, 'For safety, automatic PowerShell launch is only allowed from http://127.0.0.1 on this computer.');
-      return;
-    }
-
-    const body = await readRequestBody(request);
-    if (body.consent !== true) {
-      sendError(response, 400, 'Firewall consent is required before opening PowerShell.');
-      return;
-    }
-
-    const config = getConfig();
-    const projects = normalizeProjects(config.projects, config.basePort);
-    const project = getProjectByName(projects, body.name || '');
-    if (!project) {
-      sendError(response, 404, 'Project not found.');
-      return;
-    }
-    const actionProject = getProjectActionTarget(project);
-    if (!projectHasWebTarget(actionProject)) {
-      sendError(response, 400, 'Project does not have a web port configured.');
-      return;
-    }
-
-    openElevatedLanFirewall(actionProject);
-    sendJson(response, 202, {
-      opened: true,
-      name: actionProject.name,
-      port: actionProject.port,
-      message: 'Windows should show a UAC prompt for elevated PowerShell.',
-    });
     return;
   }
 
@@ -6868,25 +6768,6 @@ async function handleApi(request, response, url) {
 
     const body = await readRequestBody(request).catch(() => ({}));
     await startProject(resolveProjectSubTarget(project, body.targetPath));
-    sendJson(response, 200, await getStatusPayload());
-    return;
-  }
-
-  if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/lan$/.test(url.pathname)) {
-    const { project } = selectedProjectFromUrl(url);
-    if (!project) {
-      sendError(response, 404, 'Project not found.');
-      return;
-    }
-
-    const lanIp = getLanIp();
-    if (!lanIp) {
-      sendError(response, 409, 'LAN IP not found. Make sure this computer is connected to Wi-Fi or Ethernet.');
-      return;
-    }
-
-    const body = await readRequestBody(request).catch(() => ({}));
-    await startProject(resolveProjectSubTarget(project, body.targetPath), { lanMode: true, lanIp });
     sendJson(response, 200, await getStatusPayload());
     return;
   }

@@ -149,11 +149,7 @@ function sanitizeDemoPayload(rawPayload = DEFAULT_DEMO_PAYLOAD) {
       stdout: '',
       stderr: '',
       localUrl,
-      lanUrl: '',
       tailscaleUrl: '',
-      lanMode: false,
-      lanReady: false,
-      lanIpAtStart: null,
       tailscaleMode: false,
       tailscaleReady: false,
       tailscaleIpAtStart: null,
@@ -170,7 +166,6 @@ function sanitizeDemoPayload(rawPayload = DEFAULT_DEMO_PAYLOAD) {
       pages: pages.map((page) => ({
         ...page,
         localUrl: page.pattern ? '' : demoPreviewUrl(name, page.path),
-        lanUrl: '',
         tailscaleUrl: '',
       })),
       mobileInstall: project.mobileInstall || { supported: false, reason: '展示資料不包含 Android build 流程。' },
@@ -262,14 +257,6 @@ async function demoApi(path, options = {}) {
         signals: [{ label: 'Demo usage', percent: [42, 27, 64][index], percentLabel: `${[42, 27, 64][index]}% 已用` }],
         checkedAt: new Date().toISOString(),
       })),
-    };
-  }
-  if (url.pathname === '/api/firewall/lan-command') {
-    return {
-      name: slugifyDemoName(url.searchParams.get('name')),
-      port: 'demo',
-      lanUrl: '',
-      command: '# Demo mode: no firewall command is generated.',
     };
   }
   if (url.pathname.startsWith('/api/')) {
@@ -725,7 +712,7 @@ const DEFAULT_TERMINAL_OPENCODE_SETTINGS = {
   activeFlags: [],
 };
 const DEFAULT_COLUMN_ORDER = ['name', 'status', 'framework', 'port', 'tailscale', 'health', 'command', 'started', 'restarted', 'pid'];
-const ACTION_URL_COLUMN_IDS = ['local', 'lan'];
+const ACTION_URL_COLUMN_IDS = ['local'];
 const DEFAULT_COLUMN_WIDTHS = {
   name: 238,
   status: 104,
@@ -755,7 +742,6 @@ const STATUS_SORT_ORDER = {
 };
 const PAGE_LINK_TARGETS = [
   { id: 'local', label: 'Local', urlKey: 'localUrl' },
-  { id: 'lan', label: 'LAN', urlKey: 'lanUrl' },
   { id: 'tailscale', label: 'Tailscale', urlKey: 'tailscaleUrl' },
 ];
 const DEFAULT_PAGE_LINK_TARGET_ID = 'local';
@@ -780,6 +766,7 @@ const state = {
   rootPaths: [],
   rootEditorDirty: false,
   rootDrag: null,
+  rootReorderPending: false,
   suppressNextRootClick: false,
   discoverLoading: false,
   selectedName: null,
@@ -788,7 +775,6 @@ const state = {
   logText: '',
   selectedProfileId: '',
   profileEditorDirty: false,
-  firewallProjectName: null,
   theme: 'dark',
   restartMenuOpen: false,
   busy: new Set(),
@@ -888,9 +874,7 @@ const TERMINAL_SCROLLBAR_WIDTH = 14;
 
 const icons = {
   start: '<svg viewBox="0 0 24 24" focusable="false"><path d="M8 5v14l11-7-11-7Z"/></svg>',
-  lan: '<svg viewBox="0 0 24 24" focusable="false"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 16a5 5 0 0 1 7 0"/><path d="M12 20h.01"/></svg>',
   tailscale: '<svg viewBox="0 0 24 24" focusable="false"><path d="M7 16.5a4.5 4.5 0 0 1 0-9"/><path d="M17 7.5a4.5 4.5 0 0 1 0 9"/><path d="M8.5 12h7"/><path d="M12 8.5v7"/></svg>',
-  firewall: '<svg viewBox="0 0 24 24" focusable="false"><path d="M12 3 19 6v5c0 4.5-2.7 8.1-7 10-4.3-1.9-7-5.5-7-10V6l7-3Z"/><path d="M9 12h6"/></svg>',
   stop: '<svg viewBox="0 0 24 24" focusable="false"><path d="M7 7h10v10H7z"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" focusable="false"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M19 11a7 7 0 0 0-12.1-4.8L4 9"/><path d="M5 13a7 7 0 0 0 12.1 4.8L20 15"/></svg>',
   restart: '<svg viewBox="0 0 24 24" focusable="false"><path d="M20 6v5h-5"/><path d="M19 11a7 7 0 0 0-12.1-4.8L4 9"/><path d="M5 13a7 7 0 0 0 12.1 4.8L20 15"/></svg>',
@@ -962,15 +946,6 @@ const elements = {
   copyLogsButton: document.querySelector('#copyLogsButton'),
   logOutput: document.querySelector('#logOutput'),
   toast: document.querySelector('#toast'),
-  firewallModal: document.querySelector('#firewallModal'),
-  closeFirewallModal: document.querySelector('#closeFirewallModal'),
-  closeFirewallDone: document.querySelector('#closeFirewallDone'),
-  firewallProject: document.querySelector('#firewallProject'),
-  firewallUrl: document.querySelector('#firewallUrl'),
-  firewallConsent: document.querySelector('#firewallConsent'),
-  firewallCommand: document.querySelector('#firewallCommand'),
-  copyFirewallCommand: document.querySelector('#copyFirewallCommand'),
-  runFirewallCommand: document.querySelector('#runFirewallCommand'),
   terminalModal: document.querySelector('#terminalModal'),
   terminalTitle: document.querySelector('#terminalTitle'),
   terminalModeTerminalButton: document.querySelector('#terminalModeTerminalButton'),
@@ -1056,13 +1031,6 @@ const tableColumns = [
     render: (project) => renderUrlLink(project.localUrl, '本機 URL'),
   },
   {
-    id: 'lan',
-    label: 'LAN',
-    sortable: true,
-    getSortValue: (project) => project.lanUrl || '',
-    render: (project) => renderUrlLink(project.lanUrl, 'LAN URL'),
-  },
-  {
     id: 'tailscale',
     label: 'Tailscale',
     sortable: true,
@@ -1092,7 +1060,6 @@ const tableColumns = [
           ${renderProjectPowerAction(project, context)}
           <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${context.busy || state.discoverLoading || DEMO_MODE ? 'disabled' : ''} type="button" title="重新整理:重新掃描此專案的頁面、port 與健康狀態,不會重啟伺服器或終端" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
           <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : ''} type="button" title="重啟:先停止這個專案的開發伺服器,再依原本的啟動指令重新啟動" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
-          <button class="row-action firewall" data-action="firewall" data-name="${escapeHtml(project.name)}" ${!project.lanUrl || DEMO_MODE || project.firewallSupported === false ? 'disabled' : ''} type="button" title="LAN 防火牆" aria-label="設定 ${escapeHtml(project.name)} 的 LAN 防火牆">${icons.firewall}</button>
           ${renderMobileInstallAction(project, context)}
           <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
         </div>
@@ -1411,13 +1378,10 @@ function renderProjectActionUrls(project) {
 }
 
 function connectionActionForTarget(targetId) {
-  return targetId === 'lan' || targetId === 'tailscale' ? targetId : '';
+  return targetId === 'tailscale' ? targetId : '';
 }
 
 function targetNeedsConnection(project, targetId) {
-  if (targetId === 'lan') {
-    return Boolean(project.lanUrl && !project.lanReady);
-  }
   if (targetId === 'tailscale') {
     return Boolean(project.tailscaleUrl && !project.tailscaleReady);
   }
@@ -2176,7 +2140,24 @@ function finishRootReorder({ suppressClick = false } = {}) {
   renderRootList();
 
   if (shouldPersist) {
-    discover({ commitDraft: false, includeDraft: false, showToastOnSuccess: false });
+    persistRootOrder();
+  }
+}
+
+// A drag that finishes while a previous reorder's persist request is still in
+// flight must not be silently dropped by discover()'s in-flight guard — otherwise
+// the earlier request's stale response overwrites the newer order once it resolves.
+// Queue one retry so the latest order always gets persisted.
+async function persistRootOrder() {
+  if (state.discoverLoading) {
+    state.rootReorderPending = true;
+    return;
+  }
+
+  await discover({ commitDraft: false, includeDraft: false, showToastOnSuccess: false });
+  if (state.rootReorderPending) {
+    state.rootReorderPending = false;
+    persistRootOrder();
   }
 }
 
@@ -3075,13 +3056,6 @@ async function runAction(name, action, options = {}) {
     return true;
   }
 
-  if (action === 'firewall') {
-    state.selectedName = name;
-    render();
-    await showLanFirewallConsent();
-    return true;
-  }
-
   if (action === 'mobile-install') {
     await runMobileInstall(name);
     return true;
@@ -3164,7 +3138,6 @@ function actionMessage(action) {
     start: '已送出啟動',
     stop: '已停止',
     restart: '已重啟',
-    lan: '已啟用 LAN 分享',
     tailscale: '已啟用 Tailscale',
   };
 
@@ -3505,13 +3478,12 @@ function captureAtmResumeSnapshot() {
       servers.push({
         name: project.name,
         targetPath: '',
-        lanMode: Boolean(project.lanMode),
         tailscaleMode: Boolean(project.tailscaleMode),
       });
     }
     for (const backend of getProjectBackends(project)) {
       if (projectIsManagedRunning(backend)) {
-        servers.push({ name: project.name, targetPath: backend.path || '', lanMode: false, tailscaleMode: false });
+        servers.push({ name: project.name, targetPath: backend.path || '', tailscaleMode: false });
       }
     }
   }
@@ -3581,7 +3553,7 @@ async function applyAtmResumeSnapshot() {
       continue;
     }
 
-    const action = server.tailscaleMode ? 'tailscale' : server.lanMode ? 'lan' : 'start';
+    const action = server.tailscaleMode ? 'tailscale' : 'start';
     try {
       await api(`/api/projects/${encodeURIComponent(server.name)}/${action}`, {
         method: 'POST',
@@ -9598,66 +9570,6 @@ function fallbackCopyText(value) {
   }
 }
 
-async function showLanFirewallConsent() {
-  if (DEMO_MODE) {
-    showDemoNotice();
-    return;
-  }
-
-  const project = selectedProject();
-  if (!project) {
-    showToast('請先選擇專案');
-    return;
-  }
-
-  try {
-    const payload = await api(`/api/firewall/lan-command?name=${encodeURIComponent(project.name)}`);
-    elements.firewallProject.textContent = `${payload.name} : ${payload.port}`;
-    elements.firewallUrl.textContent = payload.lanUrl || project.lanUrl || '--';
-    elements.firewallCommand.value = payload.command;
-    state.firewallProjectName = payload.name;
-    elements.firewallConsent.checked = false;
-    elements.copyFirewallCommand.disabled = true;
-    elements.runFirewallCommand.disabled = true;
-    elements.firewallModal.hidden = false;
-  } catch (error) {
-    showToast(error.message);
-  }
-}
-
-function hideLanFirewallConsent() {
-  elements.firewallModal.hidden = true;
-  state.firewallProjectName = null;
-}
-
-async function runLanFirewallCommand() {
-  if (DEMO_MODE) {
-    showDemoNotice();
-    return;
-  }
-
-  if (!elements.firewallConsent.checked || !state.firewallProjectName) {
-    showToast('請先勾選確認');
-    return;
-  }
-
-  elements.runFirewallCommand.disabled = true;
-  try {
-    await api('/api/firewall/lan-run', {
-      method: 'POST',
-      body: JSON.stringify({
-        name: state.firewallProjectName,
-        consent: true,
-      }),
-    });
-    showToast('已開啟系統管理員 PowerShell');
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    elements.runFirewallCommand.disabled = !elements.firewallConsent.checked;
-  }
-}
-
 function quotaStatusLabel(status) {
   const labels = {
     ok: '已讀取',
@@ -10215,20 +10127,6 @@ elements.startProfileButton.addEventListener('click', () => runProfileAction('st
 elements.stopProfileButton.addEventListener('click', () => runProfileAction('stop'));
 elements.restartProfileButton.addEventListener('click', () => runProfileAction('restart'));
 
-elements.closeFirewallModal.addEventListener('click', hideLanFirewallConsent);
-elements.closeFirewallDone.addEventListener('click', hideLanFirewallConsent);
-elements.firewallConsent.addEventListener('change', () => {
-  const allowed = elements.firewallConsent.checked;
-  elements.copyFirewallCommand.disabled = !allowed;
-  elements.runFirewallCommand.disabled = !allowed;
-});
-elements.copyFirewallCommand.addEventListener('click', () => copyText(elements.firewallCommand.value));
-elements.runFirewallCommand.addEventListener('click', runLanFirewallCommand);
-elements.firewallModal.addEventListener('click', (event) => {
-  if (event.target === elements.firewallModal) {
-    hideLanFirewallConsent();
-  }
-});
 elements.closeQuotaModal.addEventListener('click', () => hideQuotaMonitor());
 elements.backToHomeFromQuota.addEventListener('click', () => hideQuotaMonitor());
 elements.refreshQuotaButton.addEventListener('click', () => loadAiQuotas());

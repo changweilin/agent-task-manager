@@ -298,48 +298,6 @@
 
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-      <div class="modal-backdrop" id="firewallModal" hidden>
-        <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="firewallTitle">
-          <div class="modal-heading">
-            <h2 id="firewallTitle">設定 LAN 防火牆</h2>
-            <button class="icon-button" id="closeFirewallModal" type="button" title="關閉" aria-label="關閉">
-              <svg viewBox="0 0 24 24" focusable="false">
-                <path d="M6 6l12 12" />
-                <path d="M18 6 6 18" />
-              </svg>
-            </button>
-          </div>
-
-          <dl class="firewall-summary">
-            <div>
-              <dt>專案</dt>
-              <dd id="firewallProject">--</dd>
-            </div>
-            <div>
-              <dt>範圍</dt>
-              <dd>TCP、LocalSubnet、Private profile、單一 port</dd>
-            </div>
-            <div>
-              <dt>URL</dt>
-              <dd id="firewallUrl">--</dd>
-            </div>
-          </dl>
-
-          <label class="consent-row">
-            <input id="firewallConsent" type="checkbox" />
-            <span>我了解這會新增一條 Windows inbound firewall 規則，只允許目前專案使用的單一 port。</span>
-          </label>
-
-          <textarea id="firewallCommand" readonly spellcheck="false" rows="4" aria-label="PowerShell 指令"></textarea>
-
-          <div class="modal-actions">
-            <button class="copy-url" id="copyFirewallCommand" type="button" disabled>複製指令</button>
-            <button class="copy-url danger-action" id="runFirewallCommand" type="button" disabled>開啟 PowerShell</button>
-            <button class="primary-button" id="closeFirewallDone" type="button">完成</button>
-          </div>
-        </section>
-      </div>
-
       <div class="modal-backdrop" id="terminalModal" hidden>
         <section class="modal-panel terminal-modal-panel" role="dialog" aria-modal="true" aria-labelledby="terminalTitle">
           <div class="modal-heading terminal-heading">
