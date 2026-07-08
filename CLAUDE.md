@@ -7,7 +7,7 @@
   - `server.js`（~7,700 行）：單一 HTTP + WebSocket 伺服器、REST `/api/*`、PTY 終端、專案掃描、防火牆/Tailscale/ADB 輔助、自我重啟。
   - `public/app.js`（~11,000 行）：瀏覽器原生 ESM（直接 import `./vendor/xterm/*.mjs`），單一 `state` 物件 + `render*()` 全量重繪，1s poll `/api/status`。
 - 心智模型：**伺服器是唯一事實來源**；client（含手機透過 Tailscale 的唯讀鏡像）只是同一 UI 對 server 狀態的投影。執行永遠只發生在本機。
-- 持久化：`dev-projects.json`（掃描結果+設定）、`.dev-manager/state.json`（執行中 PID/port）、`.dev-manager/terminal-preferences.json`（終端工作區 + pipeline 設定，跨裝置共享）。
+- 持久化：`dev-projects.json`（掃描結果+設定）、`.dev-manager/state.json`（執行中 PID/port）、`.dev-manager/terminal-preferences.json`（終端工作區 + pipeline 設定 + 記事本草稿，跨裝置共享）。
 - 所有使用者可見字串 **MUST** 為繁體中文（台灣用語）。
 
 ## 2. 通用開發規則 (RFC-2119)

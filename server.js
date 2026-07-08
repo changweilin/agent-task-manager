@@ -703,6 +703,8 @@ function defaultTerminalPreferences() {
     pipeline: null,
     // Saved pipeline run-progress so a run can be resumed after a page reload / quota wait.
     pipelineRun: null,
+    // 記事本(不執行的 pipeline 草稿)也跨裝置共享:手機打草稿、電腦整理後執行。
+    notepad: null,
     updatedAt: null,
   };
 }
@@ -738,6 +740,9 @@ function readTerminalPreferences() {
     pipelineRun: saved && stored?.pipelineRun && typeof stored.pipelineRun === 'object'
       ? stored.pipelineRun
       : defaults.pipelineRun,
+    notepad: saved && stored?.notepad && typeof stored.notepad === 'object'
+      ? stored.notepad
+      : defaults.notepad,
   };
 }
 
@@ -772,6 +777,9 @@ function saveTerminalPreferences(patch) {
     pipelineRun: Object.prototype.hasOwnProperty.call(source, 'pipelineRun')
       ? (source.pipelineRun && typeof source.pipelineRun === 'object' ? source.pipelineRun : null)
       : current.pipelineRun,
+    notepad: Object.prototype.hasOwnProperty.call(source, 'notepad')
+      ? (source.notepad && typeof source.notepad === 'object' ? source.notepad : null)
+      : current.notepad,
     updatedAt: new Date().toISOString(),
   };
 

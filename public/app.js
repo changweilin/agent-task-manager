@@ -858,6 +858,8 @@ const state = {
   // Top-level modal mode: 'terminal' (終端管理) or 'pipeline' (Pipeline 管理).
   terminalModalMode: 'terminal',
   terminalPipelineLogExpanded: false,
+  // 「時間管理」(閒置/逾時/配額調節等執行參數)預設收合,讓段落 prompt 是頁面主體。
+  terminalPipelineTimeExpanded: false,
 };
 
 let terminalPipelineToken = 0;
@@ -963,6 +965,7 @@ const elements = {
   terminalModeNotepadButton: document.querySelector('#terminalModeNotepadButton'),
   closeTerminalModal: document.querySelector('#closeTerminalModal'),
   addTerminalSession: document.querySelector('#addTerminalSession'),
+  terminalEmptyNewButton: document.querySelector('#terminalEmptyNewButton'),
   terminalTabsRow: document.querySelector('#terminalTabsRow'),
   terminalTabs: document.querySelector('#terminalTabs'),
   terminalWorkspace: document.querySelector('#terminalWorkspace'),
@@ -3118,7 +3121,7 @@ async function runAction(name, action, options = {}) {
   }
 
   if (action === 'terminal') {
-    openTerminalManager(name);
+    openTerminalManager(name, { draft: true });
     return true;
   }
 
@@ -4094,9 +4097,11 @@ function restoreTerminalWorkspaceState(workspace = readTerminalWorkspaceState(),
     state.terminalActiveSessionByProject = new Map();
   }
   if (Array.isArray(workspace.sessions)) {
+    // 預設頁籤全部關閉:reload 後只還原「當時活著」的終端(有 server id;ATM 重啟
+    // resume 鏈靠它把死掉的分頁變回可重啟 draft)。純 draft 頁籤不再跨 reload 還原。
     const sessions = workspace.sessions
       .map((session, index) => normalizeTerminalWorkspaceSession(session, index))
-      .filter(Boolean);
+      .filter((session) => session && session.id);
     state.terminalWorkspaceMetaBySessionId = new Map(sessions
       .filter((session) => session.id)
       .map((session) => [session.id, session]));
@@ -4355,11 +4360,7 @@ async function loadTerminalSessions({ silent = false } = {}) {
     );
     state.terminalWorkspaceLoaded = true;
 
-    // 終端管理是單一全域頁面:只有整個 workspace 空了才補一個 draft,
-    // 不再為「目前專案」個別補 draft(避免每個專案累積空白頁籤)。
-    if (terminalCanAddSession() && state.terminalModalOpen && !state.terminalSessions.length && state.terminalProjectName) {
-      createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
-    }
+    // 預設頁籤全部關閉:workspace 空了就顯示空狀態,不自動補 draft。
     if (state.terminalSessions.length && !state.terminalSessions.some((session) => session.localId === state.terminalActiveSessionId)) {
       state.terminalActiveSessionId = state.terminalSessions[0].localId;
     }
@@ -4373,10 +4374,6 @@ async function loadTerminalSessions({ silent = false } = {}) {
     }
   } catch (error) {
     state.terminalWorkspaceLoaded = true;
-    if (terminalCanAddSession() && state.terminalModalOpen && !state.terminalSessions.length && state.terminalProjectName) {
-      createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
-      renderTerminalModal();
-    }
     if (!silent) {
       showToast(error.message);
     }
@@ -5042,11 +5039,16 @@ function readTerminalNotepad() {
   }
 }
 
-function saveTerminalNotepad() {
+function saveTerminalNotepad({ sync = true } = {}) {
   try {
     writeLocalPreference(TERMINAL_NOTEPAD_KEY, JSON.stringify(normalizeTerminalNotepad(state.terminalNotepad)));
   } catch {
     // The notepad stays usable for this session even if localStorage is blocked.
+  }
+
+  // 記事本草稿跟 pipeline 一樣跨裝置共享:手機打草稿、電腦接手整理後執行。
+  if (sync) {
+    scheduleTerminalPreferencesSave();
   }
 }
 
@@ -5247,6 +5249,7 @@ function terminalPreferencesPayload() {
     favoritesByAgent: state.terminalFavoritesByAgent,
     pipeline: getTerminalPipeline(),
     pipelineRun: state.terminalPipelineRunSaved || null,
+    notepad: getTerminalNotepad(),
     // A read-only (remote) client can't own writable sessions, so it must not overwrite
     // the shared workspace — that would wipe the local machine's terminal tabs.
     ...(terminalIsReadOnly() ? {} : { workspace: buildTerminalWorkspaceState() }),
@@ -5309,6 +5312,10 @@ function applyTerminalPreferences(payload) {
   if (payload.pipeline && typeof payload.pipeline === 'object') {
     state.terminalPipeline = normalizeTerminalPipeline(payload.pipeline);
     saveTerminalPipeline({ sync: false });
+  }
+  if (payload.notepad && typeof payload.notepad === 'object') {
+    state.terminalNotepad = normalizeTerminalNotepad(payload.notepad);
+    saveTerminalNotepad({ sync: false });
   }
   if (Object.prototype.hasOwnProperty.call(payload, 'pipelineRun')) {
     state.terminalPipelineRunSaved = normalizePipelineRunSaved(payload.pipelineRun);
@@ -6279,7 +6286,9 @@ function switchTerminalProject(projectName, { ensureDraft = true } = {}) {
   saveTerminalWorkspaceState();
 }
 
-function openTerminalManager(projectName) {
+// 預設頁籤全部關閉:只有帶 draft:true 的明確入口(專案列的終端按鈕、開啟 ATM 終端)
+// 才替該專案補一個 draft;其餘入口一律以現有頁籤(可能為空)開啟。
+function openTerminalManager(projectName, { draft = false } = {}) {
   state.terminalProjectName = projectName;
   state.terminalModalOpen = true;
   state.terminalModalMode = 'terminal';
@@ -6287,7 +6296,7 @@ function openTerminalManager(projectName) {
   // 與選到「終端」分頁時一致。使用者仍可用「放大」按鈕切回收合檢視。
   state.terminalManualFocus = true;
   elements.terminalModal.hidden = false;
-  switchTerminalProject(projectName, { ensureDraft: true });
+  switchTerminalProject(projectName, { ensureDraft: draft });
   renderTerminalModal();
   startTerminalPolling();
   loadTerminalSessions({ silent: true });
@@ -7236,60 +7245,75 @@ function renderTerminalPipeline(session) {
     `;
   }).join('');
 
+  // 段落 prompt 是頁面主體(手機上的主要操作);閒置/逾時/配額等執行參數收進
+  // 「時間管理」摺疊區塊,預設收合、收合時顯示摘要。
+  const timeExpanded = state.terminalPipelineTimeExpanded;
+  const timeSummary = `閒置 ${config.idleSeconds}s · 逾時 ${config.maxWaitSeconds}s · 5h 配額調節${quota.enabled ? `開（T${quota.minRemaining}% C${quota.countdownPerPercent}s S${quota.safetyBuffer}%）` : '關'}`;
+  const timeBody = `
+    <div class="terminal-pipeline-settings">
+      <label class="terminal-pipeline-field">
+        <span>完成判定閒置秒數</span>
+        <input data-pipeline-idle type="number" min="${TERMINAL_PIPELINE_IDLE_MIN}" max="${TERMINAL_PIPELINE_IDLE_MAX}" step="1" value="${config.idleSeconds}" ${running ? 'disabled' : ''} />
+      </label>
+      <label class="terminal-pipeline-field">
+        <span>單段逾時秒數</span>
+        <input data-pipeline-maxwait type="number" min="${TERMINAL_PIPELINE_MAXWAIT_MIN}" max="${TERMINAL_PIPELINE_MAXWAIT_MAX}" step="10" value="${config.maxWaitSeconds}" ${running ? 'disabled' : ''} />
+      </label>
+      <label class="terminal-pipeline-field">
+        <span>開新對話指令</span>
+        <input data-pipeline-reset type="text" spellcheck="false" value="${escapeHtml(config.resetCommand)}" placeholder="${escapeHtml(TERMINAL_PIPELINE_AGENT_RESET[agentId] || '/clear')}" ${running ? 'disabled' : ''} />
+      </label>
+    </div>
+    <div class="terminal-pipeline-quota">
+      <div class="terminal-pipeline-quota-main">
+        <div class="terminal-pipeline-quota-options ${quota.enabled ? '' : 'is-disabled'}">
+          <label class="terminal-pipeline-field">
+            <span>檢查對象</span>
+            <select data-pipeline-quota-agent ${running || !quota.enabled ? 'disabled' : ''}>
+              ${AI_QUOTA_MONITOR_AGENTS.map((agent) => `<option value="${escapeHtml(agent.id)}" ${quota.agent === agent.id ? 'selected' : ''}>${escapeHtml(agent.label)}</option>`).join('')}
+            </select>
+          </label>
+          <label class="terminal-pipeline-field">
+            <span>剩餘門檻 T %</span>
+            <input data-pipeline-quota-threshold type="number" min="0" max="100" step="1" value="${quota.minRemaining}" ${running || !quota.enabled ? 'disabled' : ''} title="剩餘配額 ≤ T 時開始等待至接近重置" />
+          </label>
+          <label class="terminal-pipeline-field">
+            <span>倒數秒/% C</span>
+            <input data-pipeline-quota-countdown type="number" min="${TERMINAL_PIPELINE_COUNTDOWN_MIN}" max="${TERMINAL_PIPELINE_COUNTDOWN_MAX}" step="1" value="${quota.countdownPerPercent}" ${running || !quota.enabled ? 'disabled' : ''} title="重置前 (剩餘−S)×C 秒開始續跑" />
+          </label>
+          <label class="terminal-pipeline-field">
+            <span>安全緩衝 S %</span>
+            <input data-pipeline-quota-safety type="number" min="${TERMINAL_PIPELINE_SAFETY_MIN}" max="${TERMINAL_PIPELINE_SAFETY_MAX}" step="1" value="${quota.safetyBuffer}" ${running || !quota.enabled ? 'disabled' : ''} title="預留不使用的配額百分比" />
+          </label>
+        </div>
+        <div class="terminal-pipeline-quota-checks">
+          <label class="terminal-pipeline-quota-toggle" title="達門檻時等到接近重置再續跑">
+            <input type="checkbox" data-pipeline-quota-enabled ${quota.enabled ? 'checked' : ''} ${running ? 'disabled' : ''} />
+            <span>5h 配額調節</span>
+          </label>
+          <label class="terminal-pipeline-quota-strict" title="無法判斷配額時停止（否則照舊續跑）">
+            <input type="checkbox" data-pipeline-quota-strict ${quota.stopOnUnknown ? 'checked' : ''} ${running || !quota.enabled ? 'disabled' : ''} />
+            <span>無法判斷時停止</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  `;
+
   return `
     <div class="terminal-pipeline">
       ${renderPipelineControls(session)}
       <p class="terminal-pipeline-hint">每段 prompt 會依序送給目前的 ${escapeHtml(agentLabel)}；可逐段設定延續同一對話或切換新對話，並依剩餘配額自動停止。</p>
-      <div class="terminal-pipeline-settings">
-        <label class="terminal-pipeline-field">
-          <span>完成判定閒置秒數</span>
-          <input data-pipeline-idle type="number" min="${TERMINAL_PIPELINE_IDLE_MIN}" max="${TERMINAL_PIPELINE_IDLE_MAX}" step="1" value="${config.idleSeconds}" ${running ? 'disabled' : ''} />
-        </label>
-        <label class="terminal-pipeline-field">
-          <span>單段逾時秒數</span>
-          <input data-pipeline-maxwait type="number" min="${TERMINAL_PIPELINE_MAXWAIT_MIN}" max="${TERMINAL_PIPELINE_MAXWAIT_MAX}" step="10" value="${config.maxWaitSeconds}" ${running ? 'disabled' : ''} />
-        </label>
-        <label class="terminal-pipeline-field">
-          <span>開新對話指令</span>
-          <input data-pipeline-reset type="text" spellcheck="false" value="${escapeHtml(config.resetCommand)}" placeholder="${escapeHtml(TERMINAL_PIPELINE_AGENT_RESET[agentId] || '/clear')}" ${running ? 'disabled' : ''} />
-        </label>
-      </div>
-      <div class="terminal-pipeline-quota">
-        <div class="terminal-pipeline-quota-main">
-          <div class="terminal-pipeline-quota-options ${quota.enabled ? '' : 'is-disabled'}">
-            <label class="terminal-pipeline-field">
-              <span>檢查對象</span>
-              <select data-pipeline-quota-agent ${running || !quota.enabled ? 'disabled' : ''}>
-                ${AI_QUOTA_MONITOR_AGENTS.map((agent) => `<option value="${escapeHtml(agent.id)}" ${quota.agent === agent.id ? 'selected' : ''}>${escapeHtml(agent.label)}</option>`).join('')}
-              </select>
-            </label>
-            <label class="terminal-pipeline-field">
-              <span>剩餘門檻 T %</span>
-              <input data-pipeline-quota-threshold type="number" min="0" max="100" step="1" value="${quota.minRemaining}" ${running || !quota.enabled ? 'disabled' : ''} title="剩餘配額 ≤ T 時開始等待至接近重置" />
-            </label>
-            <label class="terminal-pipeline-field">
-              <span>倒數秒/% C</span>
-              <input data-pipeline-quota-countdown type="number" min="${TERMINAL_PIPELINE_COUNTDOWN_MIN}" max="${TERMINAL_PIPELINE_COUNTDOWN_MAX}" step="1" value="${quota.countdownPerPercent}" ${running || !quota.enabled ? 'disabled' : ''} title="重置前 (剩餘−S)×C 秒開始續跑" />
-            </label>
-            <label class="terminal-pipeline-field">
-              <span>安全緩衝 S %</span>
-              <input data-pipeline-quota-safety type="number" min="${TERMINAL_PIPELINE_SAFETY_MIN}" max="${TERMINAL_PIPELINE_SAFETY_MAX}" step="1" value="${quota.safetyBuffer}" ${running || !quota.enabled ? 'disabled' : ''} title="預留不使用的配額百分比" />
-            </label>
-          </div>
-          <div class="terminal-pipeline-quota-checks">
-            <label class="terminal-pipeline-quota-toggle" title="達門檻時等到接近重置再續跑">
-              <input type="checkbox" data-pipeline-quota-enabled ${quota.enabled ? 'checked' : ''} ${running ? 'disabled' : ''} />
-              <span>5h 配額調節</span>
-            </label>
-            <label class="terminal-pipeline-quota-strict" title="無法判斷配額時停止（否則照舊續跑）">
-              <input type="checkbox" data-pipeline-quota-strict ${quota.stopOnUnknown ? 'checked' : ''} ${running || !quota.enabled ? 'disabled' : ''} />
-              <span>無法判斷時停止</span>
-            </label>
-          </div>
-        </div>
-      </div>
       <div class="terminal-pipeline-steps">${stepsHtml}</div>
       <button class="copy-url terminal-pipeline-add" data-pipeline-add type="button" ${running ? 'disabled' : ''}>${icons.add}<span>新增一段</span></button>
+      <div class="terminal-pipeline-time ${timeExpanded ? 'is-expanded' : ''}">
+        <button class="terminal-pipeline-time-toggle" data-pipeline-time-toggle type="button" aria-expanded="${timeExpanded ? 'true' : 'false'}">
+          <span class="terminal-pipeline-time-caret" aria-hidden="true">${timeExpanded ? '▾' : '▸'}</span>
+          <span class="terminal-pipeline-time-label">時間管理</span>
+          ${timeExpanded ? '' : `<span class="terminal-pipeline-time-summary">${escapeHtml(timeSummary)}</span>`}
+        </button>
+        ${timeExpanded ? timeBody : ''}
+      </div>
       <div class="terminal-pipeline-log-controls">
         <button class="terminal-pipeline-log-toggle" data-pipeline-log-toggle type="button">${state.terminalPipelineLogExpanded ? '隱藏執行紀錄' : '顯示執行紀錄'}</button>
       </div>
@@ -9500,16 +9524,28 @@ async function syncTerminalPipelineFromServer() {
 
   try {
     const payload = await api('/api/terminal-preferences');
-    if (!payload?.pipeline || typeof payload.pipeline !== 'object') {
-      return;
+    let changed = false;
+    if (payload?.pipeline && typeof payload.pipeline === 'object') {
+      const incoming = JSON.stringify(normalizeTerminalPipeline(payload.pipeline));
+      if (incoming !== JSON.stringify(normalizeTerminalPipeline(state.terminalPipeline))) {
+        state.terminalPipeline = JSON.parse(incoming);
+        saveTerminalPipeline({ sync: false });
+        changed = true;
+      }
     }
-    const incoming = JSON.stringify(normalizeTerminalPipeline(payload.pipeline));
-    if (incoming === JSON.stringify(normalizeTerminalPipeline(state.terminalPipeline))) {
-      return;
+    // 記事本草稿也跟著同步(手機↔電腦);焦點防護在上面已涵蓋記事本欄位
+    // (記事本根節點同樣掛 .terminal-pipeline class)。
+    if (payload?.notepad && typeof payload.notepad === 'object') {
+      const incoming = JSON.stringify(normalizeTerminalNotepad(payload.notepad));
+      if (incoming !== JSON.stringify(normalizeTerminalNotepad(state.terminalNotepad))) {
+        state.terminalNotepad = JSON.parse(incoming);
+        saveTerminalNotepad({ sync: false });
+        changed = true;
+      }
     }
-    state.terminalPipeline = JSON.parse(incoming);
-    saveTerminalPipeline({ sync: false });
-    renderTerminalModal();
+    if (changed) {
+      renderTerminalModal();
+    }
   } catch {
     // Best-effort; ignore transient network errors.
   }
@@ -9866,7 +9902,7 @@ elements.openAtmTerminalButton?.addEventListener('click', () => {
     showDemoNotice();
     return;
   }
-  openTerminalManager(ATM_TERMINAL_PROJECT_NAME);
+  openTerminalManager(ATM_TERMINAL_PROJECT_NAME, { draft: true });
 });
 elements.themeToggleButton.addEventListener('click', () => {
   const nextTheme = state.theme === 'dark' ? 'light' : 'dark';
@@ -10207,7 +10243,8 @@ elements.closeTerminalModal.addEventListener('click', hideTerminalManager);
 elements.terminalModeTerminalButton?.addEventListener('click', () => setTerminalModalMode('terminal'));
 elements.terminalModePipelineButton?.addEventListener('click', () => setTerminalModalMode('pipeline'));
 elements.terminalModeNotepadButton?.addEventListener('click', () => setTerminalModalMode('notepad'));
-elements.addTerminalSession.addEventListener('click', () => {
+// 「新增對話」:頁籤列按鈕與空狀態 CTA 共用。
+function addTerminalSessionFromUi() {
   if (!terminalCanAddSession()) {
     showToast('Terminal is read-only from LAN/Tailscale.');
     return;
@@ -10228,7 +10265,10 @@ elements.addTerminalSession.addEventListener('click', () => {
   syncTerminalProjectToActiveSession();
   saveTerminalWorkspaceState();
   renderTerminalModal();
-});
+}
+
+elements.addTerminalSession.addEventListener('click', addTerminalSessionFromUi);
+elements.terminalEmptyNewButton?.addEventListener('click', addTerminalSessionFromUi);
 elements.terminalTabs.addEventListener('click', (event) => {
   if (state.suppressTerminalTabClick) {
     event.preventDefault();
@@ -10585,6 +10625,13 @@ elements.terminalWorkspace.addEventListener('click', (event) => {
   const pipelineLogToggle = event.target.closest('button[data-pipeline-log-toggle]');
   if (pipelineLogToggle) {
     state.terminalPipelineLogExpanded = !state.terminalPipelineLogExpanded;
+    renderTerminalModal();
+    return;
+  }
+
+  const pipelineTimeToggle = event.target.closest('button[data-pipeline-time-toggle]');
+  if (pipelineTimeToggle) {
+    state.terminalPipelineTimeExpanded = !state.terminalPipelineTimeExpanded;
     renderTerminalModal();
     return;
   }

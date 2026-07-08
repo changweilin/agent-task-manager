@@ -2274,14 +2274,21 @@ tbody tr.project-backends-row td {
 }
 
 .terminal-empty {
-  min-height: 120px;
+  min-height: 160px;
   display: grid;
   place-items: center;
+  align-content: center;
+  gap: 12px;
   margin-top: 10px;
   color: var(--muted);
   background: var(--surface-muted);
   border: 1px dashed var(--border);
   border-radius: var(--radius);
+}
+
+.terminal-empty p {
+  margin: 0;
+  font-size: 13px;
 }
 
 .terminal-empty[hidden] {
@@ -3904,6 +3911,54 @@ tbody tr.project-backends-row td {
 
 .terminal-pipeline-add {
   margin-top: 8px;
+}
+
+/* 時間管理:執行參數(閒置/逾時/配額)收合區塊,收合時只顯示一行摘要。 */
+.terminal-pipeline-time {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 6px 10px 8px;
+}
+
+.terminal-pipeline-time-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  cursor: pointer;
+  padding: 4px 0;
+  text-align: left;
+}
+
+.terminal-pipeline-time-caret {
+  color: var(--muted);
+}
+
+.terminal-pipeline-time-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+/* 展開後 quota 區塊已在時間管理框內,拿掉第二層框線。 */
+.terminal-pipeline-time .terminal-pipeline-quota {
+  border: none;
+  background: transparent;
+  padding: 0;
 }
 
 .terminal-pipeline-settings {
