@@ -2064,99 +2064,6 @@ tbody tr.project-backends-row td {
   stroke-linejoin: round;
 }
 
-/* 切換專案 cluster now sits at the top of the active tab's page (inside the workspace). */
-.terminal-project-bar {
-  min-height: 30px;
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 8px;
-  padding: 5px 6px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-.terminal-project-picker {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  gap: 6px;
-  min-width: 0;
-}
-
-.terminal-project-picker span {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 760;
-  white-space: nowrap;
-}
-
-.terminal-project-picker select {
-  width: clamp(150px, 22vw, 260px);
-  height: 28px;
-  padding: 0 8px;
-  font-size: 12px;
-}
-
-.terminal-project-windows {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  overflow-x: auto;
-}
-
-.terminal-project-window {
-  max-width: 190px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  gap: 6px;
-  padding: 0 8px;
-  color: var(--muted);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  font-size: 11px;
-  font-weight: 760;
-}
-
-.terminal-project-window.is-active {
-  color: var(--teal);
-  background: var(--teal-soft);
-  border-color: var(--teal-border);
-}
-
-.terminal-project-window span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.terminal-project-window strong {
-  min-width: 16px;
-  height: 16px;
-  display: grid;
-  place-items: center;
-  color: var(--text);
-  background: var(--surface-muted);
-  border-radius: 999px;
-  font-size: 10px;
-  line-height: 1;
-}
-
-.terminal-project-window i {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  background: var(--teal);
-  border-radius: 999px;
-}
-
 .terminal-tabs {
   display: flex;
   flex: 1 1 auto;
@@ -2167,7 +2074,8 @@ tbody tr.project-backends-row td {
 }
 
 .terminal-tab {
-  width: clamp(144px, 18vw, 214px);
+  /* 頁籤多了專案徽章,寬度略放大。 */
+  width: clamp(168px, 20vw, 248px);
   height: 30px;
   display: inline-flex;
   align-items: center;
@@ -2217,6 +2125,27 @@ tbody tr.project-backends-row td {
 
 .terminal-tab-dot.is-closed {
   background: var(--coral);
+}
+
+/* 全域頁籤列:每個對話以徽章標示所屬專案。 */
+.terminal-tab-project {
+  max-width: 76px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  padding: 1px 5px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-tab.is-active .terminal-tab-project {
+  color: var(--teal);
+  border-color: var(--teal-border);
 }
 
 .terminal-tab-drag-handle {
@@ -2456,11 +2385,13 @@ tbody tr.project-backends-row td {
 
 .terminal-config-row {
   display: grid;
+  /* 專案 / 對話名稱 / 開啟位置 / Port / 終端類型 */
   grid-template-columns:
-    minmax(130px, 0.8fr)
-    minmax(240px, 1.7fr)
-    minmax(72px, 0.35fr)
-    minmax(140px, 0.65fr);
+    minmax(140px, 0.75fr)
+    minmax(120px, 0.75fr)
+    minmax(220px, 1.5fr)
+    minmax(64px, 0.35fr)
+    minmax(130px, 0.6fr);
   align-items: end;
   gap: 8px;
 }
@@ -5001,20 +4932,6 @@ button:disabled {
   .terminal-add-button {
     width: auto;
     justify-content: center;
-  }
-
-  .terminal-project-bar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .terminal-project-picker,
-  .terminal-project-picker select {
-    width: 100%;
-  }
-
-  .terminal-project-windows {
-    width: 100%;
   }
 
   .terminal-pipeline-quota-main {

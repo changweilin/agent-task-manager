@@ -4218,6 +4218,21 @@ function rememberTerminalActiveSession(projectName = state.terminalProjectName, 
   }
 }
 
+// 終端管理是單一全域頁面:terminalProjectName 一律跟著作用中的對話走,
+// 目錄樹/port/終端類型等 per-project options 才會對到正確的專案。
+function syncTerminalProjectToActiveSession() {
+  const active = findTerminalSession(state.terminalActiveSessionId);
+  if (!active?.projectName || active.projectName === state.terminalProjectName) {
+    rememberTerminalActiveSession();
+    return;
+  }
+  state.terminalProjectName = active.projectName;
+  rememberTerminalActiveSession();
+  if (!terminalIsReadOnly()) {
+    loadTerminalOptions(active.projectName);
+  }
+}
+
 function terminalSessionsForProject(projectName = state.terminalProjectName) {
   return state.terminalSessions.filter((session) => session.projectName === projectName);
 }
@@ -4340,20 +4355,15 @@ async function loadTerminalSessions({ silent = false } = {}) {
     );
     state.terminalWorkspaceLoaded = true;
 
-    if (terminalCanAddSession() && state.terminalModalOpen && state.terminalProjectName && !terminalSessionsForProject(state.terminalProjectName).length) {
+    // 終端管理是單一全域頁面:只有整個 workspace 空了才補一個 draft,
+    // 不再為「目前專案」個別補 draft(避免每個專案累積空白頁籤)。
+    if (terminalCanAddSession() && state.terminalModalOpen && !state.terminalSessions.length && state.terminalProjectName) {
       createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
     }
-    if (!state.terminalProjectName && state.terminalSessions.length) {
-      state.terminalProjectName = state.terminalSessions[0].projectName;
+    if (state.terminalSessions.length && !state.terminalSessions.some((session) => session.localId === state.terminalActiveSessionId)) {
+      state.terminalActiveSessionId = state.terminalSessions[0].localId;
     }
-    if (state.terminalProjectName) {
-      const sessions = terminalSessionsForProject(state.terminalProjectName);
-      const rememberedId = state.terminalActiveSessionByProject.get(state.terminalProjectName);
-      state.terminalActiveSessionId = sessions.some((session) => session.localId === rememberedId)
-        ? rememberedId
-        : sessions.find((session) => session.localId === state.terminalActiveSessionId)?.localId || sessions[0]?.localId || null;
-      rememberTerminalActiveSession();
-    }
+    syncTerminalProjectToActiveSession();
 
     saveTerminalWorkspaceState();
     if (state.terminalModalOpen) {
@@ -4363,7 +4373,7 @@ async function loadTerminalSessions({ silent = false } = {}) {
     }
   } catch (error) {
     state.terminalWorkspaceLoaded = true;
-    if (terminalCanAddSession() && state.terminalModalOpen && state.terminalProjectName && !terminalSessionsForProject(state.terminalProjectName).length) {
+    if (terminalCanAddSession() && state.terminalModalOpen && !state.terminalSessions.length && state.terminalProjectName) {
       createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
       renderTerminalModal();
     }
@@ -5956,30 +5966,21 @@ function cancelTerminalTitleEdit(localId) {
   renderTerminalModal();
 }
 
-function reorderTerminalSession(projectName, sourceId, targetId) {
+function reorderTerminalSession(sourceId, targetId) {
   if (!sourceId || !targetId || sourceId === targetId) {
     return false;
   }
 
-  const projectSessions = terminalSessionsForProject(projectName);
-  const sourceIndex = projectSessions.findIndex((session) => session.localId === sourceId);
-  const targetIndex = projectSessions.findIndex((session) => session.localId === targetId);
+  const sessions = [...state.terminalSessions];
+  const sourceIndex = sessions.findIndex((session) => session.localId === sourceId);
+  const targetIndex = sessions.findIndex((session) => session.localId === targetId);
   if (sourceIndex < 0 || targetIndex < 0) {
     return false;
   }
 
-  const reordered = [...projectSessions];
-  const [moved] = reordered.splice(sourceIndex, 1);
-  reordered.splice(targetIndex, 0, moved);
-  let replacementIndex = 0;
-  state.terminalSessions = state.terminalSessions.map((session) => {
-    if (session.projectName !== projectName) {
-      return session;
-    }
-    const replacement = reordered[replacementIndex];
-    replacementIndex += 1;
-    return replacement;
-  });
+  const [moved] = sessions.splice(sourceIndex, 1);
+  sessions.splice(targetIndex, 0, moved);
+  state.terminalSessions = sessions;
   return true;
 }
 
@@ -6319,28 +6320,6 @@ function hideTerminalManager() {
   disposeUnusedTerminalViews();
 }
 
-function terminalProjectSessionCounts(projectName) {
-  const sessions = startedTerminalSessionsForProject(projectName);
-  return {
-    total: sessions.length,
-    running: sessions.filter((session) => !session.exitedAt && (session.running || session.id)).length,
-  };
-}
-
-function terminalProjectNames() {
-  const names = [];
-  const add = (name) => {
-    if (name && !names.includes(name)) {
-      names.push(name);
-    }
-  };
-  if (state.terminalModalOpen) {
-    add(state.terminalProjectName);
-  }
-  state.terminalSessions.forEach((session) => add(session.projectName));
-  return names;
-}
-
 function hasRestorableTerminalProject(projectName) {
   if (state.terminalSessions.some((session) => session.projectName === projectName)) {
     return true;
@@ -6350,49 +6329,37 @@ function hasRestorableTerminalProject(projectName) {
     .some((session) => session.projectName === projectName);
 }
 
-// The 切換專案 cluster now lives inside the active tab's page (workspace) instead of a
-// bar above the conversation tabs. Returns markup; renderTerminalModal injects it into
-// the workspace. The 1s poll no longer rebuilds the workspace, so an open <select> is
-// not snapped shut mid-interaction.
-function renderTerminalProjectSwitcher() {
-  const projects = terminalProjectList();
-  const selectedProjectName = state.terminalProjectName || projects[0]?.name || '';
-  const openProjectNames = terminalProjectNames();
+// 終端管理是單一全域頁面(對話頁籤跨專案),「切換專案」cluster 已移除;
+// 專案改為 draft 設定列的一個欄位,改選時把 draft 重新掛到新專案的 options 上。
+function setTerminalDraftProject(session, projectName) {
+  if (!session || session.id || !projectName || session.projectName === projectName) {
+    return;
+  }
 
-  return `
-    <div class="terminal-project-bar" aria-label="切換專案">
-      <label class="terminal-project-picker">
-        <span>切換專案</span>
-        <select data-terminal-project-picker aria-label="切換終端專案">
-          ${projects.map((project) => `
-            <option value="${escapeHtml(project.name)}" ${project.name === selectedProjectName ? 'selected' : ''}>
-              ${escapeHtml(project.name)}
-            </option>
-          `).join('')}
-        </select>
-      </label>
-      <div class="terminal-project-windows" role="tablist" aria-label="已開啟的終端視窗">
-        ${openProjectNames.map((projectName) => {
-          const counts = terminalProjectSessionCounts(projectName);
-          const active = projectName === state.terminalProjectName;
-          return `
-            <button
-              class="terminal-project-window ${active ? 'is-active' : ''}"
-              data-terminal-project-window="${escapeHtml(projectName)}"
-              type="button"
-              role="tab"
-              aria-selected="${active ? 'true' : 'false'}"
-              title="${escapeHtml(projectName)}"
-            >
-              <span>${escapeHtml(projectName)}</span>
-              <strong>${counts.total}</strong>
-              ${counts.running ? '<i aria-hidden="true"></i>' : ''}
-            </button>
-          `;
-        }).join('')}
-      </div>
-    </div>
-  `;
+  session.projectName = projectName;
+  const options = terminalOptionsForProject(projectName);
+  session.cwd = '';
+  session.cwdRelativePath = options.directories?.[0]?.relativePath || '';
+  session.shellId = options.shells?.[0]?.id || session.shellId || '';
+  session.projectPort = options.port || null;
+  session.projectLocalUrl = options.localUrl || '';
+  state.terminalProjectName = projectName;
+  rememberTerminalActiveSession(projectName, session.localId);
+  if (!terminalIsReadOnly()) {
+    loadTerminalOptions(projectName);
+  }
+  saveTerminalWorkspaceState();
+  renderTerminalModal();
+}
+
+// 點選跨專案的對話頁籤:切換作用中對話,並讓 per-project context 跟著走。
+function activateTerminalSession(localId) {
+  const session = findTerminalSession(localId);
+  if (!session) {
+    return;
+  }
+  state.terminalActiveSessionId = session.localId;
+  syncTerminalProjectToActiveSession();
 }
 
 // A small indeterminate progress bar + 中斷 button shown while a session is waiting on a
@@ -6452,12 +6419,16 @@ function isAbortError(error) {
 }
 
 function renderTerminalTabs() {
-  const sessions = terminalSessionsForProject();
+  // 單一全域頁籤列:所有專案的對話都在這裡,頁籤上以徽章標示所屬專案。
+  const sessions = state.terminalSessions;
   elements.terminalTabs.innerHTML = sessions
     .map((session) => {
       const active = session.localId === state.terminalActiveSessionId;
       const statusClass = session.exitedAt ? 'is-closed' : session.running ? 'is-running' : 'is-draft';
       const title = session.title;
+      const projectBadge = session.projectName
+        ? `<span class="terminal-tab-project" title="${escapeHtml(session.projectName)}">${escapeHtml(session.projectName)}</span>`
+        : '';
       const longTitle = String(title || '').length > TERMINAL_TITLE_MARQUEE_LENGTH;
       const titleContent = longTitle
         ? `<span class="terminal-tab-title-track"><span>${escapeHtml(title)}</span><span aria-hidden="true">${escapeHtml(title)}</span></span>`
@@ -6472,6 +6443,7 @@ function renderTerminalTabs() {
         >
           <button class="terminal-tab-drag-handle" data-terminal-tab-drag-handle type="button" title="拖曳調整順序" aria-label="拖曳調整 ${escapeHtml(session.title)} 的順序">${icons.grip}</button>
           <span class="terminal-tab-dot ${statusClass}" aria-hidden="true"></span>
+          ${projectBadge}
           <span class="terminal-tab-title">
             <span class="terminal-tab-title-label ${longTitle ? 'is-marquee' : ''}" title="${escapeHtml(session.title)}">${titleContent}</span>
           </span>
@@ -6567,10 +6539,24 @@ function renderTerminalSetup(session, options, project, sessionTitleControl, pro
           </option>
         `).join('')}
       </select>`;
+  const draftProjectName = session.projectName || project?.name || '';
+  const projectControl = session.id
+    ? `<div class="terminal-shell-value" title="${escapeHtml(draftProjectName)}">${escapeHtml(draftProjectName)}</div>`
+    : `<select data-terminal-draft-project="${escapeHtml(session.localId)}" ${disabled} aria-label="選擇對話所屬專案">
+        ${terminalProjectList().map((item) => `
+          <option value="${escapeHtml(item.name)}" ${item.name === draftProjectName ? 'selected' : ''}>
+            ${escapeHtml(item.name)}
+          </option>
+        `).join('')}
+      </select>`;
 
   return `
     <div class="terminal-setup">
       <div class="terminal-config-row">
+        <label class="terminal-shell-field">
+          <span>專案</span>
+          ${projectControl}
+        </label>
         <div class="terminal-title-field">
           <span class="terminal-setup-label">對話名稱</span>
           ${sessionTitleControl}
@@ -7389,12 +7375,16 @@ function renderTerminalModal() {
     return;
   }
 
-  const project = terminalProjectByName(state.terminalProjectName);
-  const options = terminalOptionsForProject();
-  const sessions = terminalSessionsForProject();
+  // 單一全域頁面:對話跨專案共用一列頁籤;project context 來自作用中的對話。
+  const sessions = state.terminalSessions;
   const activeSession = sessions.find((session) => session.localId === state.terminalActiveSessionId) || sessions[0] || null;
   state.terminalActiveSessionId = activeSession?.localId || null;
+  if (activeSession?.projectName && activeSession.projectName !== state.terminalProjectName) {
+    state.terminalProjectName = activeSession.projectName;
+  }
   rememberTerminalActiveSession();
+  const project = terminalProjectByName(activeSession?.projectName || state.terminalProjectName);
+  const options = terminalOptionsForProject(activeSession?.projectName || undefined);
 
   const mode = state.terminalModalMode === 'pipeline'
     ? 'pipeline'
@@ -7406,7 +7396,7 @@ function renderTerminalModal() {
     ? 'Pipeline 管理'
     : mode === 'notepad'
       ? '記事本'
-      : (project ? `終端管理：${project.name}` : '終端管理');
+      : '終端管理';
 
   // Mode toggle (終端管理 / Pipeline 管理 / 記事本) button states.
   elements.terminalModeTerminalButton?.classList.toggle('is-active', mode === 'terminal');
@@ -7419,8 +7409,8 @@ function renderTerminalModal() {
   // The modal is always maximised now (the 放大 toggle was replaced by the mode toggle).
   elements.terminalModal.querySelector('.terminal-modal-panel')?.classList.add('is-focus-mode');
 
-  // The conversation tabs row (含「新增對話」)belongs to 終端管理 mode only. The 切換專案
-  // cluster moved into the workspace page, so Pipeline 管理 / 記事本 (no tabs/page) hide it.
+  // The conversation tabs row (含「新增對話」)belongs to 終端管理 mode only;
+  // Pipeline 管理 / 記事本 (no tabs/page) hide it.
   elements.terminalTabsRow.hidden = !terminalMode;
 
   if (mode === 'pipeline') {
@@ -7443,12 +7433,8 @@ function renderTerminalModal() {
   renderTerminalTabs();
 
   if (!activeSession) {
-    // No conversation yet — still show the 切換專案 cluster so the page is never blank.
-    elements.terminalWorkspace.innerHTML = `
-      <section class="terminal-session">
-        ${renderTerminalProjectSwitcher()}
-      </section>
-    `;
+    // 沒有任何對話:上方 terminalEmpty 已顯示提示,「新增對話」按鈕可直接建立。
+    elements.terminalWorkspace.innerHTML = '';
     return;
   }
 
@@ -7530,7 +7516,6 @@ function renderTerminalModal() {
 
   elements.terminalWorkspace.innerHTML = `
     <section class="terminal-session ${focusActive ? 'is-focus-mode' : ''}" data-terminal-panel="${escapeHtml(activeSession.localId)}">
-      ${renderTerminalProjectSwitcher()}
       ${renderTerminalContentTabBar(activeTab)}
       ${pipelineBar}
       ${renderTerminalBusyBar(activeSession)}
@@ -9397,9 +9382,8 @@ async function closeProjectTerminalSessions(projectName) {
   state.terminalSessions = state.terminalSessions.filter((session) => !localIds.has(session.localId));
 
   if (localIds.has(state.terminalActiveSessionId)) {
-    const remaining = terminalSessionsForProject(state.terminalProjectName);
-    state.terminalActiveSessionId = remaining[0]?.localId || null;
-    rememberTerminalActiveSession();
+    state.terminalActiveSessionId = state.terminalSessions[0]?.localId || null;
+    syncTerminalProjectToActiveSession();
   }
   if (state.terminalFocusAppliedSessionId && localIds.has(state.terminalFocusAppliedSessionId)) {
     state.terminalFocusAppliedSessionId = null;
@@ -9436,16 +9420,19 @@ async function closeTerminalDialog(localId) {
     }
 
     disposeTerminalView(localId);
+    const removedIndex = state.terminalSessions.findIndex((item) => item.localId === localId);
     state.terminalSessions = state.terminalSessions.filter((item) => item.localId !== localId);
-    const sessions = terminalSessionsForProject();
+    const sessions = state.terminalSessions;
     if (state.terminalTitleEditingId === localId) {
       state.terminalTitleEditingId = null;
       state.terminalTitleDraft = '';
     }
     if (closingActiveSession || !sessions.some((item) => item.localId === state.terminalActiveSessionId)) {
-      state.terminalActiveSessionId = sessions[0]?.localId || null;
+      // 關閉後停在鄰近的頁籤(原位置或前一個),而不是跳回第一個。
+      const fallback = sessions[removedIndex] || sessions[removedIndex - 1] || sessions[0] || null;
+      state.terminalActiveSessionId = fallback?.localId || null;
     }
-    rememberTerminalActiveSession();
+    syncTerminalProjectToActiveSession();
     saveTerminalWorkspaceState();
     renderTerminalModal();
   } catch (error) {
@@ -9488,16 +9475,10 @@ async function discoverRemoteTerminalSessions() {
       return;
     }
 
-    if (!state.terminalProjectName && state.terminalSessions.length) {
-      state.terminalProjectName = state.terminalSessions[0].projectName;
+    if (state.terminalSessions.length && !state.terminalSessions.some((session) => session.localId === state.terminalActiveSessionId)) {
+      state.terminalActiveSessionId = state.terminalSessions[0].localId;
     }
-    if (state.terminalProjectName) {
-      const sessions = terminalSessionsForProject(state.terminalProjectName);
-      if (sessions.length && !sessions.some((session) => session.localId === state.terminalActiveSessionId)) {
-        state.terminalActiveSessionId = sessions[0].localId;
-        rememberTerminalActiveSession();
-      }
-    }
+    syncTerminalProjectToActiveSession();
 
     saveTerminalWorkspaceState();
     renderTerminalModal();
@@ -10232,12 +10213,19 @@ elements.addTerminalSession.addEventListener('click', () => {
     return;
   }
 
-  if (!state.terminalProjectName) {
+  // 新對話預設掛在作用中對話的專案,之後可在 draft 設定列改選專案。
+  const activeSession = findTerminalSession(state.terminalActiveSessionId);
+  const projectName = activeSession?.projectName
+    || state.terminalProjectName
+    || terminalProjectList()[0]?.name
+    || '';
+  if (!projectName) {
     showToast('請先選擇專案');
     return;
   }
 
-  createTerminalDraft(state.terminalProjectName, { readOnly: terminalIsReadOnly() });
+  createTerminalDraft(projectName, { readOnly: terminalIsReadOnly() });
+  syncTerminalProjectToActiveSession();
   saveTerminalWorkspaceState();
   renderTerminalModal();
 });
@@ -10261,8 +10249,7 @@ elements.terminalTabs.addEventListener('click', (event) => {
     return;
   }
 
-  state.terminalActiveSessionId = tab.dataset.terminalTab;
-  rememberTerminalActiveSession();
+  activateTerminalSession(tab.dataset.terminalTab);
   saveTerminalWorkspaceState();
   cancelTerminalTitleEdit(state.terminalTitleEditingId);
   renderTerminalModal();
@@ -10274,8 +10261,7 @@ elements.terminalTabs.addEventListener('keydown', (event) => {
   }
   if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault();
-    state.terminalActiveSessionId = tab.dataset.terminalTab;
-    rememberTerminalActiveSession();
+    activateTerminalSession(tab.dataset.terminalTab);
     saveTerminalWorkspaceState();
     cancelTerminalTitleEdit(state.terminalTitleEditingId);
     renderTerminalModal();
@@ -10288,7 +10274,6 @@ elements.terminalTabs.addEventListener('pointerdown', (event) => {
   }
 
   state.terminalTabDrag = {
-    projectName: state.terminalProjectName,
     sourceId: tab.dataset.terminalTab,
     pointerId: event.pointerId,
     startX: event.clientX,
@@ -10327,9 +10312,8 @@ elements.terminalTabs.addEventListener('pointerup', (event) => {
     event.preventDefault();
     state.suppressTerminalTabClick = true;
     const targetTab = terminalTabAtPoint(event.clientX, event.clientY);
-    if (targetTab && reorderTerminalSession(drag.projectName, drag.sourceId, targetTab.dataset.terminalTab)) {
-      state.terminalActiveSessionId = drag.sourceId;
-      rememberTerminalActiveSession(drag.projectName, drag.sourceId);
+    if (targetTab && reorderTerminalSession(drag.sourceId, targetTab.dataset.terminalTab)) {
+      activateTerminalSession(drag.sourceId);
       saveTerminalWorkspaceState();
       renderTerminalModal();
     } else {
@@ -10354,12 +10338,11 @@ elements.terminalWorkspace.addEventListener('change', (event) => {
     return;
   }
 
-  // 切換專案 picker now lives inside the page (workspace).
-  const projectPicker = event.target.closest('select[data-terminal-project-picker]');
-  if (projectPicker) {
-    switchTerminalProject(projectPicker.value, { ensureDraft: true });
-    renderTerminalModal();
-    startTerminalPolling();
+  // Draft 設定列的專案欄位:把尚未啟動的對話改掛到別的專案。
+  const draftProjectSelect = event.target.closest('select[data-terminal-draft-project]');
+  if (draftProjectSelect) {
+    const session = findTerminalSession(draftProjectSelect.dataset.terminalDraftProject);
+    setTerminalDraftProject(session, draftProjectSelect.value);
     return;
   }
 
@@ -10547,15 +10530,6 @@ elements.terminalWorkspace.addEventListener('focusout', (event) => {
   }
 });
 elements.terminalWorkspace.addEventListener('click', (event) => {
-  // 切換專案 window buttons now live inside the page (workspace).
-  const projectWindowButton = event.target.closest('button[data-terminal-project-window]');
-  if (projectWindowButton) {
-    switchTerminalProject(projectWindowButton.dataset.terminalProjectWindow, { ensureDraft: true });
-    renderTerminalModal();
-    startTerminalPolling();
-    return;
-  }
-
   // 中斷 a session that's waiting on a server round-trip (launch / send / close).
   const busyAbortButton = event.target.closest('button[data-terminal-busy-abort]');
   if (busyAbortButton) {
