@@ -734,7 +734,11 @@ const MIN_COLUMN_WIDTH = 72;
 const MAX_COLUMN_WIDTH = 520;
 const MIN_TABLE_WIDTH = 1460;
 const COLUMN_REORDER_MOVE_THRESHOLD = 6;
-const ROOT_REORDER_MOVE_THRESHOLD = 6;
+const ROOT_REORDER_MOVE_THRESHOLD = 10;
+// Must stay comfortably under ~400-450ms: past that, Chrome/Android's own long-press
+// gesture recognizer (context menu / text selection) claims the touch first and fires
+// pointercancel before our timer ever gets to arm the drag.
+const ROOT_REORDER_LONG_PRESS_MS = 300;
 const ROOT_REORDER_FLIP_MS = 200;
 const SOURCE_ORDER_SORT_ID = 'sourceOrder';
 const STATUS_SORT_ORDER = {
@@ -1923,7 +1927,11 @@ function normalizeRootPaths(paths) {
 }
 
 function syncRootPathsFromPayload(payload) {
-  if (state.rootEditorDirty) {
+  // Also skip while a press is pending/active (not just once a reorder has actually
+  // happened): rebuilding the list here would replace the DOM node under the user's
+  // finger and the browser would cancel the touch. The periodic status poll can land
+  // at any time, including mid-press.
+  if (state.rootEditorDirty || state.rootDrag) {
     return;
   }
 
@@ -2050,7 +2058,7 @@ function startRootReorder(event) {
   }
 
   const rect = item.getBoundingClientRect();
-  state.rootDrag = {
+  const drag = {
     active: false,
     changed: false,
     root,
@@ -2063,7 +2071,45 @@ function startRootReorder(event) {
     lastClientX: event.clientX,
     lastClientY: event.clientY,
     rafId: 0,
+    // Reordering only arms after a long press; until then the gesture is left alone
+    // so a short press-and-drag on mobile scrolls the page instead of picking up the item.
+    longPressTimer: 0,
   };
+  state.rootDrag = drag;
+  drag.longPressTimer = window.setTimeout(() => armRootDrag(drag), ROOT_REORDER_LONG_PRESS_MS);
+}
+
+// Fires after the long-press delay elapses without the pointer having moved past the
+// tolerance. Only now do we start intercepting move events for reordering.
+function armRootDrag(drag) {
+  if (state.rootDrag !== drag || drag.active) {
+    return;
+  }
+
+  drag.longPressTimer = 0;
+  drag.active = true;
+  document.body.classList.add('is-root-reordering');
+  // Mutate the existing node instead of renderRootList()'s innerHTML rebuild: replacing
+  // the element the finger is currently touching makes the browser drop its implicit
+  // touch/pointer capture and fire pointercancel, silently killing the drag on mobile.
+  const items = elements.rootList ? [...elements.rootList.querySelectorAll('.root-list-item[data-root]')] : [];
+  const item = items.find((el) => el.dataset.root === drag.root);
+  item?.classList.add('is-dragging');
+}
+
+// The pointer moved before the long press armed: treat this as a scroll/click gesture,
+// not a reorder, and let the browser handle it natively.
+function cancelPendingRootDrag() {
+  const drag = state.rootDrag;
+  if (!drag || drag.active) {
+    return;
+  }
+
+  if (drag.longPressTimer) {
+    window.clearTimeout(drag.longPressTimer);
+    drag.longPressTimer = 0;
+  }
+  state.rootDrag = null;
 }
 
 // Keep the lifted item pinned under the pointer while neighbours reflow around it.
@@ -2091,16 +2137,16 @@ function handleRootPointerMove(event) {
     return;
   }
 
-  const deltaX = Math.abs(event.clientX - drag.startX);
-  const deltaY = Math.abs(event.clientY - drag.startY);
-  if (!drag.active && Math.max(deltaX, deltaY) < ROOT_REORDER_MOVE_THRESHOLD) {
-    return;
-  }
-
   if (!drag.active) {
-    drag.active = true;
-    document.body.classList.add('is-root-reordering');
-    renderRootList();
+    // Still waiting for the long press to arm. If the pointer has already travelled
+    // this far, the user is scrolling (or just clicking), not trying to reorder —
+    // abandon the pending drag and leave the gesture alone (no preventDefault).
+    const deltaX = Math.abs(event.clientX - drag.startX);
+    const deltaY = Math.abs(event.clientY - drag.startY);
+    if (Math.max(deltaX, deltaY) >= ROOT_REORDER_MOVE_THRESHOLD) {
+      cancelPendingRootDrag();
+    }
+    return;
   }
 
   event.preventDefault();
@@ -2141,6 +2187,10 @@ function finishRootReorder({ suppressClick = false } = {}) {
     return;
   }
 
+  if (drag.longPressTimer) {
+    window.clearTimeout(drag.longPressTimer);
+    drag.longPressTimer = 0;
+  }
   if (drag.rafId) {
     window.cancelAnimationFrame(drag.rafId);
     drag.rafId = 0;
@@ -9887,6 +9937,13 @@ elements.rootList.addEventListener('click', (event) => {
   }
 });
 elements.rootList.addEventListener('pointerdown', startRootReorder);
+// A long press left held a beat too long can still trigger Android/Chrome's own
+// context-menu gesture; swallow it so it can't interrupt a reorder in progress.
+elements.rootList.addEventListener('contextmenu', (event) => {
+  if (state.rootDrag) {
+    event.preventDefault();
+  }
+});
 setupRailResizer();
 elements.basePortInput.addEventListener('change', () => discover());
 elements.searchInput.addEventListener('input', (event) => {
@@ -9946,6 +10003,18 @@ elements.tableWrap.addEventListener('dragstart', (event) => {
 window.addEventListener('pointermove', handleColumnPointerMove);
 window.addEventListener('pointermove', handleColumnResizePointerMove);
 window.addEventListener('pointermove', handleRootPointerMove);
+// touch-action is locked in at gesture start (pan-y, so the page can scroll before the
+// long press arms). Once armed, preventDefault() on pointermove doesn't stop Chrome/Android
+// from scrolling — only an explicit non-passive touchmove listener reliably cancels it.
+window.addEventListener(
+  'touchmove',
+  (event) => {
+    if (state.rootDrag?.active) {
+      event.preventDefault();
+    }
+  },
+  { passive: false },
+);
 window.addEventListener('pointerup', handleColumnPointerUp);
 window.addEventListener('pointerup', (event) => {
   if (state.rootDrag?.pointerId === event.pointerId) {
