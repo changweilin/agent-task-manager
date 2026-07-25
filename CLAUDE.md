@@ -37,6 +37,7 @@
 - `[2026-06-23 #INC-301]` **quota reset 解析是 best-effort**：`parseQuotaResetSeconds` 用 regex 解析 `/usage` 文字輸出（"resets in 3h 21m" 等），格式隨 CLI 版本漂移；`resetSeconds` 為 null 時降級為每 60s 重探。修改時 **MUST** 保留 null fallback。
 - `[2026-06-24 #INC-305]` **ATM 自我重啟鏈**：`restartAtm()` spawn detached 替身程序（`ATM_RESTART=1`、stdio 導向 `.atm-restart.*.log`）→ 舊程序 shutdown → 新程序對 `EADDRINUSE` 重試 ~20s 搶 port。重啟後的終端/伺服器復原由 **client 端** localStorage snapshot 驅動（key `atm-resume-snapshot`、5 分 TTL），依賴「死掉的終端分頁保留 localId 變回可重啟 draft」。**MUST NOT** 改成 server 端復原而破壞這條 reload 鏈。
 - `[2026-06-22 #INC-294]` **Windows 訊號陷阱**：Git Bash 的 `kill` 無法對原生 Windows node 送出可攔截訊號；只有真 console Ctrl+C / 關窗會觸發 `shutdownAtm` 清理子程序。驗證 shutdown 邏輯 **MUST** 用真 Ctrl+C；`taskkill /F` 會遺留孤兒 dev server 佔 port。
+- `[2026-07-25 #INC-318]` **管理台 port MUST NOT 自動 `tailscale serve`**：專案 port 的 Tailscale 連結預設走 HTTPS，`ensureTailscaleServeForPort()` 會在專案啟動時自動建立 serve 路由；但 `tailscale serve` 代理後的來源位址是 `127.0.0.1`，若對管理台 port（8787）建立路由，所有 tailnet 裝置都會通過 `isLocalRequest()` 拿到完整執行權限 — 該函式因此硬性排除管理台 port，管理台連結也以 `preferHttps: false` 維持 tailnet IP。`tailscale serve` 失敗會記進 `tailscaleServeFailures`（5 分鐘 back-off），連結降級回 `http://100.x.y.z:<port>`，**MUST** 保留這條降級路徑，否則沒有 HTTPS 憑證的 tailnet 會拿到全是死連結的 UI。
 - **多行 prompt 進終端 MUST 用 bracketed paste**（`\x1b[200~ … \x1b[201~` 後接 `\r`），否則內嵌換行會提早送出；client 無 socket 時 fallback 為 `POST /api/terminals/:id` 帶 `{raw:true}`。
 - `dist/` 為 build 產物（GitHub Pages demo），**MUST NOT** 手改；改完 `public/` 後跑 `npm run build:pages` 重建。
 

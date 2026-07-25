@@ -36,9 +36,16 @@ npm.cmd run dev -- --host 0.0.0.0 --port 8787
 
 ## 4) 在 UI 啟用專案供手機連線
 1. 在管理台左側加入專案來源，或重啟管理台讓它自動掃描既有來源
-2. 對目標專案按「啟用 Tailscale」
-3. 系統會顯示此專案的 Tailscale 連結，例如：`http://100.x.y.z:5173`
+2. 啟動目標專案（一般啟動即可；不必再特地按「啟用 Tailscale」）
+3. 專案的 Tailscale 連結**預設是 HTTPS**，例如：`https://your-pc.your-tailnet.ts.net:5173`
+   - ATM 會在專案啟動時自動建立 `tailscale serve --bg --yes --https <port> <port>` 路由
+   - 需要 tailnet 已啟用 MagicDNS 與 HTTPS Certificates（Tailscale 管理後台的 DNS 頁面）
+   - 若 `tailscale serve` 無法使用，連結會自動退回 `http://100.x.y.z:5173`，仍可正常連線
 4. 手機瀏覽器打開該網址即可開發測試
+
+> 管理台本身（port 8787）刻意維持 `http://100.x.y.z:8787`，不會自動建立 serve 路由 —
+> `tailscale serve` 會把來源位址轉成 `127.0.0.1`，一旦套用在管理台上，
+> 任何 tailnet 裝置都會被 `isLocalRequest()` 判定為本機而取得執行權限。
 
 ## 5) CLI 常用指令（含 Tailscale 流程）
 

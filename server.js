@@ -30,6 +30,7 @@ const LOG_START_MARKER = '[Agent Task Manager (ATM)]';
 const DEFAULT_HEALTH_FAILURE_THRESHOLD = 3;
 const PAGE_SCAN_TTL_MS = 30000;
 const TAILSCALE_SERVE_SCAN_TTL_MS = 30000;
+const TAILSCALE_SERVE_RETRY_TTL_MS = 300000;
 const TAILSCALE_DNS_LOOKUP_TTL_MS = 300000;
 const PAGE_SCAN_MAX_FILES = 800;
 const PAGE_SCAN_MAX_PAGES = 80;
@@ -100,6 +101,9 @@ const restartLocks = new Set();
 const pageScanCache = new Map();
 let tailscaleServeCache = { checkedAt: 0, routes: [] };
 let tailscaleDnsCache = { checkedAt: 0, ip: '', hostName: '' };
+// Ports whose `tailscale serve` provisioning failed, so auto-provisioning does not
+// re-spawn the CLI on every start when Serve is unavailable on this tailnet.
+const tailscaleServeFailures = new Map();
 const TERMINAL_BUFFER_LIMIT = 2 * 1024 * 1024;
 const TERMINAL_INPUT_LIMIT = 16 * 1024;
 const TERMINAL_PREFERENCE_TEXT_LIMIT = 4096;
@@ -3491,6 +3495,7 @@ function adoptExternalProjectServer(project, options = {}, probe = null) {
   removeStateEntry(state, project.path);
   setStateEntry(state, entry);
   saveState(state);
+  ensureTailscaleServeForPort(project.port);
   return entry;
 }
 
@@ -3512,6 +3517,7 @@ async function startProject(project, options = {}) {
       return adoptExternalProjectServer(activeProject, modeOptions, activeExternal.probe);
     }
 
+    ensureTailscaleServeForPort(project.port);
     if (options.tailscaleMode || options.lanMode) {
       return updateProjectEntry(project, {
         lanMode: Boolean(existing.lanMode || options.lanMode),
@@ -3588,6 +3594,7 @@ async function startProject(project, options = {}) {
   removeStateEntry(state, project.path);
   setStateEntry(state, entry);
   saveState(state);
+  ensureTailscaleServeForPort(project.port);
   return entry;
 }
 
@@ -5702,9 +5709,58 @@ function startTailscaleServeForPort(projectPort) {
       stdio: 'ignore',
     });
     refreshTailscaleServeRoutes();
+    tailscaleServeFailures.delete(portNumber);
     return true;
   } catch (error) {
+    tailscaleServeFailures.set(portNumber, Date.now());
     return false;
+  }
+}
+
+// HTTPS is the default target for every project, so a project port gets its Serve
+// route provisioned on start instead of only when the user presses the Tailscale
+// button. Cheap when the route already exists (30s route cache, no CLI spawn).
+function ensureTailscaleServeForPort(projectPort) {
+  const portNumber = normalizePort(projectPort);
+  if (!portNumber) {
+    return false;
+  }
+
+  // Never auto-serve the manager port: `tailscale serve` proxies from 127.0.0.1, so
+  // every tailnet visitor would pass isLocalRequest() and gain execution rights.
+  if (portNumber === Number(port)) {
+    return false;
+  }
+
+  if (projectHasTailscaleServeRoute(portNumber)) {
+    return true;
+  }
+
+  if (!getTailscaleIp()) {
+    return false;
+  }
+
+  const lastFailure = tailscaleServeFailures.get(portNumber) || 0;
+  if (lastFailure && Date.now() - lastFailure < TAILSCALE_SERVE_RETRY_TTL_MS) {
+    return false;
+  }
+
+  return startTailscaleServeForPort(portNumber);
+}
+
+// Projects already running when ATM boots never pass through startProject(), so sweep
+// them once so their links are HTTPS too instead of waiting for the next restart.
+function ensureTailscaleServeForRunningProjects() {
+  if (!getTailscaleIp()) {
+    return;
+  }
+
+  const state = getState();
+  for (const entry of Array.isArray(state.projects) ? state.projects : []) {
+    const alive = Boolean(entry?.external) || processIsRunning(entry?.pid);
+    if (alive) {
+      ensureTailscaleServeForPort(entry.port);
+    }
   }
 }
 
@@ -5776,22 +5832,32 @@ function buildProjectTailscaleUrl(projectPort, tailscaleIp, options = {}) {
     return '';
   }
 
-  // A trusted-cert HTTPS hostname only resolves when a `tailscale serve` route backs
-  // this exact port. Projects change ports, so advertising the hostname blindly leaves
-  // a dead link — only use it when the route really exists.
-  if (projectHasTailscaleServeRoute(portNumber)) {
-    const serveUrl = getTailscaleServeUrlForPort(portNumber);
-    if (serveUrl) {
-      return serveUrl;
-    }
+  // An existing `tailscale serve` route is the most accurate answer: it carries the real
+  // origin (and path) Tailscale terminates TLS on for this port.
+  const serveUrl = getTailscaleServeUrlForPort(portNumber);
+  if (serveUrl) {
+    return serveUrl;
+  }
+
+  // HTTPS is the default for project links even before the route shows up in
+  // `tailscale serve status`: project ports get their route provisioned on start
+  // (ensureTailscaleServeForPort), and tailscaleReady stays false until the route is
+  // really there, so the UI still offers the 啟用 Tailscale action to provision it.
+  // Two cases keep the old raw-IP behaviour, because there the hostname would be a link
+  // that can never resolve:
+  //   - preferHttps: false — targets ATM must not auto-serve (the manager port itself).
+  //   - provisioning already failed for this port (no HTTPS certs on the tailnet, older
+  //     Tailscale, ...); cleared as soon as a serve route is created successfully.
+  const httpsBlocked = options.preferHttps === false || tailscaleServeFailures.has(portNumber);
+  if (!httpsBlocked || projectHasTailscaleServeRoute(portNumber)) {
     const httpsUrl = buildHttpsUrl(options.tailscaleHost || '', portNumber);
     if (httpsUrl) {
       return httpsUrl;
     }
   }
 
-  // No serve route: fall back to the raw tailnet IP, reachable from any tailnet device
-  // (including a phone running the Tailscale app), instead of a hostname that 404s.
+  // No MagicDNS hostname (or HTTPS not reachable here): fall back to the raw tailnet IP,
+  // reachable from any tailnet device including a phone running the Tailscale app.
   return tailscaleIp ? buildUrl(tailscaleIp, portNumber) : '';
 }
 
@@ -6117,7 +6183,10 @@ async function getStatusPayload(request = null) {
       port,
       localUrl: buildUrl('127.0.0.1', port),
       lanUrl: buildUrl(lanIp, port),
-      tailscaleUrl: buildProjectTailscaleUrl(port, tailscaleIp, { tailscaleHost }),
+      // The manager port is deliberately excluded from the HTTPS default: ATM never
+      // auto-provisions a Serve route for itself (that would make every tailnet visitor
+      // look local to isLocalRequest), so a hostname link here would be dead.
+      tailscaleUrl: buildProjectTailscaleUrl(port, tailscaleIp, { tailscaleHost, preferHttps: false }),
       tailscaleIp,
       terminalReadOnly,
       terminalClaudeRemoteLaunch: localRequest,
@@ -6843,8 +6912,14 @@ async function handleApi(request, response, url) {
 
     const body = await readRequestBody(request).catch(() => ({}));
     const actionProject = resolveProjectSubTarget(project, body.targetPath);
-    startTailscaleServeForPort(actionProject.port);
-    await startProject(actionProject, { tailscaleMode: true, tailscaleIp });
+    // Provision after start: ensureProjectPort() may move the project to another port,
+    // and a route on the old port would leave the HTTPS link pointing at nothing.
+    const startedEntry = await startProject(actionProject, { tailscaleMode: true, tailscaleIp });
+    const servePort = normalizePort(startedEntry?.port) || actionProject.port;
+    if (!projectHasTailscaleServeRoute(servePort)) {
+      // Explicit user action: retry even inside the auto-provisioning back-off window.
+      startTailscaleServeForPort(servePort);
+    }
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -7617,7 +7692,9 @@ function onAtmListening() {
   }
   if (tailscale.ip) {
     getTailscaleDnsName(tailscale.ip).then((tailscaleHost) => {
-      console.log(`Tailscale URL: ${buildProjectTailscaleUrl(port, tailscale.ip, { tailscaleHost })}`);
+      // Same rule as the manager row in the status payload: no auto-served route for the
+      // manager port, so print the raw tailnet IP unless a route really exists.
+      console.log(`Tailscale URL: ${buildProjectTailscaleUrl(port, tailscale.ip, { tailscaleHost, preferHttps: false })}`);
     });
   } else {
     console.log('Tailscale IP not found yet. Agent Task Manager (ATM) tried to start Tailscale; connect or sign in, then refresh the UI.');
@@ -7637,6 +7714,12 @@ function onAtmListening() {
       await restoreEnabledProjectsOnStartup();
     } catch (error) {
       console.error(`Auto restore failed: ${error.message}`);
+    }
+
+    try {
+      ensureTailscaleServeForRunningProjects();
+    } catch (error) {
+      console.error(`Tailscale serve provisioning failed: ${error.message}`);
     }
   })();
 }
