@@ -755,7 +755,6 @@ const PAGE_LINK_TARGETS = [
   { id: 'tailscale', label: 'Tailscale', urlKey: 'tailscaleUrl' },
 ];
 const DEFAULT_PAGE_LINK_TARGET_ID = 'local';
-const MOBILE_DEFAULT_PAGE_LINK_TARGET_ID = 'tailscale';
 const pageLinkTargetIds = new Set(PAGE_LINK_TARGETS.map((target) => target.id));
 const actionUrlColumnIds = new Set(ACTION_URL_COLUMN_IDS);
 const mobileLayoutMedia = window.matchMedia('(max-width: 820px)');
@@ -1471,9 +1470,90 @@ function getPageTargetDefinition(targetId) {
   return PAGE_LINK_TARGETS.find((target) => target.id === targetId) || PAGE_LINK_TARGETS[0];
 }
 
+function hostnameOfUrl(value) {
+  try {
+    return new URL(String(value || '')).hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+  } catch (error) {
+    return '';
+  }
+}
+
+function currentAccessHostname() {
+  return String(window.location.hostname || '').toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+}
+
+// 沒有 payload 時（首次 render）只能靠 hostname 形狀猜入口。
+function detectAccessTargetIdFromHostname() {
+  if (DEMO_MODE) {
+    return DEFAULT_PAGE_LINK_TARGET_ID;
+  }
+
+  const host = currentAccessHostname();
+  if (!host || host === 'localhost' || host.endsWith('.localhost') || host === '::1') {
+    return 'local';
+  }
+
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (ipv4) {
+    const first = Number(ipv4[1]);
+    const second = Number(ipv4[2]);
+    if (first === 127) {
+      return 'local';
+    }
+    // Tailscale 配的是 CGNAT 區段 100.64.0.0/10，和一般內網 IP 沒有重疊。
+    if (first === 100 && second >= 64 && second <= 127) {
+      return 'tailscale';
+    }
+    return 'lan';
+  }
+
+  if (host.endsWith('.ts.net') || host.startsWith('fd7a:115c:a1e0')) {
+    return 'tailscale';
+  }
+
+  return host.includes('.') ? 'lan' : DEFAULT_PAGE_LINK_TARGET_ID;
+}
+
+const ACCESS_TARGET_HINT = detectAccessTargetIdFromHostname();
+
+// 專案連結預設跟著「這個瀏覽器是從哪個入口連進 ATM 的」：本機 → Local、
+// tailnet → Tailscale、其餘 → LAN。server 已經知道自己三個入口的 URL，直接比對
+// hostname 比猜 IP 形狀可靠（MagicDNS 短名、tailscale serve 的 *.ts.net 都能命中）。
+function getAccessTargetId() {
+  const manager = DEMO_MODE ? null : state.payload?.manager;
+  const host = manager ? currentAccessHostname() : '';
+  if (!host) {
+    return ACCESS_TARGET_HINT;
+  }
+
+  const tailscaleHost = hostnameOfUrl(manager.tailscaleUrl);
+  if (tailscaleHost && (tailscaleHost === host || tailscaleHost.split('.')[0] === host)) {
+    return 'tailscale';
+  }
+  if (hostnameOfUrl(manager.lanUrl) === host) {
+    return 'lan';
+  }
+  if (hostnameOfUrl(manager.localUrl) === host) {
+    return 'local';
+  }
+
+  return ACCESS_TARGET_HINT;
+}
+
+// 入口對應的連結偏好順序：入口本身優先，缺該 URL 時遠端入口不要掉回 localhost
+// （手機點了也連不到），改先試另一個遠端入口。
+const ACCESS_TARGET_FALLBACK_ORDER = {
+  local: ['local', 'lan', 'tailscale'],
+  lan: ['lan', 'tailscale', 'local'],
+  tailscale: ['tailscale', 'lan', 'local'],
+};
+
 function getDefaultProjectPageTargetId(project) {
-  if (isMobileLayout() && project?.tailscaleUrl) {
-    return MOBILE_DEFAULT_PAGE_LINK_TARGET_ID;
+  const order = ACCESS_TARGET_FALLBACK_ORDER[getAccessTargetId()] || ACCESS_TARGET_FALLBACK_ORDER.local;
+  for (const targetId of order) {
+    if (project?.[getPageTargetDefinition(targetId).urlKey]) {
+      return targetId;
+    }
   }
 
   return DEFAULT_PAGE_LINK_TARGET_ID;
@@ -1486,7 +1566,7 @@ function getProjectPageTarget(project) {
     return selectedTarget;
   }
 
-  return PAGE_LINK_TARGETS.find((item) => project[item.urlKey])?.id || DEFAULT_PAGE_LINK_TARGET_ID;
+  return getDefaultProjectPageTargetId(project);
 }
 
 function getProjectHomeLink(project) {
