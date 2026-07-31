@@ -1174,11 +1174,14 @@ function renderProjectPowerAction(project, context = {}) {
   const noStartCommand = action === 'start' && project.canStart === false;
   const disabled = DEMO_MODE || context.busy || noStartCommand;
   const disabledAttr = disabled ? 'disabled' : '';
+  const startMode = action === 'start' ? startActionForAccessTarget() : 'start';
   const title = noStartCommand
     ? '開啟終端後手動執行此專案'
     : project.status === 'external' && action === 'start'
       ? '接管已開啟的 server'
-      : label;
+      : startMode === 'start'
+        ? label
+        : `啟動（${startMode === 'tailscale' ? 'Tailscale' : 'LAN'} 模式，跟著目前的 ATM 入口）`;
 
   return `<button class="row-action ${action}" data-action="${action}" data-name="${escapeHtml(project.name)}" ${disabledAttr} type="button" title="${escapeHtml(title)}" aria-label="${label} ${escapeHtml(project.name)}">${icons[action]}</button>`;
 }
@@ -1325,7 +1328,7 @@ function renderProjectActionUrls(project) {
     <div class="project-action-urls" aria-label="${escapeHtml(project.name)} connection URLs">
       ${PAGE_LINK_TARGETS.map((target) => {
         const value = project[target.urlKey];
-        const active = hasPages && selectedTarget === target.id;
+        const active = selectedTarget === target.id;
         const needsConnection = targetNeedsConnection(project, target.id);
         const className = [
           'project-action-url',
@@ -1338,8 +1341,8 @@ function renderProjectActionUrls(project) {
         const targetTitle = needsConnection
           ? `切換並啟用 ${target.label}`
           : hasPages
-            ? `Use ${target.label} for page links`
-            : value;
+            ? `頁面連結改用 ${target.label}`
+            : `切換為 ${target.label} 並開啟 ${value}`;
         if (!value) {
           return hasPages
             ? `
@@ -1354,7 +1357,9 @@ function renderProjectActionUrls(project) {
             `;
         }
 
-        if (hasPages) {
+        // 沒有 URL 可直接開的情況（有 pages 要切目標、或該入口還沒連線）走按鈕；
+        // 其餘維持連結，點一下同時切換目標並開啟該入口。
+        if (hasPages || needsConnection) {
           return `
             <button
               class="${escapeHtml(className)}"
@@ -1370,24 +1375,10 @@ function renderProjectActionUrls(project) {
           `;
         }
 
-        if (needsConnection) {
-          return `
-            <button
-              class="${escapeHtml(className)}"
-              data-connection-target="${escapeHtml(target.id)}"
-              data-name="${escapeHtml(project.name)}"
-              type="button"
-              title="${escapeHtml(targetTitle)}"
-            >
-              ${escapeHtml(target.label)}
-            </button>
-          `;
-        }
-
         return `
           ${DEMO_MODE
             ? `<span class="${escapeHtml(className)} is-disabled" aria-disabled="true" title="${escapeHtml(targetTitle)}">${escapeHtml(target.label)}</span>`
-            : `<a class="${escapeHtml(className)}" href="${escapeHtml(value)}" target="_blank" rel="noreferrer" title="${escapeHtml(targetTitle)}" aria-label="開啟 ${escapeHtml(target.label)} URL">
+            : `<a class="${escapeHtml(className)}" href="${escapeHtml(value)}" target="_blank" rel="noreferrer" data-page-target="${escapeHtml(target.id)}" data-name="${escapeHtml(project.name)}" title="${escapeHtml(targetTitle)}" aria-label="開啟 ${escapeHtml(target.label)} URL">
             ${escapeHtml(target.label)}
           </a>`}
         `;
@@ -1547,6 +1538,25 @@ const ACCESS_TARGET_FALLBACK_ORDER = {
   lan: ['lan', 'tailscale', 'local'],
   tailscale: ['tailscale', 'lan', 'local'],
 };
+
+// 「啟動」也跟著 ATM 入口走:從 LAN / tailnet 網址開 ATM 時,dev server 要用同一種模式
+// 綁定,否則啟動完那條連結還是連不到（只綁 localhost 的 server 對外等於沒開）。
+function startActionForAccessTarget() {
+  const manager = DEMO_MODE ? null : state.payload?.manager;
+  if (!manager) {
+    return 'start';
+  }
+
+  const targetId = getAccessTargetId();
+  if (targetId === 'tailscale' && manager.tailscaleUrl) {
+    return 'tailscale';
+  }
+  if (targetId === 'lan' && manager.lanUrl) {
+    return 'lan';
+  }
+
+  return 'start';
+}
 
 function getDefaultProjectPageTargetId(project) {
   const order = ACCESS_TARGET_FALLBACK_ORDER[getAccessTargetId()] || ACCESS_TARGET_FALLBACK_ORDER.local;
@@ -3214,17 +3224,18 @@ async function runAction(name, action, options = {}) {
     return refreshProject(name);
   }
 
+  const resolvedAction = action === 'start' ? startActionForAccessTarget() : action;
   const targetPath = String(options.targetPath || '').trim();
   state.busy.add(name);
   render();
 
   try {
-    state.payload = await api(`/api/projects/${encodeURIComponent(name)}/${action}`, {
+    state.payload = await api(`/api/projects/${encodeURIComponent(name)}/${resolvedAction}`, {
       method: 'POST',
       body: JSON.stringify(targetPath ? { targetPath } : {}),
     });
     state.selectedName = name;
-    showToast(actionMessage(action));
+    showToast(actionMessage(resolvedAction));
     render();
     if (action !== 'stop') {
       setTimeout(() => loadStatus({ silent: true }), 1200);
@@ -10223,13 +10234,6 @@ elements.projectRows.addEventListener('click', (event) => {
     return;
   }
 
-  const connectionTargetButton = event.target.closest('button[data-connection-target]');
-  if (connectionTargetButton) {
-    event.stopPropagation();
-    activateConnectionTarget(connectionTargetButton.dataset.name, connectionTargetButton.dataset.connectionTarget);
-    return;
-  }
-
   const actionButton = event.target.closest('button[data-action]');
   if (actionButton) {
     event.stopPropagation();
@@ -10240,6 +10244,12 @@ elements.projectRows.addEventListener('click', (event) => {
   const urlLink = event.target.closest('a.url-link, a.page-link, a.project-action-url, a.project-home-link');
   if (urlLink) {
     event.stopPropagation();
+    // 入口連結同時是切換器:延後重繪，否則 innerHTML 會在瀏覽器執行 target="_blank"
+    // 預設動作前把這個 <a> 換掉，新分頁就不會開。
+    if (urlLink.dataset.pageTarget && urlLink.dataset.name) {
+      const { name, pageTarget } = urlLink.dataset;
+      setTimeout(() => selectProjectPageTarget(name, pageTarget), 0);
+    }
     return;
   }
 
