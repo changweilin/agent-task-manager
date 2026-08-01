@@ -275,6 +275,52 @@ function showDemoNotice() {
   showToast(DEMO_NOTICE);
 }
 
+// 封存(2026-08-02,排查效能問題):終端管理 / Pipeline 管理 / 記事本整組關閉。
+// 真正的開關在 server(環境變數 ATM_TERMINALS),這裡只反映 /api/status 回報的狀態,
+// 並在拿到狀態之前一律當作關閉 —— 開機流程才不會對已封存的 API 發請求。
+const TERMINAL_ARCHIVED_NOTICE = '終端管理 / Pipeline 管理 / 記事本目前為封存狀態(設定環境變數 ATM_TERMINALS=1 後重啟 ATM 即可啟用)。';
+let terminalFeaturesEnabled = false;
+let terminalFeaturesBooted = false;
+
+function terminalFeaturesAvailable() {
+  return terminalFeaturesEnabled === true;
+}
+
+function showTerminalArchivedNotice() {
+  showToast(TERMINAL_ARCHIVED_NOTICE);
+}
+
+// 終端/Pipeline/記事本的開機流程:讀回終端工作區、拉跨裝置共用設定(含 pipeline 與
+// 記事本草稿)、再跟 server 對帳現有 session。封存時整段不執行,也不發任何請求。
+function bootTerminalFeatures() {
+  if (terminalFeaturesBooted || !terminalFeaturesAvailable()) {
+    return Promise.resolve();
+  }
+
+  terminalFeaturesBooted = true;
+  restoreTerminalWorkspaceState();
+  return loadTerminalPreferences({ silent: true })
+    .finally(() => loadTerminalSessions({ silent: true }));
+}
+
+// 封存時把三個入口(Pipeline 按鈕、開啟 ATM 終端、重啟選單裡的兩個終端項目)藏起來,
+// 而不是 disabled —— 這不是「暫時不能用」,是整組不在了。
+function applyTerminalArchivedUi() {
+  const archived = !terminalFeaturesAvailable();
+  if (elements.pipelineOpenButton) {
+    elements.pipelineOpenButton.hidden = archived;
+  }
+  if (elements.openAtmTerminalButton) {
+    elements.openAtmTerminalButton.hidden = archived;
+  }
+  for (const action of ['all-terminals', 'atm-terminal']) {
+    const item = document.querySelector(`.restart-menu-item[data-restart-action="${action}"]`);
+    if (item) {
+      item.hidden = archived;
+    }
+  }
+}
+
 function applyDemoModeUi() {
   if (!DEMO_MODE) {
     return;
@@ -1080,7 +1126,7 @@ const tableColumns = [
           <button class="row-action refresh" data-action="refresh" data-name="${escapeHtml(project.name)}" ${context.busy || state.discoverLoading || DEMO_MODE ? 'disabled' : ''} type="button" title="重新整理:重新掃描此專案的頁面、port 與健康狀態,不會重啟伺服器或終端" aria-label="掃描並重新整理 ${escapeHtml(project.name)}">${icons.refresh}</button>
           <button class="row-action restart" data-action="restart" data-name="${escapeHtml(project.name)}" ${context.busy || DEMO_MODE || project.canStart === false ? 'disabled' : ''} type="button" title="重啟:先停止這個專案的開發伺服器,再依原本的啟動指令重新啟動" aria-label="重啟 ${escapeHtml(project.name)}">${icons.restart}</button>
           ${renderMobileInstallAction(project, context)}
-          <button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>
+          ${terminalFeaturesAvailable() ? `<button class="row-action terminal ${terminalCount ? 'has-terminal-sessions' : ''}" data-action="terminal" data-name="${escapeHtml(project.name)}" ${DEMO_MODE ? 'disabled' : ''} type="button" title="執行終端" aria-label="開啟 ${escapeHtml(project.name)} 的終端管理">${icons.terminal}${terminalBadge}</button>` : ''}
         </div>
       `;
     },
@@ -1920,6 +1966,7 @@ async function loadStatus({ silent = false } = {}) {
 
   try {
     state.payload = await api('/api/status');
+    terminalFeaturesEnabled = state.payload?.manager?.terminalFeatures === true;
     if (!state.selectedName && state.payload.projects.length) {
       state.selectedName = state.payload.projects[0].name;
     }
@@ -3075,6 +3122,7 @@ function render() {
     second: '2-digit',
   }).format(new Date())}`;
 
+  applyTerminalArchivedUi();
   renderProfiles();
   renderSortControls();
   renderColumnGroup();
@@ -3477,6 +3525,10 @@ async function restartAllProjectTerminals() {
     showDemoNotice();
     return;
   }
+  if (!terminalFeaturesAvailable()) {
+    showTerminalArchivedNotice();
+    return;
+  }
   const confirmed = window.confirm('重啟所有專案終端(含 ATM)會關閉並重新開啟所有正在執行的終端,確定要繼續嗎?');
   if (!confirmed) {
     return;
@@ -3515,6 +3567,10 @@ async function restartAllProjectTerminals() {
 async function restartAtmTerminals() {
   if (DEMO_MODE) {
     showDemoNotice();
+    return;
+  }
+  if (!terminalFeaturesAvailable()) {
+    showTerminalArchivedNotice();
     return;
   }
 
@@ -3731,7 +3787,7 @@ async function applyAtmResumeSnapshot() {
   }
 
   let restoredTerminals = 0;
-  for (const terminal of snapshot.terminals || []) {
+  for (const terminal of terminalFeaturesAvailable() ? snapshot.terminals || [] : []) {
     const session = terminal.localId ? findTerminalSession(terminal.localId) : null;
     if (!session || session.id || session.readOnly) {
       continue;
@@ -6380,6 +6436,12 @@ function switchTerminalProject(projectName, { ensureDraft = true } = {}) {
 // 預設頁籤全部關閉:只有帶 draft:true 的明確入口(專案列的終端按鈕、開啟 ATM 終端)
 // 才替該專案補一個 draft;其餘入口一律以現有頁籤(可能為空)開啟。
 function openTerminalManager(projectName, { draft = false } = {}) {
+  // 三個分頁(終端/Pipeline/記事本)共用這個面板,所以封存的攔截點只需要這一個。
+  if (!terminalFeaturesAvailable()) {
+    showTerminalArchivedNotice();
+    return;
+  }
+
   state.terminalProjectName = projectName;
   state.terminalModalOpen = true;
   state.terminalModalMode = 'terminal';
@@ -6400,6 +6462,10 @@ function openTerminalManager(projectName, { draft = false } = {}) {
 function openPipelineManager() {
   if (DEMO_MODE) {
     showDemoNotice();
+    return;
+  }
+  if (!terminalFeaturesAvailable()) {
+    showTerminalArchivedNotice();
     return;
   }
   const projectName = state.terminalProjectName
@@ -9643,7 +9709,7 @@ async function syncTerminalPipelineFromServer() {
 }
 
 async function pollTerminalSessions() {
-  if (!state.terminalModalOpen) {
+  if (!state.terminalModalOpen || document.hidden) {
     return;
   }
 
@@ -11207,20 +11273,34 @@ state.terminalAntigravity = readTerminalAntigravitySettings();
 state.terminalOpencode = readTerminalOpencodeSettings();
 state.terminalPipeline = readTerminalPipeline();
 state.terminalNotepad = readTerminalNotepad();
-restoreTerminalWorkspaceState();
-const terminalPreferencesReady = loadTerminalPreferences({ silent: true });
 applyTheme(readThemePreference());
 loadTablePreferences();
 syncQuotaRouteFromHash();
+// 終端的開機流程移到第一次 /api/status 之後 —— 封存狀態是 server 說了算,在知道之前
+// 先讀工作區或拉共用設定,只會對已封存的 API 打出必然失敗的請求。
 loadStatus().then(() => {
   loadLogs();
-  terminalPreferencesReady
-    .finally(() => loadTerminalSessions({ silent: true }))
+  bootTerminalFeatures()
     // After the new ATM is up and terminals have reconciled, bring back whatever was
-    // running before a 重啟 ATM server (servers + terminals).
+    // running before a 重啟 ATM server. 封存時仍然要跑,server 的還原不受影響。
     .finally(() => applyAtmResumeSnapshot());
 });
-setInterval(() => loadStatus({ silent: true }), 6000);
+// A status poll costs the server a full project sweep and this page a full re-render, and
+// neither is worth doing for a tab nobody is looking at — the machine is usually busy with
+// whatever the user switched to. visibilitychange below catches up the moment it returns.
+setInterval(() => {
+  if (document.hidden) {
+    return;
+  }
+  loadStatus({ silent: true });
+}, 6000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    return;
+  }
+  loadStatus({ silent: true });
+  pollTerminalSessions();
+});
 setInterval(() => {
   if (state.quotaModalOpen && !state.quotaLoading && quotaPayloadIsStale()) {
     loadAiQuotas();

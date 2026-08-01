@@ -49,5 +49,11 @@ node --check public/app.js
 rundev.bat               # Windows one-click launch
 .\dev-manager.ps1        # PowerShell CLI: scan/start/stop without the web UI
 ```
-- 環境變數：`DEV_DOCK_CONFIG` 覆寫 `dev-projects.json` 路徑；`ATM_RESTART=1` 僅供重啟替身程序使用，**MUST NOT** 手動設定。
+- 環境變數：`DEV_DOCK_CONFIG` 覆寫 `dev-projects.json` 路徑；`ATM_RESTART=1` 僅供重啟替身程序使用，**MUST NOT** 手動設定；`ATM_TERMINALS=1` 解除「終端管理 / Pipeline 管理 / 記事本」的封存（見 §5）。
 - 標準驗證流程：`node --check` 兩檔 → `npm run dev` → 開 `http://127.0.0.1:8787` 手動走過改動路徑；涉及權限 gate 時，另以非 localhost 來源確認執行類 endpoint 回 `403`。
+
+## 5. 已封存功能
+- `[2026-08-02]` **終端管理 / Pipeline 管理 / 記事本**（同一個面板的三個分頁）目前**封存中**，開關為 `server.js` 的 `TERMINAL_FEATURES_ENABLED`（環境變數 `ATM_TERMINALS=1` 開啟）。起因是排查「ATM 執行時影響影片播放與系統穩定性」，這三者是 ATM 最重的部分（常駐 node-pty、WebSocket 串流、每秒輪詢、pipeline 送進 agent CLI 的長工作）。
+- 封存時：不載入 `node-pty`；`/api/terminals*`、`/api/terminal-preferences`、`/api/projects/:name/terminal-*`、`/api/projects/:name/terminals/close` 一律 `404`；WS `/api/terminals/:id/socket` 升級直接拒絕；前端由 `/api/status` 的 `manager.terminalFeatures` 決定，隱藏入口並跳過整段終端開機流程（拿到狀態前一律視為關閉）。
+- **MUST NOT** 因為「功能沒在用」就刪掉這些程式碼或 `.dev-manager/terminal-preferences.json`（終端工作區 + pipeline 設定 + 記事本草稿）；封存是可逆的,資料要留著。
+- AI 配額監控（`/api/ai-quotas`、`#ai-quota`）是**獨立功能，不在封存範圍**，仍可使用。
