@@ -3543,6 +3543,14 @@ async function startProject(project, options = {}) {
   const stderr = fs.createWriteStream(stderrPath, { flags: 'a' });
   const heading = `\n\n${LOG_START_MARKER} ${new Date().toISOString()} starting ${project.name} on port ${project.port}\n`;
 
+  // A log write failure (disk full, file locked) must degrade to a console message, not
+  // an uncaught stream 'error' that takes ATM down with every other project.
+  stdout.on('error', (error) => {
+    console.error(`Log write failed for ${project.name} (stdout): ${error.message}`);
+  });
+  stderr.on('error', (error) => {
+    console.error(`Log write failed for ${project.name} (stderr): ${error.message}`);
+  });
   stdout.write(heading);
   stderr.write(heading);
 
@@ -3554,8 +3562,19 @@ async function startProject(project, options = {}) {
     windowsHide: true,
   });
 
-  child.stdout.pipe(stdout);
-  child.stderr.pipe(stderr);
+  // spawn() reports failures (missing npm, EPERM) asynchronously; with no 'error'
+  // listener Node turns them into an uncaught exception and kills the manager.
+  child.on('error', (error) => {
+    console.error(`Dev server for ${project.name} failed to start: ${error.message}`);
+    try {
+      stderr.write(`${LOG_START_MARKER} spawn failed: ${error.message}\n`);
+    } catch (writeError) {
+      // The log stream is already gone; the console line above is enough.
+    }
+    childProcesses.delete(project.path);
+  });
+  child.stdout?.pipe(stdout);
+  child.stderr?.pipe(stderr);
   child.on('close', () => {
     stdout.end();
     stderr.end();
@@ -5213,8 +5232,16 @@ function appendTerminalOutput(session, chunk) {
 function sendTerminalSocket(session, payload) {
   const message = JSON.stringify(payload);
   for (const socket of session.sockets || []) {
-    if (socket.readyState === 1) {
+    if (socket.readyState !== 1) {
+      continue;
+    }
+
+    try {
       socket.send(message);
+    } catch (error) {
+      // A socket that died between the readyState check and the write must not abort
+      // the broadcast to the remaining mirrors.
+      session.sockets.delete(socket);
     }
   }
 }
@@ -5825,6 +5852,77 @@ function getLocalAddressSet() {
   return addresses;
 }
 
+function getAllowedHostNames() {
+  return uniqueHostNames([
+    'localhost',
+    os.hostname(),
+    `${os.hostname()}.local`,
+    ...String(process.env.ATM_ALLOWED_HOSTS || '').split(/[,;\s]+/),
+  ]);
+}
+
+function isTrustedHostName(hostHeader) {
+  const hostName = normalizeHostName(hostHeader);
+  if (!hostName) {
+    return false;
+  }
+  // Every URL ATM advertises is an IP literal, localhost, or a Tailscale MagicDNS name.
+  // A Host header outside that set means a domain was pointed at this port, which is
+  // exactly what a DNS-rebinding attack looks like (evil.com -> 127.0.0.1).
+  if (net.isIP(hostName)) {
+    return true;
+  }
+  if (hostName.endsWith('.ts.net')) {
+    return true;
+  }
+
+  return getAllowedHostNames().includes(hostName);
+}
+
+// isLocalRequest() only proves the TCP peer is this machine — it does NOT prove the
+// request came from the ATM page. Any web page the user opens in a browser here can make
+// that browser POST to http://127.0.0.1:8787, and the request still arrives from
+// 127.0.0.1, which would hand an arbitrary website a PTY. Reject requests that a browser
+// tells us were driven from somewhere else, and reject Host headers we never advertise.
+function isTrustedRequest(request) {
+  const hostHeader = String(request.headers?.host || '');
+  if (!isTrustedHostName(hostHeader)) {
+    return false;
+  }
+
+  // Browsers send sec-fetch-site on every request, including Origin-less GETs
+  // (<img>, <script>), so it catches drive-by reads that Origin alone would miss.
+  const fetchSite = String(request.headers['sec-fetch-site'] || '').toLowerCase();
+  if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+    return false;
+  }
+
+  // Non-browser clients (curl, dev-manager.ps1) send no Origin at all; browsers always
+  // send one for POST/PUT/DELETE and for WebSocket handshakes, so an absent Origin here
+  // cannot be forged by a page.
+  const origin = String(request.headers.origin || '');
+  if (!origin) {
+    return true;
+  }
+
+  try {
+    return new URL(origin).host.toLowerCase() === hostHeader.toLowerCase();
+  } catch (error) {
+    return false;
+  }
+}
+
+// Execution-class endpoints (anything that spawns a process on this machine) stay local
+// only; remote devices keep the read-only mirror plus terminal-preferences.
+function requireLocalExecution(request, response, message) {
+  if (isLocalRequest(request)) {
+    return true;
+  }
+
+  sendError(response, 403, message);
+  return false;
+}
+
 function openFolderPath(folderPath, missingMessage = 'Folder was not found.') {
   if (!folderPath || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
     throw new Error(missingMessage);
@@ -6196,15 +6294,22 @@ async function restoreEnabledProjectsOnStartup() {
 
 function readRequestBody(request) {
   return new Promise((resolve, reject) => {
-    let raw = '';
+    const chunks = [];
+    let size = 0;
     request.on('data', (chunk) => {
-      raw += chunk;
-      if (raw.length > 1024 * 1024) {
+      size += chunk.length;
+      if (size > 1024 * 1024) {
         reject(new Error('Request body is too large.'));
         request.destroy();
+        return;
       }
+
+      chunks.push(chunk);
     });
     request.on('end', () => {
+      // Decode once, at the end: converting each chunk on its own splits multi-byte
+      // UTF-8 sequences on chunk boundaries and corrupts Chinese notepad/pipeline text.
+      const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw.trim()) {
         resolve({});
         return;
@@ -6274,6 +6379,11 @@ async function runProfileAction(profile, projects, action) {
 }
 
 async function handleApi(request, response, url) {
+  if (!isTrustedRequest(request)) {
+    sendError(response, 403, '請求來源不受信任，請直接開啟 ATM 頁面（本機或 LAN/Tailscale IP）後再操作。');
+    return;
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/status') {
     sendJson(response, 200, await getStatusPayload(request));
     return;
@@ -6371,6 +6481,10 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/open-folder$/.test(url.pathname)) {
+    if (!requireLocalExecution(request, response, '為了安全，開啟資料夾只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
     const { project } = selectedProjectFromUrl(url);
     if (!project) {
       sendError(response, 404, 'Project not found.');
@@ -6387,6 +6501,10 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && url.pathname === '/api/roots/open-folder') {
+    if (!requireLocalExecution(request, response, '為了安全，開啟資料夾只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
     const body = await readRequestBody(request);
     const requestedPath = String(body.path || '').trim();
     if (!requestedPath) {
@@ -6760,6 +6878,10 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && /^\/api\/profiles\/[^/]+\/(start|stop|restart)$/.test(url.pathname)) {
+    if (!requireLocalExecution(request, response, '為了安全，啟動／停止／重啟只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
     const { profile, projects } = selectedProfileFromUrl(url);
     if (!profile) {
       sendError(response, 404, 'Profile not found.');
@@ -6797,6 +6919,10 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/start$/.test(url.pathname)) {
+    if (!requireLocalExecution(request, response, '為了安全，啟動專案只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
     const { project } = selectedProjectFromUrl(url);
     if (!project) {
       sendError(response, 404, 'Project not found.');
@@ -6810,6 +6936,10 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/lan$/.test(url.pathname)) {
+    if (!requireLocalExecution(request, response, '為了安全，啟動專案只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
     const { project } = selectedProjectFromUrl(url);
     if (!project) {
       sendError(response, 404, 'Project not found.');
@@ -6829,6 +6959,10 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/tailscale$/.test(url.pathname)) {
+    if (!requireLocalExecution(request, response, '為了安全，啟動專案只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
     const { project } = selectedProjectFromUrl(url);
     if (!project) {
       sendError(response, 404, 'Project not found.');
@@ -6850,6 +6984,10 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/stop$/.test(url.pathname)) {
+    if (!requireLocalExecution(request, response, '為了安全，停止專案只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
     const { project } = selectedProjectFromUrl(url);
     if (!project) {
       sendError(response, 404, 'Project not found.');
@@ -6867,6 +7005,10 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/restart$/.test(url.pathname)) {
+    if (!requireLocalExecution(request, response, '為了安全，重啟專案只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
     const { project } = selectedProjectFromUrl(url);
     if (!project) {
       sendError(response, 404, 'Project not found.');
@@ -7473,22 +7615,39 @@ async function runMobileBuildInstall(project, request, body = {}) {
 }
 
 function readTail(filePath, lines) {
-  if (!filePath || !fs.existsSync(filePath)) {
+  // Dev-server logs are append-only with no rotation and can reach hundreds of MB.
+  // Only the tail is ever displayed, and this runs on every log poll, so read a bounded
+  // window instead of pulling the whole file into memory synchronously.
+  const text = readRecentFile(filePath, 512 * 1024);
+  if (!text) {
     return '';
   }
 
-  const text = fs.readFileSync(filePath, 'utf8');
   const parts = text.split(/\r?\n/);
   return parts.slice(Math.max(0, parts.length - lines)).join('\n');
 }
 
 function serveFile(response, filePath) {
   const extension = path.extname(filePath).toLowerCase();
+  const stream = fs.createReadStream(filePath);
+
+  // Without this listener a read error (file replaced mid-request, EBUSY on Windows)
+  // becomes an uncaught 'error' event and kills the manager.
+  stream.on('error', () => {
+    if (!response.headersSent) {
+      response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+      response.end('File read failed');
+      return;
+    }
+
+    response.destroy();
+  });
+
   response.writeHead(200, {
     'content-type': MIME_TYPES[extension] || 'application/octet-stream',
     'cache-control': 'no-store',
   });
-  fs.createReadStream(filePath).pipe(response);
+  stream.pipe(response);
 }
 
 function serveVendor(request, response, url) {
@@ -7522,8 +7681,42 @@ function sendUpgradeError(socket, statusCode, message) {
 
 const terminalSocketServer = new WebSocketServer({ noServer: true });
 
+// A failed response MUST NOT reject the async handler: nothing awaits it, so an
+// unhandled rejection would take the whole manager (and every PTY) down.
+function failRequest(response, error) {
+  if (response.writableEnded) {
+    return;
+  }
+
+  try {
+    if (response.headersSent) {
+      response.destroy();
+      return;
+    }
+
+    sendJson(response, error?.statusCode || 500, {
+      error: error?.message || 'Internal server error.',
+      ...(error?.payload || {}),
+    });
+  } catch (writeError) {
+    try {
+      response.destroy();
+    } catch (destroyError) {
+      // The socket is already gone.
+    }
+  }
+}
+
 const server = http.createServer(async (request, response) => {
-  const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  let url;
+  try {
+    // A malformed request target or Host header (e.g. "Host: a b") makes URL throw;
+    // this runs outside any handler try/catch, so guard it explicitly.
+    url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  } catch (error) {
+    failRequest(response, { statusCode: 400, message: 'Invalid request URL.' });
+    return;
+  }
 
   try {
     if (url.pathname.startsWith('/api/')) {
@@ -7540,10 +7733,7 @@ const server = http.createServer(async (request, response) => {
 
     serveStatic(request, response, url);
   } catch (error) {
-    sendJson(response, error.statusCode || 500, {
-      error: error.message || 'Internal server error.',
-      ...(error.payload || {}),
-    });
+    failRequest(response, error);
   }
 });
 
@@ -7585,9 +7775,22 @@ terminalSocketServer.on('connection', (socket, request, session, cursor, options
 });
 
 server.on('upgrade', (request, socket, head) => {
-  const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  let url;
+  try {
+    url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  } catch (error) {
+    sendUpgradeError(socket, 400, 'Bad Request');
+    return;
+  }
   if (!/^\/api\/terminals\/[^/]+\/socket$/.test(url.pathname)) {
     sendUpgradeError(socket, 404, 'Not Found');
+    return;
+  }
+
+  // WebSocket handshakes are exempt from CORS, so without this a page on any website
+  // could open a *writable* terminal socket against 127.0.0.1 and run commands.
+  if (!isTrustedRequest(request)) {
+    sendUpgradeError(socket, 403, 'Forbidden');
     return;
   }
 
@@ -7745,6 +7948,16 @@ async function restartAtm() {
   // The replacement re-scans and restores enabled projects on startup.
   await shutdownAtm('RESTART');
 }
+
+// ATM supervises every managed dev server and PTY session, so dying on a stray async
+// error is strictly worse than staying up degraded: the children would be orphaned and
+// keep holding their ports. Log loudly and keep serving.
+process.on('unhandledRejection', (reason) => {
+  console.error(`Unhandled promise rejection: ${reason?.stack || reason}`);
+});
+process.on('uncaughtException', (error) => {
+  console.error(`Uncaught exception: ${error?.stack || error}`);
+});
 
 // SIGINT = Ctrl+C, SIGBREAK = Ctrl+Break, SIGHUP = console window closed.
 // (A forced kill such as taskkill /F or Stop-Process -Force can't be intercepted.)
