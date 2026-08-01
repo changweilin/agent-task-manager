@@ -9,11 +9,21 @@ const { pathToFileURL } = require('url');
 const { spawn, execFileSync } = require('child_process');
 const { WebSocketServer } = require('ws');
 
+// 封存開關(2026-08-02,排查效能問題):整組關閉「終端管理 / Pipeline 管理 / 記事本」。
+// 這三者是同一個終端面板的三個分頁,也是 ATM 最重的部分 —— 常駐 node-pty 子程序、
+// WebSocket 串流、每秒輪詢,以及 pipeline 送進 agent CLI 的長時間工作。
+// 關閉時:不載入 node-pty、相關 API 一律 404、WS 升級直接拒絕、前端隱藏入口。
+// 設 ATM_TERMINALS=1 即可整組復活;程式碼與 .dev-manager/terminal-preferences.json
+// (終端工作區 + pipeline 設定 + 記事本草稿)都原地保留,不會被清掉。
+const TERMINAL_FEATURES_ENABLED = process.env.ATM_TERMINALS === '1';
+
 let pty = null;
-try {
-  pty = require('node-pty');
-} catch (error) {
-  pty = null;
+if (TERMINAL_FEATURES_ENABLED) {
+  try {
+    pty = require('node-pty');
+  } catch (error) {
+    pty = null;
+  }
 }
 
 const ROOT_DIR = __dirname;
@@ -29,7 +39,9 @@ const DEFAULT_MANAGER_PORT = 8787;
 const LOG_START_MARKER = '[Agent Task Manager (ATM)]';
 const DEFAULT_HEALTH_FAILURE_THRESHOLD = 3;
 const PAGE_SCAN_TTL_MS = 30000;
+const PROJECT_FILE_PORT_TTL_MS = 30000;
 const TAILSCALE_SERVE_SCAN_TTL_MS = 30000;
+const TAILSCALE_IP_TTL_MS = 30000;
 const TAILSCALE_DNS_LOOKUP_TTL_MS = 300000;
 const PAGE_SCAN_MAX_FILES = 800;
 const PAGE_SCAN_MAX_PAGES = 80;
@@ -98,9 +110,16 @@ let aiQuotaProbeInFlight = null;
 const mobileInstallLocks = new Set();
 const restartLocks = new Set();
 const pageScanCache = new Map();
+const projectFilePortCache = new Map();
+const jsonReadCache = new Map();
+const JSON_READ_CACHE_LIMIT = 256;
 let tailscaleServeCache = { checkedAt: 0, routes: [] };
+let tailscaleIpCache = { checkedAt: 0, ip: null };
 let tailscaleDnsCache = { checkedAt: 0, ip: '', hostName: '' };
 const TERMINAL_BUFFER_LIMIT = 2 * 1024 * 1024;
+// Trim the ring buffer in 256KB steps instead of on every chunk: at the cap, slicing per
+// chunk copies the whole 2MB string for each ~100 bytes a chatty agent CLI prints.
+const TERMINAL_BUFFER_SLACK = 256 * 1024;
 const TERMINAL_INPUT_LIMIT = 16 * 1024;
 const TERMINAL_PREFERENCE_TEXT_LIMIT = 4096;
 const TERMINAL_FAVORITE_LIMIT = 60;
@@ -409,13 +428,36 @@ function ensureDir(dirPath) {
   }
 }
 
+// getConfig()/getState() are called dozens of times per status poll and each call used to
+// re-read the file from disk. Cache the raw bytes keyed by (mtime, size) so an edit from
+// outside — or from the restart stand-in process — is still picked up, and re-parse every
+// time so callers keep getting their own mutable copy.
+// A project scan reads one package.json per candidate directory, so drop everything once
+// the map grows past the handful of files that are actually read repeatedly.
+function cacheJsonRead(filePath, entry) {
+  if (jsonReadCache.size >= JSON_READ_CACHE_LIMIT) {
+    jsonReadCache.clear();
+  }
+  jsonReadCache.set(filePath, entry);
+}
+
 function readJson(filePath, fallback) {
   try {
-    if (!fs.existsSync(filePath)) {
+    if (!filePath) {
       return fallback;
     }
 
-    const raw = fs.readFileSync(filePath, 'utf8');
+    const stat = fs.statSync(filePath);
+    const cached = jsonReadCache.get(filePath);
+    let raw;
+
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      raw = cached.raw;
+    } else {
+      raw = fs.readFileSync(filePath, 'utf8');
+      cacheJsonRead(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, raw });
+    }
+
     if (!raw.trim()) {
       return fallback;
     }
@@ -428,7 +470,16 @@ function readJson(filePath, fallback) {
 
 function writeJson(filePath, value) {
   ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  const raw = `${JSON.stringify(value, null, 2)}\n`;
+  fs.writeFileSync(filePath, raw, 'utf8');
+  // Same-millisecond write + read can land on an unchanged mtime, so refresh the entry
+  // from what we just wrote rather than trusting the stat comparison to catch it.
+  try {
+    const stat = fs.statSync(filePath);
+    cacheJsonRead(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, raw });
+  } catch (error) {
+    jsonReadCache.delete(filePath);
+  }
 }
 
 function getConfig() {
@@ -1507,6 +1558,15 @@ function detectPortFromProjectFiles(project) {
     return null;
   }
 
+  // Every status poll resolves each project and branch several times over, and each pass
+  // stat'd ~250 candidate config files — thousands of filesystem probes per second once a
+  // browser tab is open. A port written in .env/config.py does not change that fast.
+  const cacheKey = `${normalizePath(project.path)}|${project.name || ''}`;
+  const cached = projectFilePortCache.get(cacheKey);
+  if (cached && Date.now() - cached.checkedAt < PROJECT_FILE_PORT_TTL_MS) {
+    return cached.port;
+  }
+
   const matches = [];
   const patterns = [
     /(?:_int_env|os\.getenv)\(\s*["']([A-Z][A-Z0-9_]*PORT)["']\s*,\s*["']?(\d{1,5})["']?/g,
@@ -1534,8 +1594,10 @@ function detectPortFromProjectFiles(project) {
     }
   }
 
-  return matches
+  const port = matches
     .sort((left, right) => right.score - left.score)[0]?.port || null;
+  projectFilePortCache.set(cacheKey, { checkedAt: Date.now(), port });
+  return port;
 }
 
 function discoverSourceDeclaredPages(project, pagesByPath) {
@@ -2567,9 +2629,26 @@ async function findActiveProjectServer(project, { entry = null, excludeManaged =
   return null;
 }
 
+// True when another configured project/branch already owns this port.
+function portIsClaimedByAnotherProject(projectPath, portNumber) {
+  const config = getConfig();
+  return getProjectPortTargets(normalizeProjects(config.projects, config.basePort)).some(
+    (target) => normalizePort(target.port) === portNumber && !isSamePath(target.path, projectPath),
+  );
+}
+
 function syncProjectPort(projectPath, projectPort) {
   const portNumber = normalizePort(projectPort);
   if (!portNumber) {
+    return;
+  }
+
+  // Sibling worktrees of one repo carry the same hard-coded port in their dev script, so
+  // both detect the same port and both want to persist it. Writing it hands the port to
+  // whoever asked last, the allocator bumps the loser, and the next poll flips them back —
+  // dev-projects.json gets rewritten forever. The detected port still reaches this
+  // response through the caller's return value; only the persistence is dropped.
+  if (portIsClaimedByAnotherProject(projectPath, portNumber)) {
     return;
   }
 
@@ -5220,7 +5299,7 @@ function appendTerminalOutput(session, chunk) {
 
   session.output += text;
   session.updatedAt = new Date().toISOString();
-  if (session.output.length > TERMINAL_BUFFER_LIMIT) {
+  if (session.output.length > TERMINAL_BUFFER_LIMIT + TERMINAL_BUFFER_SLACK) {
     const overflow = session.output.length - TERMINAL_BUFFER_LIMIT;
     session.output = session.output.slice(overflow);
     session.outputOffset += overflow;
@@ -5490,6 +5569,19 @@ function isTailscaleIpv4(ip) {
 }
 
 function getTailscaleIp() {
+  // This runs on every /api/status. execFileSync blocks the event loop for ~25ms and each
+  // call is a full Windows process creation (antivirus scan included), so cache it like
+  // the serve-route scan next to it.
+  if (Date.now() - tailscaleIpCache.checkedAt < TAILSCALE_IP_TTL_MS) {
+    return tailscaleIpCache.ip;
+  }
+
+  const ip = readTailscaleIp();
+  tailscaleIpCache = { checkedAt: Date.now(), ip };
+  return ip;
+}
+
+function readTailscaleIp() {
   try {
     const output = execFileSync('tailscale', ['ip', '-4'], {
       encoding: 'utf8',
@@ -5558,6 +5650,13 @@ function getTailscaleMagicDnsSuffix(tailscaleIp = '') {
   return normalizeHostName(status.MagicDNSSuffix || status.CurrentTailnet?.MagicDNSSuffix);
 }
 
+// `tailscale up` changes the answer right now, so the TTL cache must not be trusted here.
+function refreshTailscaleIp() {
+  const ip = readTailscaleIp();
+  tailscaleIpCache = { checkedAt: Date.now(), ip };
+  return ip;
+}
+
 function startTailscaleIfNeeded() {
   const currentIp = getTailscaleIp();
   if (currentIp) {
@@ -5572,7 +5671,7 @@ function startTailscaleIfNeeded() {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (error) {
-    const ipAfterFailure = getTailscaleIp();
+    const ipAfterFailure = refreshTailscaleIp();
     return {
       ip: ipAfterFailure,
       started: Boolean(ipAfterFailure),
@@ -5580,7 +5679,7 @@ function startTailscaleIfNeeded() {
     };
   }
 
-  return { ip: getTailscaleIp(), started: true, error: null };
+  return { ip: refreshTailscaleIp(), started: true, error: null };
 }
 
 function getLanIp() {
@@ -6022,8 +6121,19 @@ async function applyHealthPolicy(project, entry, running, probe, config, network
     !restartLocks.has(project.path);
 
   if (!shouldRestart) {
+    // A healthy project produces an identical patch every poll apart from lastHealthAt, so
+    // persisting it unconditionally rewrites state.json once per running project per poll,
+    // forever. The response still carries the fresh timestamp; only the disk copy lags,
+    // and it is refreshed as soon as the health verdict actually changes.
+    const healthChanged =
+      Number(entry.healthFailures || 0) !== nextFailures ||
+      entry.lastHealthOk !== probeOk ||
+      (entry.lastHealthError || '') !== lastHealthError;
+
     return {
-      entry: updateProjectEntry(project, healthPatch) || { ...entry, ...healthPatch },
+      entry: healthChanged
+        ? updateProjectEntry(project, healthPatch) || { ...entry, ...healthPatch }
+        : { ...entry, ...healthPatch },
       autoRestarted: false,
     };
   }
@@ -6217,6 +6327,8 @@ async function getStatusPayload(request = null) {
       lanUrl: buildUrl(lanIp, port),
       tailscaleUrl: buildProjectTailscaleUrl(port, tailscaleIp, { tailscaleHost }),
       tailscaleIp,
+      // 前端唯一的封存狀態來源:false 時隱藏終端/Pipeline/記事本入口並停掉相關請求。
+      terminalFeatures: TERMINAL_FEATURES_ENABLED,
       terminalReadOnly,
       terminalClaudeRemoteLaunch: localRequest,
       terminalAgentRemoteLaunch: localRequest,
@@ -6378,9 +6490,22 @@ async function runProfileAction(profile, projects, action) {
   return selectedProjects.length;
 }
 
+// 封存中的終端/Pipeline/記事本 API。AI 配額監控(/api/ai-quotas)是獨立功能,不在此列。
+const ARCHIVED_TERMINAL_ROUTES = [
+  /^\/api\/terminals(?:\/|$)/,
+  /^\/api\/terminal-preferences$/,
+  /^\/api\/projects\/[^/]+\/terminal-(?:options|directories|agent|claude)$/,
+  /^\/api\/projects\/[^/]+\/terminals\/close$/,
+];
+
 async function handleApi(request, response, url) {
   if (!isTrustedRequest(request)) {
     sendError(response, 403, '請求來源不受信任，請直接開啟 ATM 頁面（本機或 LAN/Tailscale IP）後再操作。');
+    return;
+  }
+
+  if (!TERMINAL_FEATURES_ENABLED && ARCHIVED_TERMINAL_ROUTES.some((pattern) => pattern.test(url.pathname))) {
+    sendError(response, 404, '終端管理 / Pipeline 管理 / 記事本目前為封存狀態（設定環境變數 ATM_TERMINALS=1 後重啟 ATM 即可啟用）。');
     return;
   }
 
@@ -7782,7 +7907,7 @@ server.on('upgrade', (request, socket, head) => {
     sendUpgradeError(socket, 400, 'Bad Request');
     return;
   }
-  if (!/^\/api\/terminals\/[^/]+\/socket$/.test(url.pathname)) {
+  if (!TERMINAL_FEATURES_ENABLED || !/^\/api\/terminals\/[^/]+\/socket$/.test(url.pathname)) {
     sendUpgradeError(socket, 404, 'Not Found');
     return;
   }
@@ -7813,6 +7938,9 @@ function onAtmListening() {
   const lanIp = getLanIp();
   const tailscale = startTailscaleIfNeeded();
   console.log(`Agent Task Manager (ATM) running at http://127.0.0.1:${port}`);
+  if (!TERMINAL_FEATURES_ENABLED) {
+    console.log('終端管理 / Pipeline 管理 / 記事本：已封存（設定 ATM_TERMINALS=1 後重啟即可啟用）。');
+  }
   if (lanIp) {
     console.log(`LAN URL: http://${lanIp}:${port}`);
   } else {
