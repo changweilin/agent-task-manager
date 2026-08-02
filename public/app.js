@@ -303,8 +303,9 @@ function bootTerminalFeatures() {
     .finally(() => loadTerminalSessions({ silent: true }));
 }
 
-// 封存時把三個入口(Pipeline 按鈕、開啟 ATM 終端、重啟選單裡的兩個終端項目)藏起來,
-// 而不是 disabled —— 這不是「暫時不能用」,是整組不在了。
+// 封存時把 Pipeline 按鈕與「開啟 ATM 終端」藏起來 —— 這不是「暫時不能用」,是整組不在了。
+// 重啟選單裡的兩個終端項目則改成鎖定而非隱藏:選單其他項目仍在,整條抽掉會讓使用者
+// 以為功能被刪了;鎖定狀態下仍可點,點了跳封存說明。
 function applyTerminalArchivedUi() {
   const archived = !terminalFeaturesAvailable();
   if (elements.pipelineOpenButton) {
@@ -315,9 +316,12 @@ function applyTerminalArchivedUi() {
   }
   for (const action of ['all-terminals', 'atm-terminal']) {
     const item = document.querySelector(`.restart-menu-item[data-restart-action="${action}"]`);
-    if (item) {
-      item.hidden = archived;
+    if (!item) {
+      continue;
     }
+    item.hidden = false;
+    item.classList.toggle('is-locked', archived);
+    item.setAttribute('aria-disabled', String(archived));
   }
 }
 
@@ -1534,6 +1538,63 @@ async function closeProjectConnection(projectName, targetId) {
     state.busy.delete(projectName);
     render();
   }
+}
+
+const CONNECTION_OFF_ALL_CONFIRMS = {
+  local: '關閉所有專案 Local 會停止所有專案的開發伺服器（LAN／Tailscale 也會一起斷），確定要繼續嗎？',
+  lan: '關閉所有專案 LAN 會把開發伺服器改綁 127.0.0.1 並重啟，內網其他裝置將連不到，確定要繼續嗎？',
+  tailscale: '關閉所有專案 Tailscale 會移除這些 port 的 tailscale serve 路由（開發伺服器繼續執行），確定要繼續嗎？',
+};
+
+// 全專案關閉:逐一送出跟單一專案 ✕ 相同的 endpoint。ATM 自己永遠排除(關掉 = 把管理台
+// 踢下線)。每個專案 best-effort,單一失敗不中斷其餘專案。
+async function closeAllProjectConnections(targetId) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+  if (!pageLinkTargetIds.has(targetId)) {
+    return;
+  }
+
+  const label = getPageTargetDefinition(targetId).label;
+  const names = (state.payload?.projects || [])
+    .filter((project) => !projectIsAtm(project) && connectionIsOpen(project, targetId))
+    .map((project) => project.name);
+  if (!names.length) {
+    showToast(`沒有開著的 ${label} 入口可關閉`);
+    return;
+  }
+
+  const confirmed = window.confirm(CONNECTION_OFF_ALL_CONFIRMS[targetId] || `關閉所有專案 ${label} 入口?`);
+  if (!confirmed) {
+    return;
+  }
+
+  showToast(`正在關閉 ${names.length} 個專案的 ${label} 入口…`);
+  let closed = 0;
+  let failed = 0;
+  for (const name of names) {
+    state.busy.add(name);
+    try {
+      state.payload = await api(`/api/projects/${encodeURIComponent(name)}/${targetId}-off`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      // 關掉的入口不該繼續當作這個專案的顯示目標,交還給「跟著 ATM 入口」的預設邏輯。
+      state.pageTargetByProject.delete(name);
+      closed += 1;
+    } catch (error) {
+      failed += 1;
+    } finally {
+      state.busy.delete(name);
+    }
+  }
+
+  render();
+  showToast(failed
+    ? `已關閉 ${closed} 個 ${label} 入口,${failed} 個失敗`
+    : `已關閉 ${closed} 個 ${label} 入口`);
 }
 
 async function selectProjectPageTarget(projectName, targetId) {
@@ -10110,6 +10171,14 @@ elements.restartMenuButton.addEventListener('click', (event) => {
 });
 
 elements.restartMenuPopover.addEventListener('click', (event) => {
+  const connectionItem = event.target.closest('[data-connection-off-all]');
+  if (connectionItem) {
+    event.stopPropagation();
+    setRestartMenuOpen(false);
+    closeAllProjectConnections(connectionItem.dataset.connectionOffAll);
+    return;
+  }
+
   const item = event.target.closest('[data-restart-action]');
   if (!item) {
     return;
