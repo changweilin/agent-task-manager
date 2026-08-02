@@ -2061,6 +2061,9 @@ function normalizeProjectBranches(branches, rootPath, assignPort = null) {
         canStart: Boolean(devScript && hasWebTarget),
         hasWebTarget,
         sourceType: branch.sourceType || 'branch',
+        // 使用者按過「關閉 LAN」:下次 spawn 綁 127.0.0.1 而不是 0.0.0.0。必須留在這份
+        // 白名單裡，否則存檔時會被靜默丟掉（#INC-311）。
+        lanClosed: Boolean(branch.lanClosed),
       };
     })
     .filter((branch) => projectHasWebTarget(branch));
@@ -2120,6 +2123,7 @@ function normalizeProjects(projects, basePort) {
         canStart: Boolean(devScript && hasWebTarget && projectPort),
         hasWebTarget: Boolean(hasWebTarget && projectPort),
         sourceType: project.sourceType || 'configured',
+        lanClosed: Boolean(project.lanClosed),
         branches: normalizeProjectBranches(project.branches || [], projectPath, assignPort),
       };
     });
@@ -2146,6 +2150,8 @@ function mergeDiscoveredWithExisting(discovered, existingProjects, basePort) {
       port: preferredPort,
       hasWebTarget,
       sourceType: existing?.sourceType || project.sourceType,
+      // 重新掃描不該把使用者關掉的 LAN 入口重新打開。
+      lanClosed: Boolean(existing ? existing.lanClosed : project.lanClosed),
       branches: mergeProjectBranches([
         ...(Array.isArray(project.branches) ? project.branches : []),
         ...(Array.isArray(existing?.branches) ? existing.branches : []),
@@ -2356,6 +2362,36 @@ function applyPortToProjectTree(project, targetPath, port) {
   }
 
   return project;
+}
+
+// LAN 入口的關閉是持久設定,不是執行期旗標:dev server 預設綁 0.0.0.0,只清 state 的
+// lanMode 內網照樣連得到。真正關掉的唯一方式是下次 spawn 改綁 127.0.0.1,所以要寫進
+// dev-projects.json,重掃/重啟後都還在。
+function applyLanClosedToProjectTree(project, targetPath, closed) {
+  if (!project) {
+    return project;
+  }
+
+  if (isSamePath(project.path, targetPath)) {
+    return { ...project, lanClosed: closed };
+  }
+
+  if (Array.isArray(project.branches) && project.branches.length) {
+    return {
+      ...project,
+      branches: project.branches.map((branch) => applyLanClosedToProjectTree(branch, targetPath, closed)),
+    };
+  }
+
+  return project;
+}
+
+function setProjectLanClosed(projectPath, closed) {
+  const config = getConfig();
+  const targetPath = normalizePath(projectPath);
+  const projects = config.projects.map((project) => applyLanClosedToProjectTree(project, targetPath, Boolean(closed)));
+
+  saveConfig({ ...config, projects });
 }
 
 function setProjectPort(projectPath, requestedPort) {
@@ -3285,21 +3321,24 @@ function getNpmDevArgs(project, launchOptions = {}) {
   const devScript = project?.devScript || '';
   const args = ['run', 'dev'];
   const scriptedPort = detectPortFromDevScript(devScript);
+  // 關閉 LAN 的專案綁 127.0.0.1:tailscale serve 是 proxy 到 localhost,所以 Tailscale
+  // 入口不受影響,只有內網直連會被擋掉。
+  const bindHost = launchOptions.bindHost || '0.0.0.0';
 
   if (framework === 'next') {
-    return [...args, '--', '-H', '0.0.0.0', '-p', String(projectPort)];
+    return [...args, '--', '-H', bindHost, '-p', String(projectPort)];
   }
 
   if (['vite', 'astro', 'nuxt'].includes(framework)) {
     if (framework === 'vite') {
-      const viteArgs = ['--host', '0.0.0.0', '--port', String(projectPort), '--strictPort'];
+      const viteArgs = ['--host', bindHost, '--port', String(projectPort), '--strictPort'];
       if (launchOptions.viteConfigPath) {
         viteArgs.push('--config', launchOptions.viteConfigPath);
       }
       return [...args, '--', ...viteArgs];
     }
 
-    return [...args, '--', '--host', '0.0.0.0', '--port', String(projectPort)];
+    return [...args, '--', '--host', bindHost, '--port', String(projectPort)];
   }
 
   // Generic projects run their own npm script — let ATM decide reload vs no-reload.
@@ -3310,7 +3349,7 @@ function getNpmDevArgs(project, launchOptions = {}) {
   }
 
   if (scriptedPort && Number(scriptedPort) !== Number(projectPort)) {
-    return [...baseArgs, '--', '--host', '0.0.0.0', '--port', String(projectPort)];
+    return [...baseArgs, '--', '--host', bindHost, '--port', String(projectPort)];
   }
 
   return baseArgs;
@@ -3490,15 +3529,16 @@ function buildChildEnv(project, launchOptions = {}) {
   const cargoTargetDir = projectBuildCacheDir(project);
   ensureDir(cargoTargetDir);
 
+  const bindHost = launchOptions.bindHost || '0.0.0.0';
   const env = {
     ...process.env,
-    HOST: '0.0.0.0',
-    HOSTNAME: '0.0.0.0',
+    HOST: bindHost,
+    HOSTNAME: bindHost,
     PORT: String(projectPort),
     BROWSER: 'none',
     NEXT_TELEMETRY_DISABLED: '1',
-    VITE_HOST: '0.0.0.0',
-    npm_config_host: '0.0.0.0',
+    VITE_HOST: bindHost,
+    npm_config_host: bindHost,
     CARGO_TARGET_DIR: cargoTargetDir,
   };
 
@@ -3611,7 +3651,10 @@ async function startProject(project, options = {}) {
   }
 
   project = await ensureProjectPort(project);
-  const launchOptions = await resolveViteLaunchOptions(project, options);
+  const launchOptions = {
+    ...(await resolveViteLaunchOptions(project, options)),
+    bindHost: project.lanClosed && !options.lanMode ? '127.0.0.1' : '0.0.0.0',
+  };
 
   const npm = getNpmExecutable();
   const args = getNpmDevArgs(project, launchOptions);
@@ -5834,6 +5877,34 @@ function startTailscaleServeForPort(projectPort) {
   }
 }
 
+function stopTailscaleServeForPort(projectPort) {
+  const portNumber = normalizePort(projectPort);
+  if (!portNumber) {
+    return false;
+  }
+
+  // `--yes` 只有部分版本吃得下這條路徑，失敗時退回不帶旗標的寫法再試一次。
+  for (const args of [
+    ['serve', '--yes', '--https', String(portNumber), 'off'],
+    ['serve', '--https', String(portNumber), 'off'],
+  ]) {
+    try {
+      execFileSync('tailscale', args, {
+        timeout: 5000,
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      refreshTailscaleServeRoutes();
+      return true;
+    } catch (error) {
+      // Try the next form; a missing/offline tailscale CLI just means nothing to close.
+    }
+  }
+
+  refreshTailscaleServeRoutes();
+  return false;
+}
+
 async function getTailscaleDnsName(tailscaleIp) {
   if (!tailscaleIp) {
     return '';
@@ -6281,7 +6352,12 @@ async function getStatusPayload(request = null) {
         stdout: rowEntry?.stdout || '',
         stderr: rowEntry?.stderr || '',
         lanMode: Boolean(rowEntry?.lanMode && lanIp),
-        lanReady: webTarget ? Boolean(lanIp && (running || probe.ok)) : Boolean(homeChildWebTarget?.lanUrl && homeChildWebTarget.probe.ok),
+        // 被關閉 LAN 的專案綁在 127.0.0.1，內網連不到，這裡就不能報 ready — 否則入口
+        // chip 會顯示成已啟用，而不是可以重新啟用。
+        lanClosed: Boolean(actionProject?.lanClosed),
+        lanReady: webTarget
+          ? Boolean(lanIp && !project.lanClosed && (running || probe.ok))
+          : Boolean(homeChildWebTarget?.lanUrl && !homeChildWebTarget.project.lanClosed && homeChildWebTarget.probe.ok),
         lanIpAtStart: rowEntry?.lanIpAtStart || null,
         tailscaleMode: Boolean(rowEntry?.tailscaleMode && tailscaleIp),
         tailscaleReady: webTarget
@@ -7078,7 +7154,21 @@ async function handleApi(request, response, url) {
     }
 
     const body = await readRequestBody(request).catch(() => ({}));
-    await startProject(resolveProjectSubTarget(project, body.targetPath), { lanMode: true, lanIp });
+    const actionProject = resolveProjectSubTarget(project, body.targetPath);
+    // 之前按過「關閉 LAN」的專案綁在 127.0.0.1，光是設旗標不會讓內網連得到，
+    // 必須清掉持久設定並重啟才會重新綁 0.0.0.0。
+    const reopening = Boolean(actionProject.lanClosed);
+    if (reopening) {
+      setProjectLanClosed(actionProject.path, false);
+    }
+
+    const lanEntry = getStateEntryByPath(getState(), actionProject.path);
+    const lanProject = { ...actionProject, lanClosed: false };
+    if (reopening && lanEntry?.pid && processIsRunning(lanEntry.pid)) {
+      await restartProject(lanProject, { lanMode: true, lanIp });
+    } else {
+      await startProject(lanProject, { lanMode: true, lanIp });
+    }
     sendJson(response, 200, await getStatusPayload());
     return;
   }
@@ -7104,6 +7194,55 @@ async function handleApi(request, response, url) {
     const actionProject = resolveProjectSubTarget(project, body.targetPath);
     startTailscaleServeForPort(actionProject.port);
     await startProject(actionProject, { tailscaleMode: true, tailscaleIp });
+    sendJson(response, 200, await getStatusPayload());
+    return;
+  }
+
+  // 關閉單一連線入口。三個入口的「關閉」語意不同,因為它們的暴露方式不同:
+  // local = dev server 本身(只能停掉)、LAN = 綁定位址(要改綁 127.0.0.1 並重啟)、
+  // tailscale = serve 路由(移除即可,dev server 不受影響)。
+  if (request.method === 'POST' && /^\/api\/projects\/[^/]+\/(local|lan|tailscale)-off$/.test(url.pathname)) {
+    if (!requireLocalExecution(request, response, '為了安全，關閉連線入口只能在本機（http://127.0.0.1）操作。')) {
+      return;
+    }
+
+    const { project } = selectedProjectFromUrl(url);
+    if (!project) {
+      sendError(response, 404, 'Project not found.');
+      return;
+    }
+
+    const target = url.pathname.split('/').pop().replace(/-off$/, '');
+    const body = await readRequestBody(request).catch(() => ({}));
+    const pinnedPath = String(body.targetPath || '').trim();
+    const actionProject = resolveProjectSubTarget(project, pinnedPath);
+
+    if (target === 'local') {
+      if (pinnedPath) {
+        await stopProject(actionProject);
+      } else {
+        await stopProjectAndBranches(project);
+      }
+      sendJson(response, 200, await getStatusPayload());
+      return;
+    }
+
+    if (target === 'tailscale') {
+      stopTailscaleServeForPort(actionProject.port);
+      updateProjectEntry(actionProject, { tailscaleMode: false, tailscaleIpAtStart: null });
+      sendJson(response, 200, await getStatusPayload());
+      return;
+    }
+
+    setProjectLanClosed(actionProject.path, true);
+    const lanOffEntry = getStateEntryByPath(getState(), actionProject.path);
+    const lanOffProject = { ...actionProject, lanClosed: true };
+    if (lanOffEntry?.pid && processIsRunning(lanOffEntry.pid)) {
+      // 綁定位址只有 spawn 時決定得了,執行中的 server 一定要重啟才會真的關掉內網。
+      await restartProject(lanOffProject, { lanMode: false });
+    } else {
+      updateProjectEntry(lanOffProject, { lanMode: false, lanIpAtStart: null });
+    }
     sendJson(response, 200, await getStatusPayload());
     return;
   }
