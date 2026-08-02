@@ -1407,30 +1407,79 @@ function renderProjectActionUrls(project) {
         // 其餘維持連結，點一下同時切換目標並開啟該入口。
         if (hasPages || needsConnection) {
           return `
-            <button
-              class="${escapeHtml(className)}"
-              data-page-target="${escapeHtml(target.id)}"
-              data-name="${escapeHtml(project.name)}"
-              type="button"
-              title="${escapeHtml(targetTitle)}"
-              aria-pressed="${active ? 'true' : 'false'}"
-              ${DEMO_MODE ? 'disabled' : ''}
-            >
-              ${escapeHtml(target.label)}
-            </button>
+            <span class="project-action-url-group">
+              <button
+                class="${escapeHtml(className)}"
+                data-page-target="${escapeHtml(target.id)}"
+                data-name="${escapeHtml(project.name)}"
+                type="button"
+                title="${escapeHtml(targetTitle)}"
+                aria-pressed="${active ? 'true' : 'false'}"
+                ${DEMO_MODE ? 'disabled' : ''}
+              >
+                ${escapeHtml(target.label)}
+              </button>
+              ${renderConnectionOffButton(project, target)}
+            </span>
           `;
         }
 
         return `
-          ${DEMO_MODE
-            ? `<span class="${escapeHtml(className)} is-disabled" aria-disabled="true" title="${escapeHtml(targetTitle)}">${escapeHtml(target.label)}</span>`
-            : `<a class="${escapeHtml(className)}" href="${escapeHtml(value)}" target="_blank" rel="noreferrer" data-page-target="${escapeHtml(target.id)}" data-name="${escapeHtml(project.name)}" title="${escapeHtml(targetTitle)}" aria-label="開啟 ${escapeHtml(target.label)} URL">
-            ${escapeHtml(target.label)}
-          </a>`}
+          <span class="project-action-url-group">
+            ${DEMO_MODE
+              ? `<span class="${escapeHtml(className)} is-disabled" aria-disabled="true" title="${escapeHtml(targetTitle)}">${escapeHtml(target.label)}</span>`
+              : `<a class="${escapeHtml(className)}" href="${escapeHtml(value)}" target="_blank" rel="noreferrer" data-page-target="${escapeHtml(target.id)}" data-name="${escapeHtml(project.name)}" title="${escapeHtml(targetTitle)}" aria-label="開啟 ${escapeHtml(target.label)} URL">
+              ${escapeHtml(target.label)}
+            </a>`}
+            ${renderConnectionOffButton(project, target)}
+          </span>
         `;
       }).join('')}
     </div>
   `;
+}
+
+// ATM 自己的三個入口是管理台的命脈（關掉 = 把自己踢下線），只有一般專案能關。
+function projectIsAtm(project) {
+  const atmPath = String(state.payload?.manager?.atm?.path || '').replace(/[\\/]+$/, '').toLowerCase();
+  const projectPath = String(project?.path || '').replace(/[\\/]+$/, '').toLowerCase();
+  return Boolean(atmPath && projectPath && atmPath === projectPath);
+}
+
+// 只有「現在真的通得到」的入口才給關閉鍵，避免對已經關掉的入口再送一次無效請求。
+function connectionIsOpen(project, targetId) {
+  if (targetId === 'local') {
+    return projectIsManagedRunning(project);
+  }
+  if (targetId === 'lan') {
+    return Boolean(project.lanUrl && project.lanReady);
+  }
+  if (targetId === 'tailscale') {
+    return Boolean(project.tailscaleUrl && project.tailscaleReady);
+  }
+  return false;
+}
+
+const CONNECTION_OFF_TITLES = {
+  local: '關閉 Local：停止這個專案的開發伺服器（三個入口都會一起斷）',
+  lan: '關閉 LAN：改綁 127.0.0.1 並重啟，內網其他裝置將連不到',
+  tailscale: '關閉 Tailscale：移除這個 port 的 tailscale serve 路由，開發伺服器繼續執行',
+};
+
+function renderConnectionOffButton(project, target) {
+  if (DEMO_MODE || projectIsAtm(project) || !connectionIsOpen(project, target.id)) {
+    return '';
+  }
+
+  const title = CONNECTION_OFF_TITLES[target.id] || `關閉 ${target.label}`;
+  return `<button
+      class="project-action-url-off ${escapeHtml(target.id)}"
+      data-connection-off="${escapeHtml(target.id)}"
+      data-name="${escapeHtml(project.name)}"
+      type="button"
+      title="${escapeHtml(title)}"
+      aria-label="關閉 ${escapeHtml(target.label)} 入口"
+    >✕</button>`;
 }
 
 function connectionActionForTarget(targetId) {
@@ -1455,6 +1504,36 @@ async function activateConnectionTarget(projectName, targetId) {
   }
 
   return runAction(projectName, action);
+}
+
+async function closeProjectConnection(projectName, targetId) {
+  if (DEMO_MODE) {
+    showDemoNotice();
+    return;
+  }
+  if (!projectName || !pageLinkTargetIds.has(targetId)) {
+    return;
+  }
+
+  const label = getPageTargetDefinition(targetId).label;
+  state.busy.add(projectName);
+  render();
+
+  try {
+    state.payload = await api(`/api/projects/${encodeURIComponent(projectName)}/${targetId}-off`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    // 關掉的入口不該繼續當作這個專案的顯示目標，交還給「跟著 ATM 入口」的預設邏輯。
+    state.pageTargetByProject.delete(projectName);
+    state.selectedName = projectName;
+    showToast(`${label} 入口已關閉`);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    state.busy.delete(projectName);
+    render();
+  }
 }
 
 async function selectProjectPageTarget(projectName, targetId) {
@@ -10290,6 +10369,13 @@ elements.projectRows.addEventListener('click', (event) => {
       }
     }
     render();
+    return;
+  }
+
+  const connectionOffButton = event.target.closest('button[data-connection-off]');
+  if (connectionOffButton) {
+    event.stopPropagation();
+    closeProjectConnection(connectionOffButton.dataset.name, connectionOffButton.dataset.connectionOff);
     return;
   }
 
