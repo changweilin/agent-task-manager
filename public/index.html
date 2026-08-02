@@ -60,7 +60,7 @@
             </svg>
           </button>
           <div class="restart-menu" id="restartMenu">
-            <button class="icon-button restart-menu-toggle" id="restartMenuButton" type="button" title="重啟選項" aria-haspopup="true" aria-expanded="false" aria-label="重啟選項">
+            <button class="icon-button restart-menu-toggle" id="restartMenuButton" type="button" title="重啟與連線選項" aria-haspopup="true" aria-expanded="false" aria-label="重啟與連線選項">
               <svg viewBox="0 0 24 24" focusable="false">
                 <path d="M20 6v5h-5" />
                 <path d="M4 18v-5h5" />
@@ -68,7 +68,7 @@
                 <path d="M5 13a7 7 0 0 0 12.1 4.8L20 15" />
               </svg>
             </button>
-            <div class="restart-menu-popover" id="restartMenuPopover" hidden role="menu" aria-label="重啟選項">
+            <div class="restart-menu-popover" id="restartMenuPopover" hidden role="menu" aria-label="重啟與連線選項">
               <button class="restart-menu-item" data-restart-action="all-servers" type="button" role="menuitem">
                 <strong>重啟所有專案 server（含 ATM）</strong>
                 <span>重新整理掃描，重啟所有專案 server 與 ATM</span>
@@ -84,6 +84,19 @@
               <button class="restart-menu-item" data-restart-action="atm-terminal" type="button" role="menuitem">
                 <strong>重啟 ATM 終端</strong>
                 <span>只重新開啟 ATM 終端，不重啟 ATM server</span>
+              </button>
+              <div class="restart-menu-divider" role="separator"></div>
+              <button class="restart-menu-item" data-connection-off-all="local" type="button" role="menuitem" title="ATM 自己的入口不會被關閉">
+                <strong>關閉所有專案 Local</strong>
+                <span>停止所有專案的開發伺服器（LAN／Tailscale 一起斷，ATM 除外）</span>
+              </button>
+              <button class="restart-menu-item" data-connection-off-all="lan" type="button" role="menuitem" title="ATM 自己的入口不會被關閉">
+                <strong>關閉所有專案 LAN</strong>
+                <span>改綁 127.0.0.1 並重啟，內網其他裝置將連不到</span>
+              </button>
+              <button class="restart-menu-item" data-connection-off-all="tailscale" type="button" role="menuitem" title="ATM 自己的入口不會被關閉">
+                <strong>關閉所有專案 Tailscale（https）</strong>
+                <span>移除 tailscale serve 路由，開發伺服器繼續執行</span>
               </button>
             </div>
           </div>

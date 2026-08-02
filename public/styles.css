@@ -350,9 +350,37 @@ h1 {
   transition: background 150ms ease;
 }
 
+.restart-menu-item[hidden] {
+  display: none;
+}
+
+/* 封存終端功能時,終端相關項目維持在清單上但鎖定:點下去只會跳封存說明。 */
+.restart-menu-item.is-locked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.restart-menu-item.is-locked strong::after {
+  content: '（已封存）';
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .restart-menu-item:hover,
 .restart-menu-item:focus-visible {
   background: var(--surface-muted);
+}
+
+.restart-menu-divider {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--border);
+}
+
+/* 這兩個入口封存時靠 hidden 屬性收起,需要壓過各自的 display: inline-flex。 */
+#pipelineOpenButton[hidden],
+#openAtmTerminalButton[hidden] {
+  display: none;
 }
 
 .restart-menu-item strong {
