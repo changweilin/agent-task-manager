@@ -1902,8 +1902,11 @@ function mergeProjectBranches(branches = [], rootPath) {
       continue;
     }
 
+    // 以 rootPath 為基準過濾：branch 一定住在專案底下，所以隱藏資料夾規則在這裡適用，
+    // 而且能把「上一次掃描就存進 dev-projects.json 的 .claude/worktrees/*」一併清掉 —
+    // 掃描階段跳過它們只能防新增，舊的要靠這裡才會消失。
     const branchPath = normalizePath(branch.path);
-    if (shouldIgnore(branchPath) || isSamePath(rootPath, branchPath)) {
+    if (shouldIgnore(branchPath, rootPath) || isSamePath(rootPath, branchPath)) {
       continue;
     }
 
