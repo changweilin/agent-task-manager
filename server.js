@@ -38,8 +38,6 @@ const DEFAULT_BASE_PORT = 5173;
 const DEFAULT_MANAGER_PORT = 8787;
 const LOG_START_MARKER = '[Agent Task Manager (ATM)]';
 const DEFAULT_HEALTH_FAILURE_THRESHOLD = 3;
-const PAGE_SCAN_TTL_MS = 30000;
-const PROJECT_FILE_PORT_TTL_MS = 30000;
 const TAILSCALE_SERVE_SCAN_TTL_MS = 30000;
 const TAILSCALE_IP_TTL_MS = 30000;
 const TAILSCALE_DNS_LOOKUP_TTL_MS = 300000;
@@ -109,8 +107,8 @@ const terminalSessions = new Map();
 let aiQuotaProbeInFlight = null;
 const mobileInstallLocks = new Set();
 const restartLocks = new Set();
-const pageScanCache = new Map();
-const projectFilePortCache = new Map();
+const projectScanCache = new Map();
+let projectScanSignature = '';
 const jsonReadCache = new Map();
 const JSON_READ_CACHE_LIMIT = 256;
 let tailscaleServeCache = { checkedAt: 0, routes: [] };
@@ -480,6 +478,44 @@ function writeJson(filePath, value) {
   } catch (error) {
     jsonReadCache.delete(filePath);
   }
+}
+
+// 專案的「靜態」掃描結果 — 頁面路由、設定檔裡寫死的 port、Android build plan、
+// 爬蟲 manifest — 每次輪詢重算要走上百個檔案，但答案只有在磁碟上的專案本身變動時
+// 才會變。改成只在三種時機重算：伺服器啟動後第一次載入（cache 是空的）、專案清單/
+// 路徑/dev 指令變動（syncProjectScanCache 偵測到簽章不同）、使用者按重新掃描
+// （refreshDiscoveredProjects 直接清空）。
+// 代價：手改 .env / vite.config 的 port、或新增頁面檔案，ATM 不會自己發現，要按重新掃描。
+function cachedProjectScan(cacheKey, compute) {
+  if (projectScanCache.has(cacheKey)) {
+    return projectScanCache.get(cacheKey);
+  }
+
+  const value = compute();
+  projectScanCache.set(cacheKey, value);
+  return value;
+}
+
+function invalidateProjectScanCache() {
+  projectScanCache.clear();
+  projectScanSignature = '';
+}
+
+// 專案本體或任一 branch 的路徑/框架/dev 指令變了就整批作廢 — 這些欄位一變，
+// 底下的頁面與 port 掃描結果也不能再用。port 不列入簽章：改 port 只寫
+// dev-projects.json，不會改動專案磁碟上的設定檔。
+function syncProjectScanCache(projects) {
+  const signature = (Array.isArray(projects) ? projects : [])
+    .flatMap((project) => [project, ...(Array.isArray(project?.branches) ? project.branches : [])])
+    .map((target) => `${target?.path || ''}|${target?.framework || ''}|${target?.devScript || ''}`)
+    .join('\n');
+
+  if (signature === projectScanSignature) {
+    return;
+  }
+
+  projectScanCache.clear();
+  projectScanSignature = signature;
 }
 
 function getConfig() {
@@ -1103,6 +1139,10 @@ function manifestMentionsCrawlerTooling(projectPath) {
     return false;
   }
 
+  return cachedProjectScan(`crawler|${normalizePath(projectPath)}`, () => scanManifestForCrawlerTooling(projectPath));
+}
+
+function scanManifestForCrawlerTooling(projectPath) {
   const manifestFiles = ['package.json', 'requirements.txt', 'pyproject.toml', 'Pipfile'];
   for (const manifestFile of manifestFiles) {
     try {
@@ -1280,7 +1320,7 @@ function collectFiles(rootPath, extensions, options = {}) {
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const entryPath = path.join(current.dirPath, entry.name);
-      if (shouldIgnore(entryPath)) {
+      if (shouldIgnore(entryPath, rootPath)) {
         continue;
       }
 
@@ -1561,12 +1601,13 @@ function detectPortFromProjectFiles(project) {
   // Every status poll resolves each project and branch several times over, and each pass
   // stat'd ~250 candidate config files — thousands of filesystem probes per second once a
   // browser tab is open. A port written in .env/config.py does not change that fast.
-  const cacheKey = `${normalizePath(project.path)}|${project.name || ''}`;
-  const cached = projectFilePortCache.get(cacheKey);
-  if (cached && Date.now() - cached.checkedAt < PROJECT_FILE_PORT_TTL_MS) {
-    return cached.port;
-  }
+  return cachedProjectScan(
+    `file-port|${normalizePath(project.path)}|${project.name || ''}`,
+    () => computePortFromProjectFiles(project),
+  );
+}
 
+function computePortFromProjectFiles(project) {
   const matches = [];
   const patterns = [
     /(?:_int_env|os\.getenv)\(\s*["']([A-Z][A-Z0-9_]*PORT)["']\s*,\s*["']?(\d{1,5})["']?/g,
@@ -1594,10 +1635,8 @@ function detectPortFromProjectFiles(project) {
     }
   }
 
-  const port = matches
+  return matches
     .sort((left, right) => right.score - left.score)[0]?.port || null;
-  projectFilePortCache.set(cacheKey, { checkedAt: Date.now(), port });
-  return port;
 }
 
 function discoverSourceDeclaredPages(project, pagesByPath) {
@@ -1642,12 +1681,13 @@ function discoverSourceDeclaredPages(project, pagesByPath) {
 }
 
 function discoverProjectPages(project) {
-  const cacheKey = `${normalizePath(project.path)}|${project.framework}|${project.devScript}`;
-  const cached = pageScanCache.get(cacheKey);
-  if (cached && Date.now() - cached.checkedAt < PAGE_SCAN_TTL_MS) {
-    return cached.pages;
-  }
+  return cachedProjectScan(
+    `pages|${normalizePath(project.path)}|${project.framework}|${project.devScript}`,
+    () => computeProjectPages(project),
+  );
+}
 
+function computeProjectPages(project) {
   const pagesByPath = new Map();
   try {
     discoverStaticHtmlPages(project, pagesByPath);
@@ -1657,7 +1697,7 @@ function discoverProjectPages(project) {
     // Page discovery is best-effort; project status should stay available.
   }
 
-  const pages = [...pagesByPath.values()]
+  return [...pagesByPath.values()]
     .sort((left, right) => {
       if (left.path === '/') {
         return -1;
@@ -1668,13 +1708,26 @@ function discoverProjectPages(project) {
       return left.path.localeCompare(right.path, 'en', { numeric: true, sensitivity: 'base' });
     })
     .slice(0, PAGE_SCAN_MAX_PAGES);
-
-  pageScanCache.set(cacheKey, { checkedAt: Date.now(), pages });
-  return pages;
 }
 
-function shouldIgnore(entryPath) {
-  return entryPath.split(/[\\/]+/).some((segment) => IGNORED_DIRS.has(segment));
+// 掃描時不進入隱藏資料夾（.claude / .codex / .chatgpt / .github / .git ...）。
+// 隱藏規則只作用在「相對於 baseDir 的片段」:掃描根目錄本身可能就住在隱藏目錄下
+// （ATM 自己的 worktree 就在 .claude/worktrees/*），拿絕對路徑比對會讓整個根目錄
+// 底下的東西全被忽略。沒有 baseDir 的呼叫端是在過濾既有的專案路徑而不是遞迴掃描，
+// 那裡只看具名黑名單，否則住在隱藏目錄下的專案會被靜默丟掉。
+function shouldIgnore(entryPath, baseDir) {
+  if (!baseDir) {
+    return String(entryPath).split(/[\\/]+/).some((segment) => IGNORED_DIRS.has(segment));
+  }
+
+  const relativePath = path.relative(baseDir, entryPath);
+  if (!relativePath || relativePath.startsWith('..')) {
+    return false;
+  }
+
+  return relativePath
+    .split(/[\\/]+/)
+    .some((segment) => IGNORED_DIRS.has(segment) || (segment.startsWith('.') && segment.length > 1));
 }
 
 function hasProjectMarker(projectPath) {
@@ -1718,7 +1771,7 @@ function discoverProjectDirs(rootPath) {
 
     for (const entry of entries) {
       const entryPath = path.join(current, entry.name);
-      if (shouldIgnore(entryPath)) {
+      if (shouldIgnore(entryPath, rootPath)) {
         continue;
       }
 
@@ -1785,7 +1838,14 @@ function detectProjectFramework(projectPath, packageJson, devScript) {
   return 'folder';
 }
 
+// getConfig() 走 collapseProjectsToRoots，每次輪詢都會對每個根目錄重新嗅探一次
+// （package.json / pyproject / 框架標記 / .git，約 30 次 existsSync × 根目錄數 × 每秒）。
+// 回傳淺拷貝：呼叫端會 spread 出新物件，但不要讓任何人直接改到快取裡那份。
 function projectFromDirectory(projectPath) {
+  return { ...cachedProjectScan(`dir|${normalizePath(projectPath)}`, () => scanProjectDirectory(projectPath)) };
+}
+
+function scanProjectDirectory(projectPath) {
   const packageJsonPath = path.join(projectPath, 'package.json');
   const packageJson = fs.existsSync(packageJsonPath) ? readJson(packageJsonPath, null) : null;
   const packageName = packageJson?.name || '';
@@ -1900,6 +1960,8 @@ async function refreshDiscoveredProjects({ roots = null, basePort = null, config
     ? roots.map((root) => normalizePath(root))
     : config.defaultRoots;
   const nextBasePort = Number(basePort || config.basePort || DEFAULT_BASE_PORT);
+  // 「重新掃描」是使用者要求重讀磁碟的唯一入口 — 先丟掉快取，這輪才會真的重掃。
+  invalidateProjectScanCache();
   const discovered = discoverProjects(nextRoots);
   const projects = await allocateAvailablePorts(
     mergeDiscoveredWithExisting(discovered, config.projects, nextBasePort),
@@ -5275,7 +5337,7 @@ function hasTerminalDirectoryChildren(projectRoot, dirPath) {
         }
 
         const childPath = path.join(dirPath, entry.name);
-        return !shouldIgnore(childPath) && isPathInside(projectRoot, childPath);
+        return !shouldIgnore(childPath, projectRoot) && isPathInside(projectRoot, childPath);
       });
   } catch (error) {
     return false;
@@ -5307,7 +5369,7 @@ function getTerminalDirectoryChildren(project, relativePath = '') {
     .filter((entry) => entry.isDirectory())
     .sort((left, right) => left.name.localeCompare(right.name))
     .map((entry) => path.join(dirPath, entry.name))
-    .filter((childPath) => !shouldIgnore(childPath) && isPathInside(projectRoot, childPath))
+    .filter((childPath) => !shouldIgnore(childPath, projectRoot) && isPathInside(projectRoot, childPath))
     .map((childPath) => terminalDirectoryNode(projectRoot, childPath, path.basename(childPath)));
 
   return {
@@ -6255,6 +6317,7 @@ async function getStatusPayload(request = null) {
   const localRequest = request ? isLocalRequest(request) : true;
   const terminalReadOnly = !localRequest;
   const normalizedProjects = normalizeProjects(config.projects, config.basePort);
+  syncProjectScanCache(normalizedProjects);
   const resolvedProjects = normalizedProjects.map((project) => {
     const entry = getStateEntryByPath(state, project.path);
     const running = Boolean(entry?.pid && processIsRunning(entry.pid));
@@ -7006,7 +7069,7 @@ async function handleApi(request, response, url) {
     const basePort = Number(body.basePort || currentConfig.basePort || DEFAULT_BASE_PORT);
     if (body.clean === true) {
       // Clear cached discovery info so the whole folder is re-scanned from scratch.
-      pageScanCache.clear();
+      // 專案掃描快取由 refreshDiscoveredProjects 統一清掉，這裡只補 tailscale 路由。
       tailscaleServeCache = { checkedAt: 0, routes: [] };
     }
     await refreshDiscoveredProjects({ roots, basePort, config: currentConfig });
@@ -7577,13 +7640,17 @@ function getMobileInstallStatus(project, request) {
   };
 }
 
+// 只有輪詢用的摘要走快取；使用者真的要建置/安裝時（getMobileInstallStatus、
+// runMobileBuildInstall）仍即時重算 plan，避免拿舊的 gradlew 路徑去執行。
 function getMobileInstallSummary(project) {
-  const plan = getAndroidBuildPlan(project);
-  return {
-    supported: Boolean(plan.supported),
-    reason: plan.reason || '',
-    buildCommand: plan.label || '',
-  };
+  return cachedProjectScan(`android|${normalizePath(project?.path || '')}`, () => {
+    const plan = getAndroidBuildPlan(project);
+    return {
+      supported: Boolean(plan.supported),
+      reason: plan.reason || '',
+      buildCommand: plan.label || '',
+    };
+  });
 }
 
 function runProcessCapture(command, args, options = {}) {
