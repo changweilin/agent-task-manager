@@ -2,7 +2,7 @@
 
 ## 1. 專案定位與架構
 - 本機 dev server 管理台：掃描多專案的 `npm run dev`，集中啟動/停止/重啟、log、port 自動分配（5173 起）、Tailscale/LAN 分享、node-pty 終端、AI agent pipeline 編排。管理台 port `8787`。
-- 技術棧：純 Node.js ≥18。**無 TypeScript、無 bundler、無框架、無測試、無 linter。** 依賴僅 `ws`、`node-pty`、`@xterm/*`。
+- 技術棧：純 Node.js ≥18。**無 TypeScript、無 bundler、無框架、無測試框架、無 linter。** 依賴僅 `ws`、`node-pty`、`@xterm/*`；唯一的自動化驗證是零依賴的 `scripts/smoke.js`（見 §4）。
 - 全部邏輯集中在兩個巨型檔案 — 這是刻意設計，**MUST NOT** 未經指示拆檔或模組化重構：
   - `server.js`（~7,700 行）：單一 HTTP + WebSocket 伺服器、REST `/api/*`、PTY 終端、專案掃描、防火牆/Tailscale/ADB 輔助、自我重啟。
   - `public/app.js`（~11,000 行）：瀏覽器原生 ESM（直接 import `./vendor/xterm/*.mjs`），單一 `state` 物件 + `render*()` 全量重繪，1s poll `/api/status`。
@@ -15,7 +15,7 @@
 ### 程式碼品質與型別安全
 - **MUST** 沿用現有風格：server 端 CommonJS、client 端 ESM、`function` 宣告、早期 return。
 - **MUST NOT** 引入 TypeScript、build step、新 npm 依賴或前端框架 — 前端必須維持零建置、直接可被 server 服務。
-- 改動後 **MUST** 執行 `node --check server.js` 與 `node --check public/app.js`；這裡沒有測試套件，語法檢查 + 開頁手動驗證是唯一防線。
+- 改動後 **MUST** 執行 `npm test`（= `node --check` 兩檔 + `scripts/smoke.js`）；這裡沒有測試框架，語法檢查 + 冒煙測試 + 開頁手動驗證是全部的防線。新增不變量時 **SHOULD** 加進 `scripts/smoke.js`，**MUST NOT** 為此引入測試框架或新依賴。
 - 對外部程序的呼叫（spawn、pty、tailscale/adb CLI）**MUST** try/catch 並降級（參考檔頭 `pty = null` fallback）；單一專案異常 **MUST NOT** 讓 ATM server crash。
 
 ### 狀態管理與資料流
@@ -44,13 +44,16 @@
 ```sh
 npm run dev              # start ATM (node server.js) at http://127.0.0.1:8787
 npm run build:pages      # rebuild dist/ demo (flips DEMO flag, copies xterm vendor files)
-node --check server.js   # syntax gate — no test suite exists in this repo
-node --check public/app.js
+npm test                 # npm run check + npm run smoke — the only automated gate
+npm run check            # node --check server.js && node --check public/app.js
+npm run smoke            # boots a real server on a temp config; also rebuilds dist/
 rundev.bat               # Windows one-click launch
 .\dev-manager.ps1        # PowerShell CLI: scan/start/stop without the web UI
 ```
 - 環境變數：`DEV_DOCK_CONFIG` 覆寫 `dev-projects.json` 路徑；`ATM_RESTART=1` 僅供重啟替身程序使用，**MUST NOT** 手動設定；`ATM_TERMINALS=1` 解除「終端管理 / Pipeline 管理 / 記事本」的封存（見 §5）。
-- 標準驗證流程：`node --check` 兩檔 → `npm run dev` → 開 `http://127.0.0.1:8787` 手動走過改動路徑；涉及權限 gate 時，另以非 localhost 來源確認執行類 endpoint 回 `403`。
+- 標準驗證流程：`npm test` → `npm run dev` → 開 `http://127.0.0.1:8787` 手動走過改動路徑；涉及權限 gate 時，另以非 localhost 來源確認執行類 endpoint 回 `403`（冒煙測試無法偽造 socket 來源，這條只能手動驗）。
+- CI：`.github/workflows/ci.yml` 單一 workflow — `verify` job 在 windows/ubuntu 上跑 `npm ci --ignore-scripts` + `npm test`（終端功能封存時不需要 node-pty 原生建置）；`deploy` job 只在 main 的 push / 手動 dispatch 時跑 `npm run build:pages` 並發佈 GitHub Pages。PR 也會跑 `verify`。
+- `scripts/smoke.js` 目前守住：server 開得起來且 `/api/status` 合法、`isTrustedRequest` 擋掉 DNS rebinding / 跨站 Origin / `sec-fetch-site`、封存中的終端 API 與 WS 升級一律拒絕、靜態檔可服務、`dist/` 的 `AGENT_TASK_MANAGER_DEMO` 有翻成 `true` 且沒帶進 `mobile-install.js`。
 
 ## 5. 已封存功能
 - `[2026-08-02]` **終端管理 / Pipeline 管理 / 記事本**（同一個面板的三個分頁）目前**封存中**，開關為 `server.js` 的 `TERMINAL_FEATURES_ENABLED`（環境變數 `ATM_TERMINALS=1` 開啟）。起因是排查「ATM 執行時影響影片播放與系統穩定性」，這三者是 ATM 最重的部分（常駐 node-pty、WebSocket 串流、每秒輪詢、pipeline 送進 agent CLI 的長工作）。
