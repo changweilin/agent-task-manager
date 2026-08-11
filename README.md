@@ -72,8 +72,8 @@ npm.cmd run dev -- --host 0.0.0.0 --port 8787
 部署流程：
 
 1. 到 GitHub repository 的 **Settings → Pages**，將 Source 設為 **GitHub Actions**。
-2. 推送到 `main`，或到 Actions 手動執行 **Deploy GitHub Pages Demo** workflow。
-3. Workflow 會執行 `npm ci --ignore-scripts` 與 `npm run build:pages`，再把 `dist/` 上傳到 GitHub Pages。
+2. 推送到 `main`，或到 Actions 手動執行 **CI** workflow。
+3. Workflow 會先跑 `verify`（語法檢查 + 冒煙測試），通過後才執行 `npm run build:pages` 並把 `dist/` 上傳到 GitHub Pages。
 
 展示模式的隔離設計：
 
@@ -190,8 +190,11 @@ agent-task-manager/
 │  ├─ mobile-install.js       # 行動裝置 / APK 安裝相關前端輔助邏輯
 │  ├─ logo.svg                # 管理台標誌
 │  └─ favicon.svg             # 瀏覽器圖示
+├─ .github/workflows/
+│  └─ ci.yml                  # CI：語法檢查 + 冒煙測試，main 通過後部署 GitHub Pages 展示頁
 ├─ scripts/
-│  └─ build-pages.js          # 產出 GitHub Pages 靜態展示版
+│  ├─ build-pages.js          # 產出 GitHub Pages 靜態展示版
+│  └─ smoke.js                # 零依賴冒煙測試（開真的 server 驗來源信任、封存 API、展示版產物）
 ├─ dev-manager.ps1            # Windows PowerShell CLI，提供掃描、啟停、狀態、log、防火牆等指令
 ├─ dev-projects.json          # 專案來源、base port、Profile、健康檢查與專案清單設定
 ├─ package.json               # Node.js 專案資訊、指令與相依套件
@@ -207,6 +210,7 @@ agent-task-manager/
 - `server.js`：提供靜態檔案服務、REST API、WebSocket 終端通道、專案掃描、port 分配、狀態管理、log 讀取、健康檢查、Tailscale/LAN URL 偵測、防火牆輔助與 Android APK 安裝流程。
 - `public/app.js`：管理 Web UI 狀態、專案表格、篩選排序、Profile、log 面板、終端 modal、xterm.js 互動與使用者偏好。
 - `scripts/build-pages.js`：複製靜態前端與 xterm 前端資產到 `dist/`，並把展示模式開關設為啟用，供 GitHub Pages 使用。
+- `scripts/smoke.js`：`npm test` 的主體。用臨時設定檔啟動一個真的管理台，驗證 `/api/status`、請求來源信任檢查（Host / Origin / `sec-fetch-site`）、封存中的終端 API 與 WebSocket 升級是否確實被拒絕，最後重建 `dist/` 確認展示模式開關有被翻開。
 - `dev-manager.ps1`：提供不依賴瀏覽器的 CLI 操作，適合批次掃描、啟停專案、查看狀態與設定 Windows 防火牆。
 - `dev-projects.json`：保存預設掃描根目錄、base port、Profile、健康檢查設定與每個被管理專案的路徑、框架、dev script、port。
 
