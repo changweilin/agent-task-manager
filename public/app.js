@@ -48,6 +48,7 @@ const DEFAULT_DEMO_PAYLOAD = {
       ],
       healthFailures: 0,
       restartCount: 0,
+      gpu: { declared: true, signals: ['WebGPU（package.json）'], level: 'declared', processCount: 0, memoryMb: null },
       mobileInstall: { supported: false, reason: '展示資料不包含 Android build 流程。' },
     },
     {
@@ -65,6 +66,7 @@ const DEFAULT_DEMO_PAYLOAD = {
       ],
       healthFailures: 0,
       restartCount: 0,
+      gpu: { declared: false, signals: [], level: 'none', processCount: 0, memoryMb: null },
       mobileInstall: { supported: false, reason: '展示資料不包含 Android build 流程。' },
     },
     {
@@ -81,6 +83,7 @@ const DEFAULT_DEMO_PAYLOAD = {
       ],
       healthFailures: 2,
       restartCount: 1,
+      gpu: { declared: true, signals: ['PyTorch（requirements.txt）', 'CUDA（Dockerfile）'], level: 'active', processCount: 1, memoryMb: 3120 },
       mobileInstall: { supported: false, reason: '展示資料不包含 Android build 流程。' },
     },
   ],
@@ -188,6 +191,7 @@ function sanitizeDemoPayload(rawPayload = DEFAULT_DEMO_PAYLOAD) {
       tailscaleUrl: '',
       tailscaleIp: 'demo',
       terminalReadOnly: true,
+      gpuMonitor: { available: true, source: 'nvidia-smi', local: true, sampledAt: now },
     },
     config: {
       defaultRoots: ['/demo/workspace'],
@@ -242,6 +246,41 @@ async function demoApi(path, options = {}) {
   }
   if (url.pathname === '/api/terminal-preferences') {
     return method === 'GET' ? { saved: false } : { ok: true };
+  }
+  if (url.pathname === '/api/gpu') {
+    const levelOrder = { active: 0, declared: 1, none: 2 };
+    const projects = demoStatusPayload().projects
+      .map((project) => ({
+        name: project.name,
+        path: project.path,
+        ...(project.gpu || { declared: false, signals: [], level: 'none', processCount: 0, memoryMb: null }),
+      }))
+      .sort((left, right) => (levelOrder[left.level] ?? 9) - (levelOrder[right.level] ?? 9));
+    return {
+      available: true,
+      source: 'nvidia-smi',
+      checkedAt: new Date().toISOString(),
+      error: '',
+      devices: [{
+        index: 0,
+        name: 'Demo GPU 16GB',
+        utilization: 46,
+        memoryUsedMb: 5320,
+        memoryTotalMb: 16384,
+        temperature: 61,
+        powerWatts: 128,
+      }],
+      processes: projects
+        .filter((project) => project.level === 'active')
+        .map((project, index) => ({
+          pid: 4200 + index,
+          name: 'python.exe',
+          memoryMb: project.memoryMb,
+          projectName: project.name,
+          projectPath: project.path,
+        })),
+      projects,
+    };
   }
   if (url.pathname === '/api/ai-quotas') {
     return {
@@ -875,6 +914,12 @@ const state = {
   terminalOpencodeFlagDraft: '',
   terminalTabDrag: null,
   suppressTerminalTabClick: false,
+  gpuModalOpen: false,
+  gpuPayload: null,
+  gpuLoading: false,
+  gpuError: '',
+  gpuRequestId: 0,
+  gpuFocusProject: '',
   quotaModalOpen: false,
   quotaPayload: null,
   quotaLoading: false,
@@ -1019,6 +1064,16 @@ const elements = {
   terminalTabs: document.querySelector('#terminalTabs'),
   terminalWorkspace: document.querySelector('#terminalWorkspace'),
   terminalEmpty: document.querySelector('#terminalEmpty'),
+  gpuMonitorButton: document.querySelector('#gpuMonitorButton'),
+  gpuModal: document.querySelector('#gpuModal'),
+  closeGpuModal: document.querySelector('#closeGpuModal'),
+  backToHomeFromGpu: document.querySelector('#backToHomeFromGpu'),
+  refreshGpuButton: document.querySelector('#refreshGpuButton'),
+  gpuNote: document.querySelector('#gpuNote'),
+  gpuSummary: document.querySelector('#gpuSummary'),
+  gpuDevices: document.querySelector('#gpuDevices'),
+  gpuProjects: document.querySelector('#gpuProjects'),
+  gpuProcesses: document.querySelector('#gpuProcesses'),
   quotaModal: document.querySelector('#quotaModal'),
   closeQuotaModal: document.querySelector('#closeQuotaModal'),
   backToHomeFromQuota: document.querySelector('#backToHomeFromQuota'),
@@ -1643,6 +1698,62 @@ function roleBadgeHtml(role) {
   return '';
 }
 
+// 「查不到」在 payload 裡是 null，而 Number(null) 是 0 —— 少了這層轉換，未取樣的專案
+// 會顯示成 0 MB / 0 °C，看起來像是量到了。
+function gpuNumberValue(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function projectGpuInfo(project) {
+  const gpu = project?.gpu || {};
+  const level = ['active', 'declared', 'none'].includes(gpu.level) ? gpu.level : 'none';
+  return {
+    level,
+    declared: Boolean(gpu.declared),
+    signals: Array.isArray(gpu.signals) ? gpu.signals : [],
+    processCount: Number(gpu.processCount || 0),
+    memoryMb: gpuNumberValue(gpu.memoryMb),
+  };
+}
+
+function formatGpuMemory(memoryMb) {
+  const value = gpuNumberValue(memoryMb);
+  if (value === null) {
+    return '--';
+  }
+  return value >= 1024 ? `${(value / 1024).toFixed(1)} GB` : `${Math.round(value)} MB`;
+}
+
+// 警示燈：紅=正在吃 GPU、黃=宣告了 GPU 工具鏈但目前沒在用、灰=沒偵測到。
+// 紅燈只有在 GPU 面板取樣過（20 秒內）才會亮，其餘時間退回宣告狀態。
+function gpuLightHtml(project) {
+  const info = projectGpuInfo(project);
+  const labels = { active: '使用中', declared: '可能使用', none: '未使用' };
+  const detail = info.level === 'active'
+    ? `正在使用 GPU：${info.processCount} 個程序、VRAM ${formatGpuMemory(info.memoryMb)}`
+    : info.declared
+      ? `偵測到 GPU 工具鏈：${info.signals.join('、')}`
+      : '未偵測到 GPU 相依';
+
+  return `
+    <button
+      class="gpu-light gpu-light-${escapeHtml(info.level)}"
+      data-gpu-light
+      data-name="${escapeHtml(project.name)}"
+      type="button"
+      title="GPU ${labels[info.level]}${detail ? `\n${detail}` : ''}\n點擊查看 GPU 效能 / VRAM 使用量"
+      aria-label="${escapeHtml(project.name)} GPU ${labels[info.level]}，開啟 GPU 使用監控"
+    >
+      <span class="gpu-light-dot" aria-hidden="true"></span>
+      <span class="gpu-light-text">GPU</span>
+    </button>
+  `;
+}
+
 function getPageTargetDefinition(targetId) {
   return PAGE_LINK_TARGETS.find((target) => target.id === targetId) || PAGE_LINK_TARGETS[0];
 }
@@ -1849,7 +1960,7 @@ function renderProjectName(project, context = {}) {
       <div class="project-name">
         <div class="project-name-heading">
           <strong>${escapeHtml(project.name)}</strong>
-          ${roleBadgeHtml(project.role)}
+          <span class="project-name-badges">${roleBadgeHtml(project.role)}${gpuLightHtml(project)}</span>
           <button
             class="project-panel-toggle ${projectExpanded ? 'is-expanded' : ''}"
             data-panel-toggle
@@ -10142,6 +10253,231 @@ function syncQuotaRouteFromHash() {
   }
 }
 
+function syncGpuRouteFromHash() {
+  if (window.location.hash === '#gpu') {
+    openGpuMonitor({ syncHash: false, projectName: state.gpuFocusProject });
+  } else if (state.gpuModalOpen) {
+    hideGpuMonitor({ syncHash: false });
+  }
+}
+
+function syncModalRoutesFromHash() {
+  syncQuotaRouteFromHash();
+  syncGpuRouteFromHash();
+}
+
+const GPU_SOURCE_LABELS = {
+  'nvidia-smi': 'nvidia-smi',
+  'windows-counters': 'Windows 效能計數器',
+  none: '無可用來源',
+};
+const GPU_LEVEL_LABELS = {
+  active: '使用中',
+  declared: '可能使用',
+  none: '未使用',
+};
+
+function gpuMonitorInfo() {
+  return state.payload?.manager?.gpuMonitor || null;
+}
+
+function gpuMonitorIsLocal() {
+  const info = gpuMonitorInfo();
+  return !info || info.local !== false;
+}
+
+function gpuPercentText(value) {
+  const percent = gpuNumberValue(value);
+  return percent === null ? '--' : `${Math.round(percent)}%`;
+}
+
+function gpuMeterHtml(label, value, max, text) {
+  const current = gpuNumberValue(value);
+  const total = gpuNumberValue(max);
+  const ratio = current !== null && total !== null && total > 0
+    ? Math.max(0, Math.min(100, (current / total) * 100))
+    : 0;
+
+  return `
+    <div class="gpu-meter">
+      <div class="gpu-meter-head">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(text)}</strong>
+      </div>
+      <div class="gpu-meter-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(ratio)}" aria-label="${escapeHtml(label)}">
+        <span class="gpu-meter-fill" style="width: ${ratio.toFixed(1)}%"></span>
+      </div>
+    </div>
+  `;
+}
+
+function renderGpuDeviceCards(devices) {
+  if (!devices.length) {
+    return '<p class="gpu-empty">沒有讀到 GPU 裝置資料。</p>';
+  }
+
+  return devices.map((device) => `
+    <article class="gpu-device-card">
+      <div class="gpu-device-header">
+        <strong>${escapeHtml(device.name || 'GPU')}</strong>
+        <span>#${escapeHtml(String(device.index ?? 0))}</span>
+      </div>
+      ${gpuMeterHtml('GPU 使用率', device.utilization, 100, gpuPercentText(device.utilization))}
+      ${gpuMeterHtml(
+        'VRAM',
+        device.memoryUsedMb,
+        device.memoryTotalMb,
+        `${formatGpuMemory(device.memoryUsedMb)} / ${formatGpuMemory(device.memoryTotalMb)}`,
+      )}
+      <ul class="gpu-device-meta">
+        <li><span>溫度</span><strong>${gpuNumberValue(device.temperature) === null ? '--' : `${Math.round(gpuNumberValue(device.temperature))} °C`}</strong></li>
+        <li><span>功耗</span><strong>${gpuNumberValue(device.powerWatts) === null ? '--' : `${Math.round(gpuNumberValue(device.powerWatts))} W`}</strong></li>
+      </ul>
+    </article>
+  `).join('');
+}
+
+function renderGpuProjectTable(projects) {
+  if (!projects.length) {
+    return '<p class="gpu-empty">沒有專案資料。</p>';
+  }
+
+  const rows = projects.map((project) => {
+    const focused = project.name === state.gpuFocusProject ? 'is-focused' : '';
+    const signals = Array.isArray(project.signals) && project.signals.length ? project.signals.join('、') : '--';
+    return `
+      <tr class="${focused}">
+        <td><span class="gpu-light gpu-light-${escapeHtml(project.level)} is-static"><span class="gpu-light-dot" aria-hidden="true"></span><span class="gpu-light-text">${escapeHtml(GPU_LEVEL_LABELS[project.level] || project.level)}</span></span></td>
+        <td><strong>${escapeHtml(project.name)}</strong></td>
+        <td class="mono-muted">${escapeHtml(formatGpuMemory(project.memoryMb))}</td>
+        <td class="mono-muted">${escapeHtml(String(project.processCount || 0))}</td>
+        <td class="gpu-signal-cell" title="${escapeHtml(signals)}">${escapeHtml(signals)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <table class="gpu-table">
+      <thead>
+        <tr><th>狀態</th><th>專案</th><th>VRAM</th><th>程序</th><th>偵測訊號</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function renderGpuProcessTable(processes) {
+  if (!processes.length) {
+    return '<p class="gpu-empty">目前沒有程序在使用 GPU。</p>';
+  }
+
+  const rows = [...processes]
+    .sort((left, right) => (gpuNumberValue(right.memoryMb) || 0) - (gpuNumberValue(left.memoryMb) || 0))
+    .map((item) => `
+      <tr>
+        <td class="mono-muted">${escapeHtml(String(item.pid))}</td>
+        <td>${escapeHtml(item.name || 'process')}</td>
+        <td class="mono-muted">${escapeHtml(formatGpuMemory(item.memoryMb))}</td>
+        <td>${item.projectName ? escapeHtml(item.projectName) : '<span class="mono-muted">未歸屬</span>'}</td>
+      </tr>
+    `).join('');
+
+  return `
+    <table class="gpu-table">
+      <thead>
+        <tr><th>PID</th><th>程序</th><th>VRAM</th><th>專案</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function renderGpuMonitor() {
+  if (!state.gpuModalOpen) {
+    return;
+  }
+
+  const payload = state.gpuPayload;
+  const monitor = gpuMonitorInfo();
+  elements.refreshGpuButton.disabled = state.gpuLoading || !gpuMonitorIsLocal();
+
+  const source = payload?.source || monitor?.source || 'none';
+  elements.gpuNote.textContent = gpuMonitorIsLocal()
+    ? `取樣來源：${GPU_SOURCE_LABELS[source] || source}。只有打開這個面板時才會取樣，一般輪詢不會執行 GPU 查詢。`
+    : '遠端裝置只能看靜態偵測結果：GPU 取樣要執行本機指令，僅限本機操作。';
+
+  const checkedAt = payload?.checkedAt
+    ? new Intl.DateTimeFormat('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(payload.checkedAt))
+    : '--';
+  const errorText = state.gpuError || payload?.error || '';
+  elements.gpuSummary.innerHTML = `
+    <span>更新時間 ${escapeHtml(checkedAt)}</span>
+    ${state.gpuLoading ? '<span>取樣中…</span>' : ''}
+    ${errorText ? `<strong>${escapeHtml(errorText)}</strong>` : ''}
+  `;
+
+  elements.gpuDevices.innerHTML = renderGpuDeviceCards(Array.isArray(payload?.devices) ? payload.devices : []);
+  elements.gpuProjects.innerHTML = renderGpuProjectTable(Array.isArray(payload?.projects) ? payload.projects : []);
+  elements.gpuProcesses.innerHTML = renderGpuProcessTable(Array.isArray(payload?.processes) ? payload.processes : []);
+}
+
+async function loadGpuStats() {
+  if (state.gpuLoading) {
+    return;
+  }
+
+  if (!gpuMonitorIsLocal()) {
+    state.gpuError = 'GPU 取樣只在本機可用。';
+    renderGpuMonitor();
+    return;
+  }
+
+  const requestId = state.gpuRequestId + 1;
+  state.gpuRequestId = requestId;
+  state.gpuLoading = true;
+  state.gpuError = '';
+  renderGpuMonitor();
+
+  try {
+    const payload = await api('/api/gpu');
+    if (state.gpuRequestId === requestId) {
+      state.gpuPayload = payload;
+    }
+  } catch (error) {
+    if (state.gpuRequestId === requestId) {
+      state.gpuError = error.message;
+    }
+  } finally {
+    if (state.gpuRequestId === requestId) {
+      state.gpuLoading = false;
+      renderGpuMonitor();
+    }
+  }
+}
+
+function openGpuMonitor({ syncHash = true, projectName = '' } = {}) {
+  state.gpuFocusProject = projectName || '';
+  if (syncHash && window.location.hash !== '#gpu') {
+    window.location.hash = 'gpu';
+    return;
+  }
+
+  state.gpuModalOpen = true;
+  elements.gpuModal.hidden = false;
+  renderGpuMonitor();
+  loadGpuStats();
+}
+
+function hideGpuMonitor({ syncHash = true } = {}) {
+  state.gpuModalOpen = false;
+  state.gpuRequestId += 1;
+  state.gpuLoading = false;
+  elements.gpuModal.hidden = true;
+  if (syncHash && window.location.hash === '#gpu') {
+    history.pushState('', document.title, `${window.location.pathname}${window.location.search}`);
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -10201,6 +10537,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 elements.quotaMonitorButton.addEventListener('click', () => openQuotaMonitor());
+elements.gpuMonitorButton?.addEventListener('click', () => openGpuMonitor());
 elements.pipelineOpenButton.addEventListener('click', () => openPipelineManager());
 elements.openAtmTerminalButton?.addEventListener('click', () => {
   if (DEMO_MODE) {
@@ -10362,7 +10699,7 @@ window.addEventListener('blur', () => {
 });
 window.addEventListener('resize', renderColumnGroup);
 window.addEventListener('resize', () => window.requestAnimationFrame(updateRootPathMarquees));
-window.addEventListener('hashchange', syncQuotaRouteFromHash);
+window.addEventListener('hashchange', syncModalRoutesFromHash);
 window.addEventListener('beforeunload', cancelAiQuotaProbe);
 const handleMobileLayoutChange = () => {
   if (isMobileLayout()) {
@@ -10438,6 +10775,13 @@ elements.projectRows.addEventListener('click', (event) => {
       }
     }
     render();
+    return;
+  }
+
+  const gpuLightButton = event.target.closest('button[data-gpu-light]');
+  if (gpuLightButton) {
+    event.stopPropagation();
+    openGpuMonitor({ projectName: gpuLightButton.dataset.name });
     return;
   }
 
@@ -10542,6 +10886,14 @@ elements.startProfileButton.addEventListener('click', () => runProfileAction('st
 elements.stopProfileButton.addEventListener('click', () => runProfileAction('stop'));
 elements.restartProfileButton.addEventListener('click', () => runProfileAction('restart'));
 
+elements.closeGpuModal?.addEventListener('click', () => hideGpuMonitor());
+elements.backToHomeFromGpu?.addEventListener('click', () => hideGpuMonitor());
+elements.refreshGpuButton?.addEventListener('click', () => loadGpuStats());
+elements.gpuModal?.addEventListener('click', (event) => {
+  if (event.target === elements.gpuModal) {
+    hideGpuMonitor();
+  }
+});
 elements.closeQuotaModal.addEventListener('click', () => hideQuotaMonitor());
 elements.backToHomeFromQuota.addEventListener('click', () => hideQuotaMonitor());
 elements.refreshQuotaButton.addEventListener('click', () => loadAiQuotas());
@@ -11430,7 +11782,7 @@ state.terminalPipeline = readTerminalPipeline();
 state.terminalNotepad = readTerminalNotepad();
 applyTheme(readThemePreference());
 loadTablePreferences();
-syncQuotaRouteFromHash();
+syncModalRoutesFromHash();
 // 終端的開機流程移到第一次 /api/status 之後 —— 封存狀態是 server 說了算,在知道之前
 // 先讀工作區或拉共用設定,只會對已封存的 API 打出必然失敗的請求。
 loadStatus().then(() => {
@@ -11448,6 +11800,10 @@ setInterval(() => {
     return;
   }
   loadStatus({ silent: true });
+  // GPU 取樣掛在既有的狀態 tick 上：面板開著才取樣，關掉就完全不執行 GPU 查詢。
+  if (state.gpuModalOpen) {
+    loadGpuStats();
+  }
 }, 6000);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {

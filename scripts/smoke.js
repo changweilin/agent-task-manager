@@ -173,6 +173,20 @@ async function runServerChecks() {
     check('status payload has projects[]', Array.isArray(payload?.projects));
     check('terminal features report archived', payload?.manager?.terminalFeatures === false, String(payload?.manager?.terminalFeatures));
 
+    check('status payload reports gpu monitor', typeof payload?.manager?.gpuMonitor?.available === 'boolean', JSON.stringify(payload?.manager?.gpuMonitor));
+
+    // GPU 取樣是 spawn 外部指令的 endpoint：沒有 GPU / 沒有 nvidia-smi 的機器（CI）也
+    // 必須快速回 200 + available:false，不能卡住或炸掉。
+    const gpu = await request(port, { path: '/api/gpu' });
+    let gpuPayload = null;
+    try {
+      gpuPayload = JSON.parse(gpu.body);
+    } catch (error) {
+      gpuPayload = null;
+    }
+    check('GET /api/gpu → 200 JSON', gpu.status === 200 && Boolean(gpuPayload), `got ${gpu.status}`);
+    check('gpu payload degrades gracefully', typeof gpuPayload?.available === 'boolean' && Array.isArray(gpuPayload?.devices) && Array.isArray(gpuPayload?.projects), gpu.body.slice(0, 120));
+
     const rebind = await request(port, { path: '/api/status', headers: { host: 'evil.example.com' } });
     check('untrusted Host → 403', rebind.status === 403, `got ${rebind.status}`);
 

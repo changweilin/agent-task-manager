@@ -1169,6 +1169,85 @@ function projectRoleForTarget(target) {
   return looksLikeBackendTarget(target) ? 'backend' : 'frontend';
 }
 
+// 工具鏈只要出現在 manifest 或啟動指令裡，這個專案跑起來就有機會吃 GPU。這是靜態
+// 宣告偵測（點亮警示燈的黃燈），真正的佔用量要靠 /api/gpu 取樣（見 getGpuSample）。
+const GPU_SIGNAL_PATTERNS = [
+  { label: 'CUDA', pattern: /\b(cuda|cudnn|nvcc|cuda-toolkit|cuda-runtime)\b/i },
+  { label: 'NVIDIA', pattern: /\b(nvidia|nvidia-smi|nvidia-docker|tensorrt)\b/i },
+  { label: 'PyTorch', pattern: /\b(torch|torchvision|torchaudio|pytorch|pytorch-lightning|torch-directml)\b/i },
+  { label: 'TensorFlow', pattern: /(\btensorflow(-gpu)?\b|@tensorflow\/tfjs-node-gpu)/i },
+  { label: 'JAX', pattern: /\b(jax|jaxlib)\b/i },
+  { label: 'ONNX Runtime', pattern: /\bonnxruntime-(gpu|directml)\b/i },
+  { label: 'CuPy', pattern: /\bcupy(-cuda\d+)?\b/i },
+  { label: 'Transformers', pattern: /\b(transformers|diffusers|accelerate|bitsandbytes|xformers|peft|vllm|sentence-transformers)\b/i },
+  { label: 'Whisper', pattern: /\b(whisper|faster-whisper|whisperx)\b/i },
+  { label: 'llama.cpp / Ollama', pattern: /(\b(llama-cpp-python|node-llama-cpp|ollama)\b|llama\.cpp)/i },
+  { label: 'Ultralytics', pattern: /\b(ultralytics|mmdetection|detectron2)\b/i },
+  { label: '影像生成', pattern: /\b(comfyui|stable-diffusion|automatic1111|invokeai)\b/i },
+  { label: 'MediaPipe', pattern: /\bmediapipe\b/i },
+  { label: 'DirectML / ROCm', pattern: /\b(directml|rocm|hip-python)\b/i },
+  { label: 'WebGPU', pattern: /(\bgpu\.js\b|@webgpu\/types|\bwebgpu\b)/i },
+  { label: 'GPU 旗標', pattern: /(--gpus?\b|--device[= ]+(cuda|gpu)|CUDA_VISIBLE_DEVICES|gpus:\s*all)/i },
+];
+const GPU_MANIFEST_FILES = [
+  'package.json',
+  'requirements.txt',
+  'pyproject.toml',
+  'Pipfile',
+  'environment.yml',
+  'Dockerfile',
+  'docker-compose.yml',
+  'docker-compose.yaml',
+];
+const GPU_MANIFEST_MAX_BYTES = 128 * 1024;
+
+function addGpuSignals(text, source, signals, seen) {
+  if (!text) {
+    return;
+  }
+
+  for (const { label, pattern } of GPU_SIGNAL_PATTERNS) {
+    if (seen.has(label) || !pattern.test(text)) {
+      continue;
+    }
+    seen.add(label);
+    signals.push({ label, source });
+  }
+}
+
+function scanManifestForGpuTooling(projectPath) {
+  const signals = [];
+  const seen = new Set();
+
+  for (const fileName of GPU_MANIFEST_FILES) {
+    try {
+      const manifestPath = path.join(projectPath, fileName);
+      if (!fs.existsSync(manifestPath)) {
+        continue;
+      }
+      addGpuSignals(fs.readFileSync(manifestPath, 'utf8').slice(0, GPU_MANIFEST_MAX_BYTES), fileName, signals, seen);
+    } catch (error) {
+      // Best-effort manifest sniffing; ignore unreadable files.
+    }
+  }
+
+  return signals;
+}
+
+// 回傳的陣列是 cachedProjectScan 拿來的快取值的複本 —— 直接 push 進去會把後續每次
+// 輪詢的結果都汙染成越積越多的訊號。
+function projectGpuSignals(project) {
+  const projectPath = project?.path;
+  const cached = projectPath
+    ? cachedProjectScan(`gpu|${normalizePath(projectPath)}`, () => scanManifestForGpuTooling(projectPath))
+    : [];
+  const signals = cached.slice();
+  const seen = new Set(signals.map((signal) => signal.label));
+  addGpuSignals(String(project?.devScript || ''), '啟動指令', signals, seen);
+
+  return signals;
+}
+
 function normalizeUrlPath(routePath) {
   const raw = String(routePath || '/').trim().replace(/\\/g, '/');
   if (!raw || raw === '/') {
@@ -5178,6 +5257,558 @@ function cancelAiQuotaPayload() {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// GPU 取樣
+//
+// 取樣只在有人打開 GPU 面板時發生（GET /api/gpu）。/api/status 只會讀最近一次取樣
+// 的結果、絕不主動 spawn —— 在每次輪詢裡多開一個 nvidia-smi / PowerShell 會直接把
+// 「狀態輪詢拖累影片播放」重演一次。
+// 兩條取樣路徑：
+//   1. nvidia-smi —— 有裝 NVIDIA 驅動就用它，能拿到使用率、VRAM 總量與每個程序的
+//      VRAM。Windows WDDM 下 per-process VRAM 常常回 [N/A]，解析時一律降級為 null。
+//   2. Windows 效能計數器（PowerShell）—— AMD/Intel 或沒有 nvidia-smi 時的後援，
+//      拿 GPU Engine 使用率與 GPU Process Memory 的 per-PID 專用記憶體。
+// ---------------------------------------------------------------------------
+const GPU_SAMPLE_TTL_MS = 3000;
+// /api/status 只採用這個時間內的取樣結果 —— 再舊就當作「沒有即時資料」，警示燈退回
+// 靜態宣告偵測，不會停在一個早就結束的執行狀態上。
+const GPU_SAMPLE_FRESH_MS = 20000;
+const GPU_TOOL_TTL_MS = 5 * 60 * 1000;
+const GPU_PROBE_TIMEOUT_MS = 10000;
+const GPU_COUNTER_TIMEOUT_MS = 20000;
+const GPU_PROBE_OUTPUT_LIMIT = 4 * 1024 * 1024;
+const GPU_PROCESS_ANCESTOR_HOPS = 12;
+let gpuToolCache = { checkedAt: 0, tool: null };
+let gpuSampleCache = { checkedAt: 0, payload: null };
+let gpuSampleInFlight = null;
+
+// Windows 的取樣一律走同一支 PowerShell（一次 spawn 拿到 per-PID VRAM + 程序表），
+// 需要裝置資料時才多帶 GPU Engine / 介面卡那一段 —— 裝置資料有 nvidia-smi 就用它的，
+// 那條路徑快得多也準得多。
+const GPU_PS_PREFIX = "$ErrorActionPreference='SilentlyContinue'";
+const GPU_PS_PROCESS_MEMORY = "$procMem=@();try{$m=Get-Counter '\\GPU Process Memory(*)\\Dedicated Usage' -ErrorAction Stop;$procMem=@($m.CounterSamples|Where-Object{$_.CookedValue -gt 0}|ForEach-Object{[pscustomobject]@{instance=$_.InstanceName;value=[double]$_.CookedValue}})}catch{}";
+const GPU_PS_PROCESS_TABLE = '$procs=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue|Select-Object ProcessId,ParentProcessId,Name,CommandLine)';
+const GPU_PS_DEVICES = [
+  '$engines=@()',
+  // GPU Engine 是速率計數器，第一筆取樣通常是 0，所以固定取兩筆用後面那筆。
+  "try{$s=Get-Counter '\\GPU Engine(*)\\Utilization Percentage' -SampleInterval 1 -MaxSamples 2 -ErrorAction Stop;$engines=@($s[-1].CounterSamples|Where-Object{$_.CookedValue -gt 0}|ForEach-Object{[pscustomobject]@{instance=$_.InstanceName;value=[math]::Round([double]$_.CookedValue,2)}})}catch{}",
+  '$adapters=@(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue|ForEach-Object{[pscustomobject]@{name=$_.Name}})',
+  '$total=0',
+  // AdapterRAM 在 4GB 以上會溢位，改讀驅動類別下的 qwMemorySize。
+  "try{Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction Stop|ForEach-Object{$v=(Get-ItemProperty -Path $_.PSPath -Name 'HardwareInformation.qwMemorySize' -ErrorAction SilentlyContinue).'HardwareInformation.qwMemorySize';if($v -and $v -gt $total){$total=[double]$v}}}catch{}",
+].join(';');
+
+function buildWindowsGpuScript(includeDevices) {
+  const parts = [GPU_PS_PREFIX, GPU_PS_PROCESS_MEMORY, GPU_PS_PROCESS_TABLE];
+  if (includeDevices) {
+    parts.push(GPU_PS_DEVICES);
+    parts.push('[pscustomobject]@{engines=$engines;adapters=$adapters;memoryTotalBytes=$total;processMemory=$procMem;processes=$procs}|ConvertTo-Json -Depth 3 -Compress');
+  } else {
+    parts.push('[pscustomobject]@{processMemory=$procMem;processes=$procs}|ConvertTo-Json -Depth 3 -Compress');
+  }
+
+  return parts.join(';');
+}
+
+function resolveGpuTool() {
+  const now = Date.now();
+  if (gpuToolCache.tool && now - gpuToolCache.checkedAt < GPU_TOOL_TTL_MS) {
+    return gpuToolCache.tool;
+  }
+
+  const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+  const nvidiaSmi = findExecutable('nvidia-smi')
+    || (process.platform === 'win32' ? findExecutable(path.join(systemRoot, 'System32', 'nvidia-smi.exe')) : null);
+
+  let tool = { source: 'none', executable: '' };
+  if (nvidiaSmi) {
+    tool = { source: 'nvidia-smi', executable: nvidiaSmi };
+  } else if (process.platform === 'win32') {
+    const powershell = findExecutable('powershell.exe');
+    if (powershell) {
+      tool = { source: 'windows-counters', executable: powershell };
+    }
+  }
+
+  gpuToolCache = { checkedAt: now, tool };
+  return tool;
+}
+
+function runGpuProbeCommand(executable, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let child = null;
+    try {
+      const spawnCommand = buildSpawnCommand(executable, args);
+      child = spawn(spawnCommand.command, spawnCommand.args, {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      resolve({ ok: false, stdout: '', error: error.message });
+      return;
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch (error) {
+        // Already gone.
+      }
+      finish({ ok: false, stdout, error: 'GPU 查詢逾時' });
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      if (stdout.length < GPU_PROBE_OUTPUT_LIMIT) {
+        stdout += chunk;
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      if (stderr.length < 8192) {
+        stderr += chunk;
+      }
+    });
+    child.on('error', (error) => finish({ ok: false, stdout: '', error: error.message }));
+    child.on('close', (code) => finish({
+      ok: code === 0,
+      stdout,
+      error: code === 0 ? '' : (stderr.trim().split(/\r?\n/)[0] || `結束碼 ${code}`),
+    }));
+  });
+}
+
+// nvidia-smi 對「查不到」有一整排寫法（[N/A]、Not Supported、Insufficient Permissions），
+// 全部降級成 null，讓前端顯示 `--` 而不是 0。
+function gpuNumber(value) {
+  const text = String(value ?? '').trim();
+  if (!text || /^\[?(n\/a|not supported|insufficient permissions)/i.test(text)) {
+    return null;
+  }
+  const number = Number(text);
+  return Number.isFinite(number) ? number : null;
+}
+
+function parseGpuCsvLines(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(',').map((cell) => cell.trim()));
+}
+
+async function sampleNvidiaSmiDevices(executable) {
+  const result = await runGpuProbeCommand(
+    executable,
+    ['--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw', '--format=csv,noheader,nounits'],
+    GPU_PROBE_TIMEOUT_MS,
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error || 'nvidia-smi 查詢失敗', devices: [] };
+  }
+
+  return {
+    ok: true,
+    error: '',
+    devices: parseGpuCsvLines(result.stdout).map((cells, index) => ({
+      index: gpuNumber(cells[0]) ?? index,
+      name: cells[1] || 'GPU',
+      utilization: gpuNumber(cells[2]),
+      memoryUsedMb: gpuNumber(cells[3]),
+      memoryTotalMb: gpuNumber(cells[4]),
+      temperature: gpuNumber(cells[5]),
+      powerWatts: gpuNumber(cells[6]),
+    })),
+  };
+}
+
+async function sampleNvidiaSmiProcesses(executable) {
+  const result = await runGpuProbeCommand(
+    executable,
+    ['--query-compute-apps=pid,process_name,used_gpu_memory', '--format=csv,noheader,nounits'],
+    GPU_PROBE_TIMEOUT_MS,
+  );
+  if (!result.ok) {
+    return [];
+  }
+
+  return parseGpuCsvLines(result.stdout)
+    .map((cells) => ({
+      pid: gpuNumber(cells[0]),
+      name: path.basename(String(cells[1] || '')) || '',
+      memoryMb: gpuNumber(cells[2]),
+    }))
+    .filter((item) => Number.isInteger(item.pid) && item.pid > 0);
+}
+
+// `pid_12345_luid_0x00000000_0x0000ABCD_phys_0_eng_0_engtype_3D`
+function gpuCounterInstancePid(instance) {
+  const match = String(instance || '').match(/^pid_(\d+)_/i);
+  return match ? Number(match[1]) : null;
+}
+
+// 一次 spawn 拿回 per-PID 專用 VRAM + Win32_Process 全表（歸屬要用），需要時再加上
+// 裝置資料。
+async function sampleWindowsGpu(executable, { includeDevices = false } = {}) {
+  const result = await runGpuProbeCommand(
+    executable,
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', buildWindowsGpuScript(includeDevices)],
+    includeDevices ? GPU_COUNTER_TIMEOUT_MS : GPU_PROBE_TIMEOUT_MS,
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error || 'Windows GPU 計數器讀取失敗', devices: [], processes: [], table: [] };
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch (error) {
+    return { ok: false, error: 'Windows GPU 計數器輸出無法解析', devices: [], processes: [], table: [] };
+  }
+
+  const memoryByPid = new Map();
+  for (const item of Array.isArray(parsed?.processMemory) ? parsed.processMemory : []) {
+    const pid = gpuCounterInstancePid(item?.instance);
+    const bytes = Number(item?.value) || 0;
+    if (!Number.isInteger(pid) || pid <= 0 || bytes <= 0) {
+      continue;
+    }
+    memoryByPid.set(pid, (memoryByPid.get(pid) || 0) + bytes);
+  }
+
+  const table = (Array.isArray(parsed?.processes) ? parsed.processes : []).map(normalizeProcessTableRow).filter(Boolean);
+  const nameByPid = new Map(table.map((row) => [row.pid, row.name]));
+  const processes = [...memoryByPid.entries()].map(([pid, bytes]) => ({
+    pid,
+    name: nameByPid.get(pid) || '',
+    memoryMb: Math.round(bytes / (1024 * 1024)),
+  }));
+
+  let devices = [];
+  if (includeDevices) {
+    const engines = Array.isArray(parsed?.engines) ? parsed.engines : [];
+    const memoryTotalBytes = Number(parsed?.memoryTotalBytes) || 0;
+    const adapters = Array.isArray(parsed?.adapters) ? parsed.adapters : [];
+    devices = [{
+      index: 0,
+      name: String(adapters[0]?.name || 'GPU'),
+      utilization: Math.min(100, Math.round(engines.reduce((total, item) => total + (Number(item?.value) || 0), 0))),
+      memoryUsedMb: Math.round([...memoryByPid.values()].reduce((total, bytes) => total + bytes, 0) / (1024 * 1024)),
+      memoryTotalMb: memoryTotalBytes > 0 ? Math.round(memoryTotalBytes / (1024 * 1024)) : null,
+      temperature: null,
+      powerWatts: null,
+    }];
+  }
+
+  return { ok: true, error: '', devices, processes, table };
+}
+
+function normalizeProcessTableRow(row) {
+  const pid = Number(row?.ProcessId ?? row?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+
+  return {
+    pid,
+    ppid: Number(row?.ParentProcessId ?? row?.ppid) || 0,
+    name: String(row?.Name ?? row?.name ?? ''),
+    commandLine: String(row?.CommandLine ?? row?.commandLine ?? ''),
+  };
+}
+
+// Windows 的程序表跟 GPU 計數器同一次 spawn 拿回來（見 sampleWindowsGpu），這裡只
+// 服務 POSIX 路徑。
+async function readPosixProcessTable() {
+  const result = await runGpuProbeCommand('ps', ['-eo', 'pid=,ppid=,comm=,args='], GPU_PROBE_TIMEOUT_MS);
+  if (!result.ok) {
+    return [];
+  }
+
+  return String(result.stdout)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/);
+      if (!match) {
+        return null;
+      }
+      return { pid: Number(match[1]), ppid: Number(match[2]), name: match[3], commandLine: match[4] };
+    })
+    .filter(Boolean);
+}
+
+// 每個專案（含 branch）的路徑都是一個歸屬候選，長路徑優先比對，才不會讓 monorepo
+// 的根目錄把底下 branch 的程序全部吃掉。
+function gpuProjectTargets(projects) {
+  const targets = [];
+  for (const project of projects) {
+    if (project?.path) {
+      targets.push({ name: project.name, projectPath: project.path, matchPath: normalizePath(project.path).toLowerCase() });
+    }
+    for (const branch of Array.isArray(project?.branches) ? project.branches : []) {
+      if (branch?.path) {
+        targets.push({ name: project.name, projectPath: project.path, matchPath: normalizePath(branch.path).toLowerCase() });
+      }
+    }
+  }
+
+  return targets.sort((left, right) => right.matchPath.length - left.matchPath.length);
+}
+
+// GPU 程序歸屬有兩條線索，依序試：
+//   1. 程序自己或它的祖先就是 ATM 啟動的專案程序（state.json 的 pid）。
+//   2. 程序或祖先的命令列 / 執行檔路徑裡出現專案路徑 —— 涵蓋使用者自己在終端跑起來、
+//      不是 ATM 管的訓練腳本。
+function attributeGpuProcesses(processes, table) {
+  const config = getConfig();
+  const projects = normalizeProjects(config.projects, config.basePort);
+  const targets = gpuProjectTargets(projects);
+  const state = getState();
+
+  const managedByPid = new Map();
+  for (const entry of Array.isArray(state?.projects) ? state.projects : []) {
+    const pid = Number(entry?.pid);
+    if (Number.isInteger(pid) && pid > 0 && entry?.path) {
+      managedByPid.set(pid, normalizePath(entry.path).toLowerCase());
+    }
+  }
+
+  const byPid = new Map(table.map((row) => [row.pid, row]));
+
+  const matchByPath = (matchPath) => targets.find((target) => target.matchPath === matchPath
+    || matchPath.startsWith(`${target.matchPath}\\`)
+    || matchPath.startsWith(`${target.matchPath}/`)) || null;
+  const matchByText = (text) => {
+    const haystack = String(text || '').toLowerCase();
+    if (!haystack) {
+      return null;
+    }
+    return targets.find((target) => haystack.includes(target.matchPath)) || null;
+  };
+
+  return processes.map((item) => {
+    let current = item.pid;
+    let match = null;
+    let name = item.name;
+
+    for (let hop = 0; hop < GPU_PROCESS_ANCESTOR_HOPS && Number.isInteger(current) && current > 0; hop += 1) {
+      const managedPath = managedByPid.get(current);
+      if (managedPath) {
+        match = matchByPath(managedPath);
+        if (match) {
+          break;
+        }
+      }
+
+      const row = byPid.get(current);
+      if (!row) {
+        break;
+      }
+      if (!name && current === item.pid) {
+        name = row.name;
+      }
+
+      match = matchByText(row.commandLine);
+      if (match) {
+        break;
+      }
+      current = row.ppid;
+    }
+
+    return {
+      pid: item.pid,
+      name: name || byPid.get(item.pid)?.name || 'process',
+      memoryMb: item.memoryMb,
+      projectName: match?.name || '',
+      projectPath: match?.projectPath || '',
+    };
+  });
+}
+
+function emptyGpuSample(source, error) {
+  return {
+    available: false,
+    source,
+    checkedAt: new Date().toISOString(),
+    error,
+    devices: [],
+    processes: [],
+  };
+}
+
+// 沒有歸屬到專案的程序（整個桌面都會佔一點 VRAM）只保留吃最多的前幾名，面板才不會
+// 變成一份工作管理員清單。
+const GPU_UNATTRIBUTED_PROCESS_LIMIT = 12;
+
+function trimGpuProcesses(processes) {
+  const owned = processes.filter((item) => item.projectName);
+  const others = processes
+    .filter((item) => !item.projectName)
+    .sort((left, right) => (Number(right.memoryMb) || 0) - (Number(left.memoryMb) || 0))
+    .slice(0, GPU_UNATTRIBUTED_PROCESS_LIMIT);
+
+  return [...owned, ...others];
+}
+
+async function collectGpuSample() {
+  const tool = resolveGpuTool();
+  if (tool.source === 'none') {
+    return emptyGpuSample(
+      'none',
+      process.platform === 'win32'
+        ? '找不到 nvidia-smi，也無法使用 Windows 效能計數器。'
+        : '找不到 nvidia-smi，無法讀取 GPU 用量。',
+    );
+  }
+
+  // Windows：per-process VRAM 一律走效能計數器。WDDM 下 nvidia-smi 的
+  // --query-compute-apps 會把整個桌面的繪圖程序都列出來，而且每一筆的記憶體都是
+  // [N/A]，拿來當「這個專案在吃 GPU」的依據只會全部誤報。
+  if (process.platform === 'win32') {
+    const powershell = tool.source === 'windows-counters' ? tool.executable : findExecutable('powershell.exe');
+    const nvidia = tool.source === 'nvidia-smi' ? await sampleNvidiaSmiDevices(tool.executable) : null;
+    if (!powershell) {
+      if (!nvidia?.ok) {
+        return emptyGpuSample(tool.source, nvidia?.error || '找不到 powershell.exe，無法讀取 GPU 用量。');
+      }
+      return {
+        available: true,
+        source: tool.source,
+        checkedAt: new Date().toISOString(),
+        error: '找不到 powershell.exe，無法取得各程序的 VRAM 佔用。',
+        devices: nvidia.devices,
+        processes: [],
+      };
+    }
+
+    const windows = await sampleWindowsGpu(powershell, { includeDevices: !nvidia?.ok });
+    if (!windows.ok && !nvidia?.ok) {
+      return emptyGpuSample(tool.source, windows.error || nvidia?.error || 'GPU 取樣失敗');
+    }
+
+    return {
+      available: true,
+      source: tool.source,
+      checkedAt: new Date().toISOString(),
+      error: windows.ok ? '' : windows.error,
+      devices: nvidia?.ok ? nvidia.devices : windows.devices,
+      processes: windows.processes.length
+        ? trimGpuProcesses(attributeGpuProcesses(windows.processes, windows.table))
+        : [],
+    };
+  }
+
+  const devices = await sampleNvidiaSmiDevices(tool.executable);
+  if (!devices.ok) {
+    return emptyGpuSample(tool.source, devices.error);
+  }
+
+  const processes = await sampleNvidiaSmiProcesses(tool.executable);
+  return {
+    available: true,
+    source: tool.source,
+    checkedAt: new Date().toISOString(),
+    error: '',
+    devices: devices.devices,
+    processes: processes.length
+      ? trimGpuProcesses(attributeGpuProcesses(processes, await readPosixProcessTable()))
+      : [],
+  };
+}
+
+// 只讀快取、不觸發取樣 —— /api/status 專用。
+function getFreshGpuSample() {
+  if (!gpuSampleCache.payload || Date.now() - gpuSampleCache.checkedAt >= GPU_SAMPLE_FRESH_MS) {
+    return null;
+  }
+  return gpuSampleCache.payload;
+}
+
+async function getGpuSample() {
+  if (gpuSampleCache.payload && Date.now() - gpuSampleCache.checkedAt < GPU_SAMPLE_TTL_MS) {
+    return gpuSampleCache.payload;
+  }
+
+  if (!gpuSampleInFlight) {
+    gpuSampleInFlight = collectGpuSample()
+      .catch((error) => emptyGpuSample('none', error.message))
+      .then((payload) => {
+        gpuSampleCache = { checkedAt: Date.now(), payload };
+        gpuSampleInFlight = null;
+        return payload;
+      });
+  }
+
+  return gpuSampleInFlight;
+}
+
+function gpuUsageForProject(sample, projectName) {
+  const processes = (sample?.processes || []).filter((item) => item.projectName === projectName);
+  if (!processes.length) {
+    return { processCount: 0, memoryMb: null, pids: [] };
+  }
+
+  const known = processes.filter((item) => Number.isFinite(item.memoryMb));
+  return {
+    processCount: processes.length,
+    memoryMb: known.length ? known.reduce((total, item) => total + item.memoryMb, 0) : null,
+    pids: processes.map((item) => item.pid),
+  };
+}
+
+// 警示燈的三態：active（正在吃 GPU）→ declared（宣告了 GPU 工具鏈但現在沒在用）→
+// none（沒偵測到）。沒有新鮮取樣時只會有 declared / none。
+function buildProjectGpuStatus(project, sample = null) {
+  const signals = projectGpuSignals(project);
+  const usage = sample?.available ? gpuUsageForProject(sample, project.name) : { processCount: 0, memoryMb: null, pids: [] };
+
+  return {
+    declared: signals.length > 0,
+    signals: signals.map((signal) => `${signal.label}（${signal.source}）`),
+    level: usage.processCount > 0 ? 'active' : (signals.length ? 'declared' : 'none'),
+    processCount: usage.processCount,
+    memoryMb: usage.memoryMb,
+    pids: usage.pids,
+    sampledAt: sample?.available ? sample.checkedAt : null,
+  };
+}
+
+const GPU_LEVEL_ORDER = { active: 0, declared: 1, none: 2 };
+
+async function getGpuPayload() {
+  const sample = await getGpuSample();
+  const config = getConfig();
+  const projects = normalizeProjects(config.projects, config.basePort);
+  syncProjectScanCache(projects);
+
+  const rows = projects
+    .map((project) => ({
+      name: project.name,
+      path: project.path,
+      ...buildProjectGpuStatus(project, sample),
+    }))
+    .sort((left, right) => {
+      const order = (GPU_LEVEL_ORDER[left.level] ?? 9) - (GPU_LEVEL_ORDER[right.level] ?? 9);
+      if (order !== 0) {
+        return order;
+      }
+      return (right.memoryMb || 0) - (left.memoryMb || 0) || left.name.localeCompare(right.name);
+    });
+
+  return { ...sample, projects: rows };
+}
+
 function findGitBashExecutable() {
   const candidates = [
     'C:\\Program Files\\Git\\bin\\bash.exe',
@@ -6318,6 +6949,9 @@ async function getStatusPayload(request = null) {
   const terminalReadOnly = !localRequest;
   const normalizedProjects = normalizeProjects(config.projects, config.basePort);
   syncProjectScanCache(normalizedProjects);
+  // 只讀最近一次 /api/gpu 的取樣結果；輪詢本身永遠不會去 spawn nvidia-smi/PowerShell。
+  const gpuTool = resolveGpuTool();
+  const gpuSample = getFreshGpuSample();
   const resolvedProjects = normalizedProjects.map((project) => {
     const entry = getStateEntryByPath(state, project.path);
     const running = Boolean(entry?.pid && processIsRunning(entry.pid));
@@ -6452,6 +7086,8 @@ async function getStatusPayload(request = null) {
         // Whether this row's own target is a frontend web app or a backend service,
         // plus any separate backend services discovered under the project.
         role: projectRoleForTarget(actionProject),
+        // GPU 警示燈：靜態宣告偵測 + 最近一次取樣裡歸屬到這個專案的程序。
+        gpu: buildProjectGpuStatus(project, gpuSample),
         backends: await resolveProjectBackends(project, state, { lanIp, tailscaleIp, tailscaleHost }),
       };
     }),
@@ -6471,6 +7107,13 @@ async function getStatusPayload(request = null) {
       terminalReadOnly,
       terminalClaudeRemoteLaunch: localRequest,
       terminalAgentRemoteLaunch: localRequest,
+      // GPU 面板要 spawn nvidia-smi/PowerShell，歸類為「執行」，只開放本機。
+      gpuMonitor: {
+        available: gpuTool.source !== 'none',
+        source: gpuTool.source,
+        local: localRequest,
+        sampledAt: gpuSample?.checkedAt || null,
+      },
       // ATM itself as a terminal target (its own install directory).
       atm: {
         name: ATM_TERMINAL_PROJECT_NAME,
@@ -6683,6 +7326,18 @@ async function handleApi(request, response, url) {
     }
 
     sendJson(response, 200, await getAiQuotaPayload());
+    return;
+  }
+
+  // GPU 取樣要 spawn nvidia-smi / PowerShell（Win32_Process 全表），跟 AI 配額探測同一
+  // 類「會執行外部程式」的 endpoint，只開放本機。
+  if (request.method === 'GET' && url.pathname === '/api/gpu') {
+    if (!isLocalRequest(request)) {
+      sendError(response, 403, 'For safety, GPU sampling is only available from http://127.0.0.1 on this computer.');
+      return;
+    }
+
+    sendJson(response, 200, await getGpuPayload());
     return;
   }
 

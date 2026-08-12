@@ -1664,6 +1664,76 @@ a.page-link:hover {
   border: 1px solid var(--info-accent-border);
 }
 
+/* 角色徽章與 GPU 警示燈共用同一個 grid 欄位 —— .project-name-heading 只有兩欄，
+   多一個直接子元素就會把展開鈕擠到第二列。 */
+.project-name-badges {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+/* GPU 警示燈：紅=正在吃 GPU、黃=宣告了 GPU 工具鏈、灰=未偵測到。 */
+.gpu-light {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  padding: 0 6px;
+  margin-left: 4px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.gpu-light.is-static {
+  cursor: default;
+}
+
+.gpu-light-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.gpu-light-none {
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  opacity: 0.7;
+}
+
+.gpu-light-declared {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border: 1px solid var(--amber-border);
+}
+
+.gpu-light-active {
+  color: var(--coral);
+  background: var(--coral-soft);
+  border: 1px solid var(--coral);
+}
+
+.gpu-light-active .gpu-light-dot {
+  animation: gpu-light-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes gpu-light-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gpu-light-active .gpu-light-dot {
+    animation: none;
+  }
+}
+
 .project-name .page-count.backend-count {
   color: var(--amber);
 }
@@ -2808,6 +2878,222 @@ tbody tr.project-backends-row td {
   color: var(--teal);
   background: var(--teal-soft);
   border: 1px solid var(--teal-border);
+}
+
+.gpu-nav-button {
+  color: var(--coral);
+  background: var(--coral-soft);
+  border: 1px solid var(--coral);
+}
+
+.gpu-modal-panel {
+  width: min(1040px, 100%);
+  display: grid;
+  gap: 12px;
+  /* max-height（不是 height）—— 定值高度會跟內部 grid 互相拉扯（見 CLAUDE.md INC-287）。 */
+  max-height: calc(100dvh - 36px);
+  overflow-y: auto;
+}
+
+.gpu-modal-heading {
+  align-items: start;
+}
+
+.gpu-modal-heading p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.gpu-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.gpu-modal-actions .copy-url {
+  width: auto;
+  padding: 0 12px;
+}
+
+.gpu-note,
+.gpu-summary {
+  min-width: 0;
+  color: var(--connection-help-text);
+  background: var(--connection-help-bg);
+  border: 1px solid var(--connection-help-border);
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.gpu-note {
+  padding: 10px 12px;
+}
+
+.gpu-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.gpu-summary span {
+  color: var(--muted);
+}
+
+.gpu-summary strong {
+  color: var(--coral);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gpu-device-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.gpu-device-card {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.gpu-device-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.gpu-device-header strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gpu-device-header span {
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+.gpu-meter {
+  display: grid;
+  gap: 4px;
+}
+
+.gpu-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.gpu-meter-head strong {
+  color: var(--text);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+.gpu-meter-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.gpu-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--teal);
+}
+
+.gpu-device-meta {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.gpu-device-meta li {
+  display: grid;
+  gap: 2px;
+}
+
+.gpu-device-meta span {
+  color: var(--muted);
+}
+
+.gpu-section {
+  display: grid;
+  gap: 6px;
+}
+
+.gpu-section h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.gpu-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.gpu-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.gpu-table th,
+.gpu-table td {
+  padding: 7px 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.gpu-table th {
+  color: var(--muted);
+  font-weight: 600;
+  background: var(--table-header-bg);
+}
+
+.gpu-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.gpu-table tr.is-focused {
+  background: var(--row-hover-bg);
+}
+
+.gpu-table .gpu-signal-cell {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gpu-empty {
+  margin: 0;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .quota-modal-panel {
@@ -5078,6 +5364,15 @@ button:disabled {
 
   .quota-card-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gpu-device-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gpu-modal-heading,
+  .gpu-modal-actions {
+    flex-wrap: wrap;
   }
 
   .terminal-claude-command {
