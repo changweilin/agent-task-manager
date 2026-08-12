@@ -111,6 +111,15 @@
             </svg>
             <span>Pipeline</span>
           </button>
+          <button class="primary-button gpu-nav-button" id="gpuMonitorButton" type="button" title="開啟 GPU 使用監控">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+              <rect x="3" y="6" width="18" height="12" rx="2" />
+              <path d="M7 10h4v4H7z" />
+              <path d="M15 10h2" />
+              <path d="M15 14h2" />
+            </svg>
+            <span>GPU</span>
+          </button>
           <button class="primary-button quota-nav-button" id="quotaMonitorButton" type="button">
             <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
               <path d="M4 19V5" />
@@ -351,6 +360,38 @@
             </button>
           </div>
           <div class="terminal-workspace" id="terminalWorkspace"></div>
+        </section>
+      </div>
+
+      <div class="modal-backdrop" id="gpuModal" hidden>
+        <section class="modal-panel gpu-modal-panel" role="dialog" aria-modal="true" aria-labelledby="gpuTitle">
+          <div class="modal-heading gpu-modal-heading">
+            <div>
+              <h2 id="gpuTitle">GPU 使用監控</h2>
+              <p>GPU 效能 / VRAM 使用量與各專案佔用</p>
+            </div>
+            <div class="gpu-modal-actions">
+              <button class="copy-url" id="refreshGpuButton" type="button">重新取樣</button>
+              <button class="copy-url" id="backToHomeFromGpu" type="button">回首頁</button>
+              <button class="icon-button" id="closeGpuModal" type="button" title="關閉" aria-label="關閉">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="gpu-note" id="gpuNote"></div>
+          <div class="gpu-summary" id="gpuSummary"></div>
+          <div class="gpu-device-grid" id="gpuDevices" aria-live="polite"></div>
+          <div class="gpu-section">
+            <h3>專案 GPU 使用</h3>
+            <div class="gpu-table-wrap" id="gpuProjects"></div>
+          </div>
+          <div class="gpu-section">
+            <h3>GPU 程序</h3>
+            <div class="gpu-table-wrap" id="gpuProcesses"></div>
+          </div>
         </section>
       </div>
 

@@ -28,6 +28,7 @@
 - **執行權限是本專案最重要的安全邊界**：所有會執行程式碼的 endpoint（`POST /api/terminals`、`terminal-agent`、`terminal-claude`、start/stop/restart、firewall）**MUST** 以 `isLocalRequest(request)` 把關，非本機回 `403`。遠端裝置僅允許：唯讀鏡像終端（WS `readOnly` 不收輸入）、讀寫 `terminal-preferences`。新增 endpoint 時 **MUST** 先歸類「執行」或「讀取/設定」並套用同一 gate。
 - Demo 模式（GitHub Pages）**MUST NOT** 發出真實請求或執行任何指令：`DEMO_MODE` 分支只吃 `demo-config.js` 假資料。app.js 新功能 **MUST** 確認在 DEMO_MODE 下被 gate。
 - AI quota 探測（`getSingleAiQuotaPayload`）會 spawn 完整 agent CLI，單次 ~25–35 秒；**MUST NOT** 放進 poll 迴圈或預設對每個 pipeline 步驟開啟。
+- GPU 取樣（`getGpuSample`）會 spawn `nvidia-smi` + PowerShell（含 `Win32_Process` 全表），單次 ~2 秒；只有 `GET /api/gpu` 會觸發。`/api/status` **MUST** 只讀 `getFreshGpuSample()` 的快取結果（20 秒內才採用），**MUST NOT** 在輪詢裡取樣。
 - client 輪詢刻意分頻（sessions 每 tick、遠端 session 探索每 4 tick、pipeline 設定同步每 6 tick）；新輪詢 **SHOULD** 掛進既有 tick，**MUST NOT** 另開 `setInterval`。
 
 ## 3. 危險模式與歷史教訓（Incident-Dated）
@@ -37,6 +38,8 @@
 - `[2026-06-23 #INC-301]` **quota reset 解析是 best-effort**：`parseQuotaResetSeconds` 用 regex 解析 `/usage` 文字輸出（"resets in 3h 21m" 等），格式隨 CLI 版本漂移；`resetSeconds` 為 null 時降級為每 60s 重探。修改時 **MUST** 保留 null fallback。
 - `[2026-06-24 #INC-305]` **ATM 自我重啟鏈**：`restartAtm()` spawn detached 替身程序（`ATM_RESTART=1`、stdio 導向 `.atm-restart.*.log`）→ 舊程序 shutdown → 新程序對 `EADDRINUSE` 重試 ~20s 搶 port。重啟後的終端/伺服器復原由 **client 端** localStorage snapshot 驅動（key `atm-resume-snapshot`、5 分 TTL），依賴「死掉的終端分頁保留 localId 變回可重啟 draft」。**MUST NOT** 改成 server 端復原而破壞這條 reload 鏈。
 - `[2026-06-22 #INC-294]` **Windows 訊號陷阱**：Git Bash 的 `kill` 無法對原生 Windows node 送出可攔截訊號；只有真 console Ctrl+C / 關窗會觸發 `shutdownAtm` 清理子程序。驗證 shutdown 邏輯 **MUST** 用真 Ctrl+C；`taskkill /F` 會遺留孤兒 dev server 佔 port。
+- `[2026-08-12 #INC-318]` **Windows 的 GPU per-process 記憶體不能信 nvidia-smi**：WDDM 下 `nvidia-smi --query-compute-apps` 會把整個桌面的繪圖程序（explorer、dwm…）都列出來，而且每一筆 `used_gpu_memory` 都是 `[N/A]`；拿它判定「這個專案在吃 GPU」會全部誤報。Windows 路徑 **MUST** 用 `\GPU Process Memory(*)\Dedicated Usage` 效能計數器取 per-PID VRAM，裝置層（使用率/總量/溫度/功耗）才用 nvidia-smi。
+- `[2026-08-12]` **GPU 程序歸屬是啟發式**：先看程序或祖先是不是 ATM 啟動的 pid（`state.json`），再比對命令列裡有沒有專案路徑（涵蓋使用者自己在終端跑的訓練腳本）。歸屬不到的程序只保留 VRAM 前 12 名。
 - **多行 prompt 進終端 MUST 用 bracketed paste**（`\x1b[200~ … \x1b[201~` 後接 `\r`），否則內嵌換行會提早送出；client 無 socket 時 fallback 為 `POST /api/terminals/:id` 帶 `{raw:true}`。
 - `dist/` 為 build 產物（GitHub Pages demo），**MUST NOT** 手改；改完 `public/` 後跑 `npm run build:pages` 重建。
 
@@ -53,7 +56,7 @@ rundev.bat               # Windows one-click launch
 - 環境變數：`DEV_DOCK_CONFIG` 覆寫 `dev-projects.json` 路徑；`ATM_RESTART=1` 僅供重啟替身程序使用，**MUST NOT** 手動設定；`ATM_TERMINALS=1` 解除「終端管理 / Pipeline 管理 / 記事本」的封存（見 §5）。
 - 標準驗證流程：`npm test` → `npm run dev` → 開 `http://127.0.0.1:8787` 手動走過改動路徑；涉及權限 gate 時，另以非 localhost 來源確認執行類 endpoint 回 `403`（冒煙測試無法偽造 socket 來源，這條只能手動驗）。
 - CI：`.github/workflows/ci.yml` 單一 workflow — `verify` job 在 windows/ubuntu 上跑 `npm ci --ignore-scripts` + `npm test`（終端功能封存時不需要 node-pty 原生建置）；`deploy` job 只在 main 的 push / 手動 dispatch 時跑 `npm run build:pages` 並發佈 GitHub Pages。PR 也會跑 `verify`。
-- `scripts/smoke.js` 目前守住：server 開得起來且 `/api/status` 合法、`isTrustedRequest` 擋掉 DNS rebinding / 跨站 Origin / `sec-fetch-site`、封存中的終端 API 與 WS 升級一律拒絕、靜態檔可服務、`dist/` 的 `AGENT_TASK_MANAGER_DEMO` 有翻成 `true` 且沒帶進 `mobile-install.js`。
+- `scripts/smoke.js` 目前守住：server 開得起來且 `/api/status` 合法（含 `manager.gpuMonitor`）、`isTrustedRequest` 擋掉 DNS rebinding / 跨站 Origin / `sec-fetch-site`、封存中的終端 API 與 WS 升級一律拒絕、`/api/gpu` 在沒有 GPU 的機器上也要快速回 200 + `available:false`、靜態檔可服務、`dist/` 的 `AGENT_TASK_MANAGER_DEMO` 有翻成 `true` 且沒帶進 `mobile-install.js`。
 
 ## 5. 已封存功能
 - `[2026-08-02]` **終端管理 / Pipeline 管理 / 記事本**（同一個面板的三個分頁）目前**封存中**，開關為 `server.js` 的 `TERMINAL_FEATURES_ENABLED`（環境變數 `ATM_TERMINALS=1` 開啟）。起因是排查「ATM 執行時影響影片播放與系統穩定性」，這三者是 ATM 最重的部分（常駐 node-pty、WebSocket 串流、每秒輪詢、pipeline 送進 agent CLI 的長工作）。
