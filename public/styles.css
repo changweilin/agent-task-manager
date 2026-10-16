@@ -1158,6 +1158,34 @@ body.is-column-reordering * {
   cursor: grabbing !important;
 }
 
+body.is-project-reordering,
+body.is-project-reordering * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+tbody tr.project-data-row.is-dragging,
+tbody tr.project-actions-row.is-dragging,
+tbody tr.project-pages-row.is-dragging {
+  opacity: 0.45;
+  background: var(--reorder-bg) !important;
+}
+
+tbody tr.project-data-row.is-dragging td.is-frozen-column,
+tbody tr.project-actions-row.is-dragging td.is-frozen-column,
+tbody tr.project-pages-row.is-dragging td.is-frozen-column {
+  background: var(--reorder-bg) !important;
+}
+
+tbody tr.is-drop-target-before > td {
+  border-top: 2px solid var(--teal) !important;
+}
+
+tbody tr.is-drop-target-after > td {
+  border-bottom: 2px solid var(--teal) !important;
+}
+
 body.is-column-resizing,
 body.is-column-resizing * {
   cursor: col-resize !important;
@@ -1353,15 +1381,56 @@ tbody tr.project-actions-row td {
 }
 
 .project-name-cell {
-  display: grid;
+  display: flex;
   align-items: center;
+  gap: 8px;
   min-width: 0;
+}
+
+.project-drag-handle {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.project-drag-handle:hover {
+  color: var(--teal);
+  background: var(--surface);
+}
+
+.project-drag-handle:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+
+.project-drag-handle svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .project-name {
   display: grid;
   gap: 3px;
   max-width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .project-name-heading {
@@ -5037,7 +5106,9 @@ button:disabled {
   }
 
   .project-name-cell {
-    grid-template-columns: minmax(0, 1fr);
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .project-name strong {

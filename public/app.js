@@ -829,6 +829,7 @@ const ROOT_REORDER_MOVE_THRESHOLD = 10;
 // pointercancel before our timer ever gets to arm the drag.
 const ROOT_REORDER_LONG_PRESS_MS = 300;
 const ROOT_REORDER_FLIP_MS = 200;
+const CUSTOM_ORDER_SORT_ID = 'custom';
 const SOURCE_ORDER_SORT_ID = 'sourceOrder';
 const STATUS_SORT_ORDER = {
   running: 0,
@@ -859,6 +860,8 @@ const state = {
   columnWidths: {},
   columnDrag: null,
   columnResize: null,
+  projectOrder: [],
+  projectDrag: null,
   sortClickTimer: null,
   suppressNextTableClick: false,
   rootPaths: [],
@@ -1194,6 +1197,12 @@ const tableColumns = [
 
 const columnsById = new Map(tableColumns.map((column) => [column.id, column]));
 const extraSortOptions = [
+  {
+    id: CUSTOM_ORDER_SORT_ID,
+    label: '自訂順序',
+    sortable: true,
+    getSortValue: (project) => projectCustomOrderIndex(project),
+  },
   {
     id: SOURCE_ORDER_SORT_ID,
     label: '\u5c08\u6848\u4f86\u6e90\u9806\u5e8f',
@@ -1957,6 +1966,7 @@ function renderProjectName(project, context = {}) {
 
   return `
     <div class="project-name-cell">
+      <button class="project-drag-handle" data-project-drag-handle data-name="${escapeHtml(project.name)}" type="button" title="拖曳調整順序" aria-label="拖曳調整 ${escapeHtml(project.name)} 的順序">${icons.grip}</button>
       <div class="project-name">
         <div class="project-name-heading">
           <strong>${escapeHtml(project.name)}</strong>
@@ -2894,6 +2904,41 @@ function compareValues(left, right) {
   });
 }
 
+function projectCustomOrderIndex(project) {
+  if (!project?.name) {
+    return 999999;
+  }
+  const index = state.projectOrder.indexOf(project.name);
+  return index >= 0 ? index : 999999;
+}
+
+function syncProjectOrderList(currentProjects = null) {
+  const allProjects = Array.isArray(state.payload?.projects) ? state.payload.projects : [];
+  const allNames = allProjects.map((p) => p.name);
+  const knownSet = new Set(allNames);
+
+  const existing = (state.projectOrder || []).filter((name) => knownSet.has(name));
+  const existingSet = new Set(existing);
+
+  const visualOrder = currentProjects || (allProjects.length ? sortedProjects(allProjects) : []);
+  const missing = [];
+  for (const p of visualOrder) {
+    const name = typeof p === 'string' ? p : p?.name;
+    if (name && !existingSet.has(name)) {
+      missing.push(name);
+      existingSet.add(name);
+    }
+  }
+  for (const name of allNames) {
+    if (!existingSet.has(name)) {
+      missing.push(name);
+      existingSet.add(name);
+    }
+  }
+
+  state.projectOrder = [...existing, ...missing];
+}
+
 function sortedProjects(projects) {
   const sortOption = sortOptionsById.get(state.sortKey) || columnsById.get('name');
   const direction = state.sortDirection === 'desc' ? -1 : 1;
@@ -2925,6 +2970,7 @@ function saveTablePreferences() {
         columnOrder: state.columnOrder,
         frozenColumnId: state.frozenColumnId,
         columnWidths: state.columnWidths,
+        projectOrder: state.projectOrder,
       }),
     );
   } catch (error) {
@@ -2964,10 +3010,14 @@ function loadTablePreferences() {
           .map(([columnId, width]) => [columnId, clampColumnWidth(width)]),
       );
     }
+    if (Array.isArray(preferences.projectOrder)) {
+      state.projectOrder = preferences.projectOrder.filter((name) => typeof name === 'string' && name.trim());
+    }
   } catch (error) {
     state.columnOrder = [...DEFAULT_COLUMN_ORDER];
     state.frozenColumnId = null;
     state.columnWidths = {};
+    state.projectOrder = [];
   }
 }
 
@@ -3244,6 +3294,264 @@ function handleColumnPointerUp(event) {
   endColumnDrag({ suppressClick: state.columnDrag.active });
 }
 
+function getProjectRowsByName(projectName) {
+  if (!elements.projectRows || !projectName) {
+    return [];
+  }
+  const safeName = cssAttrValue(projectName);
+  return Array.from(elements.projectRows.querySelectorAll(
+    `tr[data-name="${safeName}"], tr[data-actions-for="${safeName}"], tr[data-branches-for="${safeName}"], tr[data-pages-for="${safeName}"], tr[data-backends-for="${safeName}"]`
+  ));
+}
+
+function projectFromRowElement(el) {
+  if (!el) {
+    return null;
+  }
+  const dataRow = el.closest('#projectRows tr.project-data-row[data-name]');
+  if (dataRow) {
+    return dataRow.dataset.name || null;
+  }
+  const actionsRow = el.closest('#projectRows tr.project-actions-row[data-actions-for]');
+  if (actionsRow) {
+    return actionsRow.dataset.actionsFor || null;
+  }
+  const branchesRow = el.closest('#projectRows tr[data-branches-for]');
+  if (branchesRow) {
+    return branchesRow.dataset.branchesFor || null;
+  }
+  const pagesRow = el.closest('#projectRows tr[data-pages-for]');
+  if (pagesRow) {
+    return pagesRow.dataset.pagesFor || null;
+  }
+  const backendsRow = el.closest('#projectRows tr[data-backends-for]');
+  if (backendsRow) {
+    return backendsRow.dataset.backendsFor || null;
+  }
+  return null;
+}
+
+function clearProjectDragClasses() {
+  if (!elements.projectRows) {
+    return;
+  }
+  elements.projectRows.querySelectorAll('.is-dragging, .is-drop-target-before, .is-drop-target-after').forEach((el) => {
+    el.classList.remove('is-dragging', 'is-drop-target-before', 'is-drop-target-after');
+  });
+}
+
+function clearProjectDropIndicators() {
+  if (!elements.projectRows) {
+    return;
+  }
+  elements.projectRows.querySelectorAll('.is-drop-target-before, .is-drop-target-after').forEach((el) => {
+    el.classList.remove('is-drop-target-before', 'is-drop-target-after');
+  });
+}
+
+function markProjectDragging(projectName) {
+  const rows = getProjectRowsByName(projectName);
+  for (const row of rows) {
+    row.classList.add('is-dragging');
+  }
+}
+
+function autoScrollTableWrap(clientY) {
+  if (!elements.tableWrap) {
+    return;
+  }
+  const rect = elements.tableWrap.getBoundingClientRect();
+  const edgeThreshold = 44;
+  if (clientY < rect.top + edgeThreshold && clientY > rect.top - 20) {
+    elements.tableWrap.scrollTop -= 10;
+  } else if (clientY > rect.bottom - edgeThreshold && clientY < rect.bottom + 20) {
+    elements.tableWrap.scrollTop += 10;
+  }
+}
+
+function moveProjectNear(sourceName, targetName, placeAfter) {
+  if (!sourceName || !targetName || sourceName === targetName) {
+    return false;
+  }
+
+  const currentVisualProjects = sortedProjects(filteredProjects());
+  syncProjectOrderList(currentVisualProjects);
+
+  if (!state.projectOrder.includes(sourceName) || !state.projectOrder.includes(targetName)) {
+    return false;
+  }
+
+  const nextOrder = state.projectOrder.filter((name) => name !== sourceName);
+  const targetIndex = nextOrder.indexOf(targetName);
+  if (targetIndex < 0) {
+    return false;
+  }
+
+  nextOrder.splice(targetIndex + (placeAfter ? 1 : 0), 0, sourceName);
+
+  if (nextOrder.join('\n') === state.projectOrder.join('\n')) {
+    return false;
+  }
+
+  state.projectOrder = nextOrder;
+  state.sortKey = CUSTOM_ORDER_SORT_ID;
+  state.sortDirection = 'asc';
+  saveTablePreferences();
+  return true;
+}
+
+function handleProjectDragPointerDown(event) {
+  if (event.pointerType === 'mouse' && event.button !== 0) {
+    return;
+  }
+  const handle = event.target.closest('button[data-project-drag-handle]');
+  if (!handle) {
+    return;
+  }
+  const projectName = handle.dataset.name;
+  if (!projectName) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  state.projectDrag = {
+    active: false,
+    sourceName: projectName,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    lastClientX: event.clientX,
+    lastClientY: event.clientY,
+    targetName: null,
+    placeAfter: false,
+  };
+
+  handle.setPointerCapture?.(event.pointerId);
+}
+
+function updateProjectDragTarget(clientX, clientY) {
+  const drag = state.projectDrag;
+  if (!drag?.active || !elements.projectRows) {
+    return;
+  }
+
+  autoScrollTableWrap(clientY);
+
+  let targetName = null;
+  let placeAfter = false;
+
+  const hitElement = document.elementFromPoint(clientX, clientY);
+  const row = hitElement?.closest('#projectRows tr');
+  if (row) {
+    targetName = projectFromRowElement(row);
+  }
+
+  if (!targetName && elements.projectRows) {
+    const tbodyRect = elements.projectRows.getBoundingClientRect();
+    const visibleProjects = sortedProjects(filteredProjects());
+    if (visibleProjects.length) {
+      if (clientY < tbodyRect.top) {
+        targetName = visibleProjects[0].name;
+        placeAfter = false;
+      } else if (clientY > tbodyRect.bottom) {
+        targetName = visibleProjects[visibleProjects.length - 1].name;
+        placeAfter = true;
+      }
+    }
+  }
+
+  if (targetName) {
+    const targetRows = getProjectRowsByName(targetName);
+    if (targetRows.length) {
+      const firstRect = targetRows[0].getBoundingClientRect();
+      const lastRect = targetRows[targetRows.length - 1].getBoundingClientRect();
+      const midY = (firstRect.top + lastRect.bottom) / 2;
+      placeAfter = clientY > midY;
+    }
+  }
+
+  clearProjectDropIndicators();
+
+  if (targetName && targetName !== drag.sourceName) {
+    drag.targetName = targetName;
+    drag.placeAfter = placeAfter;
+
+    const targetRows = getProjectRowsByName(targetName);
+    if (targetRows.length) {
+      if (!placeAfter) {
+        targetRows[0].classList.add('is-drop-target-before');
+      } else {
+        targetRows[targetRows.length - 1].classList.add('is-drop-target-after');
+      }
+    }
+  } else {
+    drag.targetName = null;
+  }
+}
+
+function handleProjectDragPointerMove(event) {
+  const drag = state.projectDrag;
+  if (!drag || drag.pointerId !== event.pointerId) {
+    return;
+  }
+
+  const deltaX = Math.abs(event.clientX - drag.startX);
+  const deltaY = Math.abs(event.clientY - drag.startY);
+
+  if (!drag.active) {
+    if (Math.hypot(deltaX, deltaY) < 6) {
+      return;
+    }
+    drag.active = true;
+    document.body.classList.add('is-project-reordering');
+    markProjectDragging(drag.sourceName);
+  }
+
+  event.preventDefault();
+  drag.lastClientX = event.clientX;
+  drag.lastClientY = event.clientY;
+
+  updateProjectDragTarget(event.clientX, event.clientY);
+}
+
+function handleProjectDragPointerUp(event) {
+  const drag = state.projectDrag;
+  if (!drag || drag.pointerId !== event.pointerId) {
+    return;
+  }
+
+  const wasActive = drag.active;
+  const { sourceName, targetName, placeAfter } = drag;
+
+  state.projectDrag = null;
+  document.body.classList.remove('is-project-reordering');
+  clearProjectDragClasses();
+
+  if (wasActive) {
+    suppressTableClick();
+    if (targetName && targetName !== sourceName) {
+      if (moveProjectNear(sourceName, targetName, placeAfter)) {
+        showToast('已調整專案順序');
+        render();
+      }
+    }
+  }
+}
+
+function cancelProjectDrag() {
+  if (state.projectDrag) {
+    const wasActive = state.projectDrag.active;
+    state.projectDrag = null;
+    document.body.classList.remove('is-project-reordering');
+    clearProjectDragClasses();
+    if (wasActive) {
+      suppressTableClick();
+    }
+  }
+}
+
 function isMobileLayout() {
   return mobileLayoutMedia.matches;
 }
@@ -3378,7 +3686,9 @@ function render() {
   renderSortControls();
   renderColumnGroup();
   renderHeader();
-  renderRows(projects);
+  if (!state.projectDrag?.active) {
+    renderRows(projects);
+  }
   alignMobileProjectTop();
 }
 
@@ -3457,6 +3767,8 @@ function renderRows(projects) {
     .map((project) => {
       const busy = state.busy.has(project.name) || state.mobileInstallBusyProject === project.name;
       const isSelected = project.name === state.selectedName;
+      const isDragging = Boolean(state.projectDrag?.active && state.projectDrag.sourceName === project.name);
+      const draggingClass = isDragging ? 'is-dragging' : '';
       const projectPanelExpanded = !mobileLayout || state.expandedProjectNames.has(project.name);
       const panelClass = projectPanelExpanded ? 'is-panel-expanded' : 'is-panel-collapsed';
       const branchesExpanded = projectPanelExpanded && state.expandedBranchNames.has(project.name) && getProjectBranches(project).length > 0;
@@ -3471,11 +3783,12 @@ function renderRows(projects) {
         })
         .join('');
       const selectedClass = isSelected ? 'is-selected' : '';
+      const rowCombinedClass = `${selectedClass} ${draggingClass}`.trim();
       return `
-        <tr class="project-data-row ${selectedClass} ${panelClass}" data-name="${escapeHtml(project.name)}">${cells}</tr>
-        ${renderProjectBranches(project, columns.length, branchesExpanded, selectedClass)}
-        ${renderProjectPages(project, columns.length, pagesExpanded, selectedClass)}
-        <tr class="project-actions-row ${selectedClass} ${panelClass}" data-actions-for="${escapeHtml(project.name)}">
+        <tr class="project-data-row ${selectedClass} ${panelClass} ${draggingClass}" data-name="${escapeHtml(project.name)}">${cells}</tr>
+        ${renderProjectBranches(project, columns.length, branchesExpanded, rowCombinedClass)}
+        ${renderProjectPages(project, columns.length, pagesExpanded, rowCombinedClass)}
+        <tr class="project-actions-row ${selectedClass} ${panelClass} ${draggingClass}" data-actions-for="${escapeHtml(project.name)}">
           <td colspan="${columns.length}">
             <div class="project-row-actions-panel">
               ${actionsColumn.render(project, { busy })}
@@ -3483,7 +3796,7 @@ function renderRows(projects) {
             </div>
           </td>
         </tr>
-        ${renderProjectBackends(project, columns.length, projectPanelExpanded, selectedClass, { busy })}
+        ${renderProjectBackends(project, columns.length, projectPanelExpanded, rowCombinedClass, { busy })}
       `;
     })
     .join('');
@@ -10652,7 +10965,7 @@ elements.tableWrap.addEventListener(
   true,
 );
 elements.tableWrap.addEventListener('dragstart', (event) => {
-  if (!state.columnDrag?.active) {
+  if (!state.columnDrag?.active && !state.projectDrag?.active) {
     return;
   }
 
@@ -10662,19 +10975,21 @@ elements.tableWrap.addEventListener('dragstart', (event) => {
 window.addEventListener('pointermove', handleColumnPointerMove);
 window.addEventListener('pointermove', handleColumnResizePointerMove);
 window.addEventListener('pointermove', handleRootPointerMove);
+window.addEventListener('pointermove', handleProjectDragPointerMove);
 // touch-action is locked in at gesture start (pan-y, so the page can scroll before the
 // long press arms). Once armed, preventDefault() on pointermove doesn't stop Chrome/Android
 // from scrolling — only an explicit non-passive touchmove listener reliably cancels it.
 window.addEventListener(
   'touchmove',
   (event) => {
-    if (state.rootDrag?.active) {
+    if (state.rootDrag?.active || state.projectDrag?.active) {
       event.preventDefault();
     }
   },
   { passive: false },
 );
 window.addEventListener('pointerup', handleColumnPointerUp);
+window.addEventListener('pointerup', handleProjectDragPointerUp);
 window.addEventListener('pointerup', (event) => {
   if (state.rootDrag?.pointerId === event.pointerId) {
     finishRootReorder({ suppressClick: state.rootDrag.active });
@@ -10691,11 +11006,15 @@ window.addEventListener('pointercancel', (event) => {
   if (state.rootDrag?.pointerId === event.pointerId) {
     finishRootReorder({ suppressClick: state.rootDrag.active });
   }
+  if (state.projectDrag?.pointerId === event.pointerId) {
+    cancelProjectDrag();
+  }
 });
 window.addEventListener('blur', () => {
   endColumnResize({ suppressClick: state.columnResize?.active });
   endColumnDrag({ suppressClick: state.columnDrag?.active });
   finishRootReorder({ suppressClick: state.rootDrag?.active });
+  cancelProjectDrag();
 });
 window.addEventListener('resize', renderColumnGroup);
 window.addEventListener('resize', () => window.requestAnimationFrame(updateRootPathMarquees));
@@ -10716,10 +11035,12 @@ if (typeof mobileLayoutMedia.addEventListener === 'function') {
 }
 
 elements.tableWrap.addEventListener('contextmenu', (event) => {
-  if (state.columnDrag?.active || state.columnResize?.active) {
+  if (state.columnDrag?.active || state.columnResize?.active || state.projectDrag) {
     event.preventDefault();
   }
 });
+
+elements.projectRows.addEventListener('pointerdown', handleProjectDragPointerDown);
 
 elements.filterButtons.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-filter]');
@@ -10735,6 +11056,10 @@ elements.filterButtons.addEventListener('click', (event) => {
 });
 
 elements.projectRows.addEventListener('click', (event) => {
+  if (event.target.closest('button[data-project-drag-handle]')) {
+    event.stopPropagation();
+    return;
+  }
   if (event.target.closest('[data-port-input]')) {
     return;
   }
